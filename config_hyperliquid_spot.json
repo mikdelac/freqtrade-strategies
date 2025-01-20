@@ -34,6 +34,8 @@
     "download_trades": true,
     "exchange": {
         "name": "hyperliquid",
+        "walletAddress": "",
+        "privateKey": "",    
         "key": "",
         "secret": "",
         "ccxt_config": {},
