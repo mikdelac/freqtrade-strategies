@@ -1,17 +1,24 @@
 ---
-description: This rule is helpful to test learned risk management lessons
+description: This rule is helpful to test learned risk management lessonsq
 globs: 
 ---
-# [Project Name]
+# Risk Metrics Trading Strategy
 
 Every time you choose to apply a rule(s), explicitly state the rule(s) in the output. You can abbreviate the rule description to a single word or phrase.
 
 ## Project Context
-[Brief description ]
-- [more description]
-- [more description]
-- [more description]
+- Implementation of academic risk management concepts
+- Focus on VIX-based mean reversion strategies
+- Testing volatility estimation models
+- Term structure analysis of volatility
 
+## Documentation URLs
+- [Freqtrade Official Documentation](mdc:https:/www.freqtrade.io/en/latest)
+- [Freqtrade Strategies 101: A Quick Start for Strategy Development](mdc:https:/www.freqtrade.io/en/stable/strategy-101)
+- [Strategy Customization](mdc:https:/www.freqtrade.io/en/stable/strategy-customization)
+- [CBOE VIX White Paper](mdc:https:/cdn.cboe.com/api/global/us_indices/governance/VIX_Methodology.pdf)
+- [GARCH Model](mdc:https:/github.com/bashtage/arch)
+[RiskMetrics.py](mdc:strategies/RiskMetrics.py)
 ## Code Style and Structure
 - Write concise, technical TypeScript code with accurate examples
 - Use functional and declarative programming patterns; avoid classes
@@ -19,38 +26,59 @@ Every time you choose to apply a rule(s), explicitly state the rule(s) in the ou
 - Use descriptive variable names with auxiliary verbs (e.g., isLoading, hasError)
 - Structure repository files as follows:
 ```
-server/
-├── src/
-    ├── components/     # Shared React components
-    ├── hooks/          # Custom React hooks
-    ├── utils/          # Helper functions
-    ├── types/          # TypeScript types
-    └── lib/            # Shared libraries
-extension/
-├── src/
-    ├── background/     # Service worker scripts
-    ├── content/        # Content scripts
-    ├── popup/          # Extension popup UI
-    ├── options/        # Extension options page
-    ├── components/     # Shared React components
-    ├── hooks/          # Custom React hooks
-    ├── utils/          # Helper functions
-    ├── lib/            # Shared libraries
-    ├── types/          # TypeScript types
-    └── storage/        # Chrome storage utilities
-shared/
-├── src/
-    ├── types/          # TypeScript types, only used for shared types between server and extension
-    └── utils/          # Helper functions, only used for shared functions between server and extension
+user_data/
+├── strategies/
+│   ├── risk_metrics/
+│   │   ├── vix_calculator.py      # VIX calculation implementation
+│   │   ├── volatility_models.py   # Volatility estimation
+│   │   ├── position_sizing.py     # Position size calculation
+│   │   └── risk_indicators.py     # Risk metric indicators
+│   ├── RiskMetrics.py            # Main strategy implementation
+│   ├── power_tower.py            # Another strategy
+│   ├── sample_strategy.py        # Template strategy
+│   └── sample_strategy.json      # Strategy config
+├── configs/                      # Strategy configurations
+├── data/                        # Trading data
+├── freqaimodels/               # AI/ML models
+├── hyperopts/                  # Hyperparameter optimization
+├── hyperopt_results/           # Optimization results
+├── backtest_results/           # Backtesting results
+├── logs/                       # Log files
+├── notebooks/                  # Jupyter notebooks
+├── plot/                       # Strategy plots
+└── utilities/                  # Helper utilities
+```
+## Implementation Structure
+```
+user_data/
+├── strategies/
+│   ├── risk_metrics/
+│   │   ├── vix_calculator.py      # VIX calculation implementation
+│   │   ├── volatility_models.py   # Volatility estimation
+│   │   ├── position_sizing.py     # Position size calculation
+│   │   └── risk_indicators.py     # Risk metric indicators
+│   ├── RiskMetrics.py            # Main strategy implementation
+│   ├── power_tower.py            # Another strategy
+│   ├── sample_strategy.py        # Template strategy
+│   └── sample_strategy.json      # Strategy config
+├── configs/                      # Strategy configurations
+├── data/                        # Trading data
+├── freqaimodels/               # AI/ML models
+├── hyperopts/                  # Hyperparameter optimization
+├── hyperopt_results/           # Optimization results
+├── backtest_results/           # Backtesting results
+├── logs/                       # Log files
+├── notebooks/                  # Jupyter notebooks
+├── plot/                       # Strategy plots
+└── utilities/                  # Helper utilities
 ```
 
+
 ## Tech Stack
-- React
-- TypeScript
-- Tailwind CSS
-- Shadcn UI
-- Chrome Extension
-- Express.js
+- Freqtrade
+- Ta-lib
+- VIX
+- arch
 
 ## Naming Conventions
 - Use lowercase with dashes for directories (e.g., components/form-wizard)
@@ -70,20 +98,6 @@ shared/
 - Use React Context for global state when needed
 - Implement proper state persistence using chrome.storage (for extension)
 - Implement proper cleanup in useEffect hooks
-
-## Syntax and Formatting
-- Use "function" keyword for pure functions
-- Avoid unnecessary curly braces in conditionals
-- Use declarative JSX
-- Implement proper TypeScript discriminated unions for message types
-
-## UI and Styling
-- Use Shadcn UI and Radix for components
-- use `npx shadcn@latest add <component-name>` to add new shadcn components
-- Implement Tailwind CSS for styling
-- Consider extension-specific constraints (popup dimensions, permissions)
-- Follow Material Design guidelines for Chrome extensions
-- When adding new shadcn component, document the installation command
 
 ## Error Handling
 - Implement proper error boundaries
@@ -121,12 +135,6 @@ Rules:
 - Include description for non-obvious changes
 - Reference issue numbers when applicable
 
-## Documentation
-- Maintain clear README with setup instructions
-- Document API interactions and data flows
-- Keep manifest.json well-documented
-- Don't include comments unless it's for complex logic
-- Document permission requirements
 
 ## Development Workflow
 - Use proper version control
@@ -134,14 +142,6 @@ Rules:
 - Test in multiple environments
 - Follow semantic versioning for releases
 - Maintain changelog
-
-# Risk Metrics Trading Strategy
-
-## Project Context
-- Implementation of academic risk management concepts
-- Focus on VIX-based mean reversion strategies
-- Testing volatility estimation models
-- Term structure analysis of volatility
 
 ## Strategy Components
 
@@ -166,16 +166,6 @@ Rules:
    - Entry when price deviates > 2 standard deviations
    - Exit when price reverts to mean
    - Adjust thresholds based on volatility regime
-
-## Implementation Structure
-```
-strategies/
-├── risk_metrics/
-│   ├── vix_calculator.py      # VIX implementation
-│   ├── volatility_models.py   # Volatility estimation
-│   ├── position_sizing.py     # Position size calculation
-│   └── risk_indicators.py     # Risk metric indicators
-```
 
 ## Development Guidelines
 - Implement proper unit tests for VIX calculation
