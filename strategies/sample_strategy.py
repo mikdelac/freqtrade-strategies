@@ -34,6 +34,7 @@ from freqtrade.strategy import (
 # Add your lib to import here
 import talib.abstract as ta
 from technical import qtpylib
+import os  # Add this import
 
 
 # This class is a sample. Feel free to customize it.
@@ -64,7 +65,13 @@ class SampleStrategy(IStrategy):
 
     # Optimal stoploss designed for the strategy.
     # This attribute will be overridden if the config file contains "stoploss".
-    stoploss = -0.2
+    stoploss = -0.99
+
+    # Minimal ROI designed for the strategy.
+    minimal_roi = {
+        "0":  0.10
+    }
+
 
     # Trailing stoploss
     trailing_stop = False
@@ -84,8 +91,8 @@ class SampleStrategy(IStrategy):
     ignore_roi_if_entry_signal = False
 
     # Hyperoptable parameters
-    buy_rsi = IntParameter(low=1, high=50, default=30, space="buy", optimize=True, load=True)
-    sell_rsi = IntParameter(low=50, high=100, default=70, space="sell", optimize=True, load=True)
+    buy_rsi = IntParameter(low=1, high=50, default=36, space="buy", optimize=True, load=False)
+    sell_rsi = IntParameter(low=50, high=100, default=62, space="sell", optimize=True, load=False)
     short_rsi = IntParameter(low=51, high=100, default=70, space="sell", optimize=True, load=True)
     exit_short_rsi = IntParameter(low=1, high=50, default=30, space="buy", optimize=True, load=True)
 
@@ -118,6 +125,9 @@ class SampleStrategy(IStrategy):
             },
         },
     }
+
+    # Get the timeperiod from environment variable or use default value
+    RSI_TIMEPERIOD = int(os.getenv('RSI_TIMEPERIOD', 14))
 
     def informative_pairs(self):
         """
@@ -187,7 +197,10 @@ class SampleStrategy(IStrategy):
         # dataframe['cci'] = ta.CCI(dataframe)
 
         # RSI
-        dataframe["rsi"] = ta.RSI(dataframe)
+        # ------------------------------------
+        # Need to test for large and small horizon - 
+        # TODO LATER: Tobby recommend +/3 for timeperiod, so 11 for small and 17 for large
+        dataframe["rsi"] = ta.RSI(dataframe, timeperiod=self.RSI_TIMEPERIOD)
 
         # # Inverse Fisher transform on RSI: values [-1.0, 1.0] (https://goo.gl/2JGGoy)
         # rsi = 0.1 * (dataframe['rsi'] - 50)
@@ -212,12 +225,6 @@ class SampleStrategy(IStrategy):
         # stoch_rsi = ta.STOCHRSI(dataframe)
         # dataframe['fastd_rsi'] = stoch_rsi['fastd']
         # dataframe['fastk_rsi'] = stoch_rsi['fastk']
-
-        # MACD
-        macd = ta.MACD(dataframe)
-        dataframe["macd"] = macd["macd"]
-        dataframe["macdsignal"] = macd["macdsignal"]
-        dataframe["macdhist"] = macd["macdhist"]
 
         # MFI
         dataframe["mfi"] = ta.MFI(dataframe)
@@ -263,6 +270,9 @@ class SampleStrategy(IStrategy):
         # dataframe['ema21'] = ta.EMA(dataframe, timeperiod=21)
         # dataframe['ema50'] = ta.EMA(dataframe, timeperiod=50)
         # dataframe['ema100'] = ta.EMA(dataframe, timeperiod=100)
+
+        # EMA - Exponential Moving Average
+        dataframe["ema"] = ta.EMA(dataframe, timeperiod=20)
 
         # # SMA - Simple Moving Average
         # dataframe['sma3'] = ta.SMA(dataframe, timeperiod=3)
@@ -362,20 +372,18 @@ class SampleStrategy(IStrategy):
 
         dataframe.loc[
             (
-                # Signal: RSI crosses above 30 and MACD is above 0
+                # Signal: RSI crosses above 50 and price is above EMA
                 (qtpylib.crossed_above(dataframe["rsi"], self.buy_rsi.value))
-                & (dataframe["macd"] < 0)
+                & (dataframe["close"] > dataframe["ema"])
             ),
             "enter_long",
         ] = 1
 
         dataframe.loc[
             (
-                # Signal: RSI crosses above 70 and MACD is below 0
+                # Signal: RSI crosses above 50 and price is below EMA
                 (qtpylib.crossed_above(dataframe["rsi"], self.short_rsi.value))
-                & (dataframe["macd"] < 0)
-                & (dataframe["tema"] > dataframe["bb_middleband"])  # Guard: tema above BB middle
-                & (dataframe["tema"] < dataframe["tema"].shift(1))  # Guard: tema is falling
+                & (dataframe["close"] < dataframe["ema"])
                 & (dataframe["volume"] > 0)  # Make sure Volume is not 0
             ),
             "enter_short",
@@ -390,17 +398,12 @@ class SampleStrategy(IStrategy):
         :param metadata: Additional information, like the currently traded pair
         :return: DataFrame with exit columns populated
         """
-        if metadata['pair'] == 'AVAX/USDT':
-            return dataframe
 
         dataframe.loc[
             (
-                # Signal: RSI crosses above 70 and MACD is below 0
-                (qtpylib.crossed_above(dataframe["rsi"], self.sell_rsi.value))
-                & (dataframe["macd"] < 0)
-                & (qtpylib.crossed_below(dataframe["macd"], dataframe["macdsignal"]))
-                & (dataframe["tema"] > dataframe["bb_middleband"])  # Guard: tema above BB middle
-                & (dataframe["tema"] < dataframe["tema"].shift(1))  # Guard: tema is falling
+                # Signal: RSI crosses below 50 and price is below EMA
+                (qtpylib.crossed_below(dataframe["rsi"], self.sell_rsi.value))
+                & (dataframe["close"] < dataframe["ema"])
                 & (dataframe["volume"] > 0)  # Make sure Volume is not 0
             ),
             "exit_long",
@@ -408,13 +411,9 @@ class SampleStrategy(IStrategy):
 
         dataframe.loc[
             (
-                # Signal: RSI crosses above 30 and MACD is above 0
+                # Signal: RSI crosses above 50 and price is above EMA
                 (qtpylib.crossed_above(dataframe["rsi"], self.exit_short_rsi.value))
-                & (dataframe["macd"] > 0)
-                &
-                # Guard: tema below BB middle
-                (dataframe["tema"] <= dataframe["bb_middleband"])
-                & (dataframe["tema"] > dataframe["tema"].shift(1))  # Guard: tema is raising
+                & (dataframe["close"] > dataframe["ema"])
                 & (dataframe["volume"] > 0)  # Make sure Volume is not 0
             ),
             "exit_short",

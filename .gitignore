@@ -1,9 +1,3 @@
 .env
 strategies/__pycache__/
-Kraken_full_history/
-backtest_results/
-logs/
-data/
-freqaimodels/
-hyperopts/
-notebooks/
+
