@@ -101,9 +101,11 @@ class RiskMetrics(IStrategy):
     # Number of candles the strategy requires before producing valid signals
     startup_candle_count: int = 30
 
-    # Strategy parameters
+    # Trading parameters
     buy_rsi = IntParameter(10, 40, default=30, space="buy")
-    sell_rsi = IntParameter(60, 90, default=70, space="sell")# Optional order type mapping.
+    sell_rsi = IntParameter(60, 90, default=70, space="sell")
+
+    # Order settings
     order_types = {
         "entry": "limit",
         "exit": "limit",
@@ -116,17 +118,12 @@ class RiskMetrics(IStrategy):
         "entry": "GTC",
         "exit": "GTC"
     }
+
     @property
     def plot_config(self):
         return {
-            # Main plot indicators (Moving averages, ...)
-            "main_plot": {
-                "bb_middleband": {"color": "blue"},
-                "bb_upperband": {"color": "red"},
-                "bb_lowerband": {"color": "green"},
-            },
+            "main_plot": {},
             "subplots": {
-                # Subplots - each dict defines one additional plot
                 "VIX": {
                     "vix": {"color": "red"},
                 },
@@ -173,12 +170,6 @@ class RiskMetrics(IStrategy):
             
         # Base indicators needed for the strategy
         dataframe['rsi'] = ta.RSI(dataframe['close'], timeperiod=14)
-        
-        # Bollinger Bands
-        bollinger = qtpylib.bollinger_bands(qtpylib.typical_price(dataframe), window=20, stds=2)
-        dataframe['bb_lowerband'] = bollinger['lower']
-        dataframe['bb_middleband'] = bollinger['mid']
-        dataframe['bb_upperband'] = bollinger['upper']
         
         # Prepare price and volume arrays once
         close_prices = dataframe['close'].values
@@ -241,9 +232,7 @@ class RiskMetrics(IStrategy):
                           current_entry_rate: float, current_exit_rate: float,
                           current_entry_profit: float, current_exit_profit: float,
                           **kwargs) -> Optional[float]:
-        """
-        Custom position size adjustment based on risk metrics
-        """
+        """Adjust position size based on risk metrics"""
         dataframe, _ = self.dp.get_analyzed_dataframe(trade.pair, self.timeframe)
         current_candle = dataframe.iloc[-1].squeeze()
         
@@ -263,14 +252,12 @@ class RiskMetrics(IStrategy):
         dataframe.loc[:, 'enter_long'] = 0
         
         entry_conditions = (
-            (dataframe['rsi'] < 30) &  # Oversold
-            (dataframe['close'] > dataframe['bb_lowerband']) &  # Price above lower BB
+            (dataframe['rsi'] < self.buy_rsi.value) &  # Oversold
             (dataframe['combined_risk'] > 0.5) &  # Acceptable risk level
             (dataframe['volume'] > 0)  # Ensure volume exists
         )
         
         dataframe.loc[entry_conditions, 'enter_long'] = 1
-        
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
@@ -283,11 +270,9 @@ class RiskMetrics(IStrategy):
         dataframe.loc[:, 'exit_long'] = 0
         
         exit_conditions = (
-            (dataframe['rsi'] > 70) |  # Overbought
-            (dataframe['close'] < dataframe['bb_lowerband']) |  # Price below lower BB
+            (dataframe['rsi'] > self.sell_rsi.value) |  # Overbought
             (dataframe['combined_risk'] < 0.3)  # High risk environment
         )
         
         dataframe.loc[exit_conditions, 'exit_long'] = 1
-        
         return dataframe
