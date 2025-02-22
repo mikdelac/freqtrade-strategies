@@ -1,3 +1,80 @@
-.env
-strategies/__pycache__/
+# Keep result directory structures but ignore contents
+backtest_results/*
+!backtest_results/.gitkeep
+!backtest_results/*/
+backtest_results/*/*
+!backtest_results/*/.gitkeep
 
+hyperopt_results/*
+!hyperopt_results/.gitkeep
+!hyperopt_results/*/
+hyperopt_results/*/*
+!hyperopt_results/*/.gitkeep
+
+plot/*
+!plot/.gitkeep
+!plot/*/
+plot/*/*
+!plot/*/.gitkeep
+
+# Keep data folder structure but ignore data files
+data/*
+!data/.gitkeep
+!data/*/
+data/*/*
+!data/*/.gitkeep
+
+# Keep other directory structures
+hyperopts/*
+!hyperopts/.gitkeep
+logs/*
+!logs/.gitkeep
+notebooks/*
+!notebooks/.gitkeep
+strategies/__pycache__/
+freqaimodels/*
+!freqaimodels/.gitkeep
+
+# Keep specific files
+!strategies/sample_strategy.py
+# Keep result directory structures but ignore contents
+backtest_results/*
+!backtest_results/.gitkeep
+!backtest_results/*/
+backtest_results/*/*
+!backtest_results/*/.gitkeep
+
+hyperopt_results/*
+!hyperopt_results/.gitkeep
+!hyperopt_results/*/
+hyperopt_results/*/*
+!hyperopt_results/*/.gitkeep
+
+plot/*
+!plot/.gitkeep
+!plot/*/
+plot/*/*
+!plot/*/.gitkeep
+
+# Keep data folder structure but ignore data files
+data/*
+!data/.gitkeep
+!data/*/
+data/*/*
+!data/*/.gitkeep
+
+# Keep other directory structures
+hyperopts/*
+!hyperopts/.gitkeep
+logs/*
+!logs/.gitkeep
+notebooks/*
+!notebooks/.gitkeep
+strategies/__pycache__/
+freqaimodels/*
+!freqaimodels/.gitkeep
+
+# Keep specific files
+!strategies/sample_strategy.py
+Kraken_full_history/*
+.env
