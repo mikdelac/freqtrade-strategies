@@ -1,8 +1,7 @@
-
 {
     "$schema": "https://schema.freqtrade.io/schema.json",
     "max_open_trades": 3,
-    "stake_currency": "USDT",
+    "stake_currency": "USDC",
     "stake_amount": "unlimited",
     "tradable_balance_ratio": 0.99,
     "fiat_display_currency": "USD",
@@ -27,37 +26,46 @@
             "bids_to_ask_delta": 1
         }
     },
-    "exit_pricing":{
+    "exit_pricing": {
         "price_side": "same",
         "use_order_book": true,
         "order_book_top": 1
     },
-    "download_trades": true,
+    "download_trades": false,
     "exchange": {
-        "name": "kraken",
+        "name": "hyperliquid",
+        "walletAddress": "",
+        "privateKey": "",    
         "key": "",
         "secret": "",
         "ccxt_config": {},
         "ccxt_async_config": {},
         "pair_whitelist": [
-            "BTC/USDT",
-            "ETH/USDT",
-            "SOL/USDT",
-            "DOGE/USDT"
+            "PURR/USDC",
+            "LIQD/USDC",
+            "VAPOR/USDC",
+            "FRAC/USDC",
+            "TRUMP/USDC",
+            "FARM/USDC",
+            "HFUN/USDC",
+            "H/USDC",
+            "PIP/USDC",
+            "SOLV/USDC",
+            "SENT/USDC",
+            "BEATS/USDC",
+            "CATBAL/USDC",
+            "DEPIN/USDC",
+            "LAUNCH/USDC",
+            "MAGA/USDC",
+            "SPH/USDC",
+            "LQNA/USDC",
+            "JEFF/USDC",
+            "OMNIX/USDC"
         ],
-        "pair_blacklist": [
-
-        ]
+        "pair_blacklist": []
     },
     "pairlists": [
-        {"method": "StaticPairList"},
- /*       {
-            "method": "VolumePairList",
-            "number_assets": 20,
-            "sort_key": "quoteVolume",
-            "min_value": 0,
-            "refresh_period": 1800
-        } */
+        {"method": "StaticPairList"}
     ],
     "telegram": {
         "enabled": true,
