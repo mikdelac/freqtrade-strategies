@@ -52,8 +52,13 @@ class RiskMetrics(IStrategy):
     MINUTES_IN_DAY = 24 * 60
     MINUTES_PER_CANDLE = 5
     CANDLES_PER_DAY = MINUTES_IN_DAY // MINUTES_PER_CANDLE  # 288 5-min candles per day
+    TRADING_DAYS_PER_YEAR = 252
+    WEEKS_PER_MONTH = 4.33
     TRADING_DAYS_PER_WEEK = 5
     TRADING_DAYS_PER_MONTH = 22
+    HOURS_PER_DAY = 24
+    WEEKS_PER_YEAR = 52
+    MONTHS_PER_YEAR = 12
     
     # Volatility calculation constants
     DAILY_CANDLES = CANDLES_PER_DAY  # Target: 288 candles
@@ -158,7 +163,7 @@ class RiskMetrics(IStrategy):
                             ("BTC/USDT", "15m"),
                             ]
         """
-        return []
+        return [("ETH/USDC", "5m")]
 
     def _group_by_day(self, timestamps: pd.Series) -> pd.Series:
         """
@@ -174,14 +179,14 @@ class RiskMetrics(IStrategy):
 
     # Define scaling factors for different frequencies
     SCALING_FACTORS = {
-        'daily': 252,
-        'weekly': 52,
-        'monthly': 12
+        'daily': TRADING_DAYS_PER_YEAR,
+        'weekly': WEEKS_PER_YEAR,
+        'monthly': MONTHS_PER_YEAR
     }
 
     def _calculate_realized_volatility(self, returns: pd.Series, window: int) -> pd.Series:
         """
-        Calculate realized volatility using rolling standard deviation.
+        Calculate realized volatility using sum of squared returns.
         
         Args:
             returns: Series of returns
@@ -190,7 +195,14 @@ class RiskMetrics(IStrategy):
         Returns:
             Realized volatility series (non-annualized)
         """
-        return returns.rolling(window=window).std()
+        # Calculate squared returns
+        squared_returns = returns ** 2
+        
+        # Sum over the window to get realized variance
+        realized_var = squared_returns.rolling(window=window).sum()
+        
+        # Take square root to get realized volatility
+        return np.sqrt(realized_var)
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
