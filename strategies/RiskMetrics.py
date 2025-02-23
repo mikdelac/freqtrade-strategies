@@ -36,43 +36,52 @@ from freqtrade.strategy import (
 import talib.abstract as ta
 import pandas_ta as pta
 from technical import qtpylib
-from risk_metrics.vix_calculator import VIXCalculator, VIXRegime
+from arch.univariate import HARX
 from risk_metrics.volatility_models import VolatilityModel, VolatilityRegime
 
 
 class RiskMetrics(IStrategy):
     """
-    This is a strategy template to get you started.
-    More information in https://www.freqtrade.io/en/latest/strategy-customization/
-
-    You can:
-        :return: a Dataframe with all mandatory indicators for the strategies
-    - Rename the class name (Do not forget to update class_name)
-    - Add any methods you want to build your strategy
-    - Add any lib you need to build your strategy
-
-    You must keep:
-    - the lib in the section "Do not remove these libs"
-    - the methods: populate_indicators, populate_entry_trend, populate_exit_trend
-    You should keep:
-    - timeframe, minimal_roi, stoploss, trailing_*
+    RiskMetrics strategy using HAR-RV (Heterogeneous Autoregression Realized Volatility) model
+    for volatility forecasting and risk management.
     """
-    # Strategy interface version - allow new iterations of the strategy interface.
-    # Check the documentation or the Sample strategy to get the latest version.
     INTERFACE_VERSION = 3
-
-    # Optimal timeframe for the strategy.
+    
+    # Timeframe settings
     timeframe = "5m"
-
-    # Can this strategy go short?
+    MINUTES_IN_DAY = 24 * 60
+    MINUTES_PER_CANDLE = 5
+    CANDLES_PER_DAY = MINUTES_IN_DAY // MINUTES_PER_CANDLE  # 288 5-min candles per day
+    TRADING_DAYS_PER_WEEK = 5
+    TRADING_DAYS_PER_MONTH = 22
+    
+    # Volatility calculation constants
+    DAILY_CANDLES = CANDLES_PER_DAY  # Target: 288 candles
+    WEEKLY_CANDLES = CANDLES_PER_DAY * TRADING_DAYS_PER_WEEK  # Target: 1440 candles
+    MONTHLY_CANDLES = CANDLES_PER_DAY * TRADING_DAYS_PER_MONTH  # Target: 6336 candles
+    
+    # Risk thresholds - Note: These thresholds are now in terms of non-annualized volatility
+    LOW_VOL_THRESHOLD = 0.01  # Adjusted from 0.15
+    MEDIUM_VOL_THRESHOLD = 0.015  # Adjusted from 0.25
+    MIN_RISK_THRESHOLD = 0.02  # Adjusted from 0.3
+    DEFAULT_RISK_LEVEL = 0.5
+    
+    # RSI settings
+    RSI_PERIOD = 14
+    
+    # Trading parameters
     can_short: bool = False
-
+    
     # Risk parameters
-    vix_lookback = IntParameter(20, 50, default=30, space="buy", optimize=True)
+    har_lags = [1, 5, 22]  # Daily, weekly, monthly lags
     vol_window = IntParameter(10, 30, default=20, space="buy", optimize=True)
-    risk_reduction_fear = DecimalParameter(0.3, 0.7, default=0.5, space="buy", optimize=True)
-    risk_reduction_neutral = DecimalParameter(0.6, 0.9, default=0.8, space="buy", optimize=True)
-
+    risk_reduction_high = DecimalParameter(0.3, 0.7, default=0.5, space="buy", optimize=True)
+    risk_reduction_medium = DecimalParameter(0.6, 0.9, default=0.8, space="buy", optimize=True)
+    
+    # Trading parameters
+    buy_rsi = IntParameter(10, 40, default=30, space="buy")
+    sell_rsi = IntParameter(60, 90, default=70, space="sell")
+    
     # Minimal ROI designed for the strategy.
     # This attribute will be overridden if the config file contains "minimal_roi".
     minimal_roi = {
@@ -101,10 +110,6 @@ class RiskMetrics(IStrategy):
     # Number of candles the strategy requires before producing valid signals
     startup_candle_count: int = 30
 
-    # Trading parameters
-    buy_rsi = IntParameter(10, 40, default=30, space="buy")
-    sell_rsi = IntParameter(60, 90, default=70, space="sell")
-
     # Order settings
     order_types = {
         "entry": "limit",
@@ -124,8 +129,8 @@ class RiskMetrics(IStrategy):
         return {
             "main_plot": {},
             "subplots": {
-                "VIX": {
-                    "vix": {"color": "red"},
+                "VOL": {
+                    "har_vol": {"color": "red"},
                 },
                 "RISK": {
                     "risk_multiplier": {"color": "yellow"},
@@ -138,8 +143,9 @@ class RiskMetrics(IStrategy):
 
     def __init__(self, config: dict) -> None:
         super().__init__(config)
-        self.vix_calculator = VIXCalculator(lookback_period=self.vix_lookback.value)
         self.volatility_model = VolatilityModel(window_size=self.vol_window.value)
+        self.har_model = None
+        self.last_fit = None
 
     def informative_pairs(self):
         """
@@ -154,6 +160,38 @@ class RiskMetrics(IStrategy):
         """
         return []
 
+    def _group_by_day(self, timestamps: pd.Series) -> pd.Series:
+        """
+        Group timestamps by trading day
+        
+        Args:
+            timestamps: Series of timestamps
+            
+        Returns:
+            Series with day grouping
+        """
+        return pd.to_datetime(timestamps).dt.date
+
+    # Define scaling factors for different frequencies
+    SCALING_FACTORS = {
+        'daily': 252,
+        'weekly': 52,
+        'monthly': 12
+    }
+
+    def _calculate_realized_volatility(self, returns: pd.Series, window: int) -> pd.Series:
+        """
+        Calculate realized volatility using rolling standard deviation.
+        
+        Args:
+            returns: Series of returns
+            window: Rolling window size
+            
+        Returns:
+            Realized volatility series (non-annualized)
+        """
+        return returns.rolling(window=window).std()
+
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
         Adds several different TA indicators to the given DataFrame
@@ -167,62 +205,83 @@ class RiskMetrics(IStrategy):
         """
         if len(dataframe) == 0:
             return dataframe
-            
-        # Base indicators needed for the strategy
-        dataframe['rsi'] = ta.RSI(dataframe['close'], timeperiod=14)
+
+        # Calculate 5-minute returns
+        dataframe['returns'] = np.log(dataframe['close'] / dataframe['close'].shift(1))
         
-        # Prepare price and volume arrays once
-        close_prices = dataframe['close'].values
-        high_prices = dataframe['high'].values
-        low_prices = dataframe['low'].values
-        volumes = dataframe['volume'].values
+        # Calculate realized volatility for different frequencies
+        dataframe['rv_d'] = self._calculate_realized_volatility(
+            dataframe['returns'],
+            window=self.DAILY_CANDLES
+        )
+
+        dataframe['rv_w'] = self._calculate_realized_volatility(
+            dataframe['returns'],
+            window=self.WEEKLY_CANDLES
+        )
+
+        dataframe['rv_m'] = self._calculate_realized_volatility(
+            dataframe['returns'],
+            window=self.MONTHLY_CANDLES
+        )
+
+        # Fit HAR model on realized volatility using proper lags
+        if len(dataframe) >= self.MONTHLY_CANDLES:
+            try:
+                # Get end-of-day values for each RV series
+                rv_daily = dataframe.groupby(self._group_by_day(dataframe.index))['rv_d'].last().dropna()
+                rv_weekly = dataframe.groupby(self._group_by_day(dataframe.index))['rv_w'].last().dropna()
+                rv_monthly = dataframe.groupby(self._group_by_day(dataframe.index))['rv_m'].last().dropna()
+                
+                # Align the series
+                aligned_index = rv_monthly.index
+                rv_daily = rv_daily.reindex(aligned_index)
+                rv_weekly = rv_weekly.reindex(aligned_index)
+                
+                # Create HAR model with proper lags
+                x = pd.DataFrame({
+                    'rv_d': rv_daily,
+                    'rv_w': rv_weekly,
+                    'rv_m': rv_monthly
+                })
+                
+                # Fit HAR model
+                self.har_model = HARX(rv_daily, exog=x[['rv_w', 'rv_m']], lags=self.har_lags)
+                self.last_fit = self.har_model.fit(disp='off')
+                
+                # Generate one-step ahead forecast
+                forecasts = self.last_fit.forecast(horizon=1).values
+                
+                # Map the forecast back to intraday timestamps
+                dataframe['har_vol'] = np.nan
+                for day in aligned_index:
+                    day_mask = (self._group_by_day(dataframe.index) == day)
+                    if day in aligned_index:
+                        dataframe.loc[day_mask, 'har_vol'] = forecasts[aligned_index.get_loc(day)]
+                
+                # Forward fill for recent values within the same day only
+                dataframe['har_vol'] = dataframe.groupby(self._group_by_day(dataframe.index))['har_vol'].ffill()
+                
+            except Exception as e:
+                print(f"Error fitting HAR model: {e}")
+                dataframe['har_vol'] = dataframe['rv_d']
+        else:
+            dataframe['har_vol'] = dataframe['rv_d']
         
-        # Calculate VIX more efficiently
-        vix_values = []
-        for i in range(len(dataframe)):
-            end_idx = i + 1
-            start_idx = max(0, end_idx - self.vix_lookback.value)
-            data_slice = {
-                'close': close_prices[start_idx:end_idx],
-                'high': high_prices[start_idx:end_idx],
-                'low': low_prices[start_idx:end_idx],
-                'volume': volumes[start_idx:end_idx]
-            }
-            vix_values.append(self.vix_calculator.calculate_vix(data_slice))
-        dataframe['vix'] = vix_values
+        # Calculate RSI
+        dataframe['rsi'] = ta.RSI(dataframe['close'], timeperiod=self.RSI_PERIOD)
         
-        # Calculate rolling volatility
-        window = self.vol_window.value
-        returns = np.log(close_prices[1:] / close_prices[:-1])
-        volatility = []
-        
-        for i in range(len(dataframe)):
-            if i < window:
-                # For the first window periods, use available data
-                vol = np.std(returns[max(0, i-window):i]) * np.sqrt(252) if i > 0 else 0
-            else:
-                # For normal calculation, use full window
-                vol = np.std(returns[i-window:i]) * np.sqrt(252)
-            volatility.append(vol)
-            
-        dataframe['volatility'] = volatility
-        
-        # Risk multiplier based on VIX regime
-        dataframe['risk_multiplier'] = dataframe['vix'].apply(self.vix_calculator.get_risk_adjustment)
-        
-        # Combined risk metrics - vectorized calculation
-        def get_vol_risk(vol):
-            if pd.isna(vol) or not np.isfinite(vol):
-                return 0.5  # Default to medium risk for invalid values
-            
-            if vol <= 15:  # Low volatility threshold
+        # Risk multiplier based on HAR volatility regime
+        def get_risk_multiplier(vol):
+            if pd.isna(vol):
+                return self.DEFAULT_RISK_LEVEL
+            elif vol <= self.LOW_VOL_THRESHOLD:
                 return 1.0
-            elif vol <= 25:  # Medium volatility threshold
-                return 0.8
-            return 0.5  # High volatility
-            
-        vol_risks = np.array([get_vol_risk(v) for v in dataframe['volatility']])
-        dataframe['combined_risk'] = np.minimum(dataframe['risk_multiplier'].values, vol_risks)
+            elif vol <= self.MEDIUM_VOL_THRESHOLD:
+                return self.risk_reduction_medium.value
+            return self.risk_reduction_high.value
+                
+        dataframe['risk_multiplier'] = dataframe['har_vol'].apply(get_risk_multiplier)
         
         return dataframe
 
@@ -237,7 +296,7 @@ class RiskMetrics(IStrategy):
         current_candle = dataframe.iloc[-1].squeeze()
         
         # Get current risk multiplier
-        risk_multiplier = current_candle['combined_risk']
+        risk_multiplier = current_candle['risk_multiplier']
         
         # Adjust position size
         return max_stake * risk_multiplier
@@ -252,9 +311,9 @@ class RiskMetrics(IStrategy):
         dataframe.loc[:, 'enter_long'] = 0
         
         entry_conditions = (
-            (dataframe['rsi'] < self.buy_rsi.value) &  # Oversold
-            (dataframe['combined_risk'] > 0.5) &  # Acceptable risk level
-            (dataframe['volume'] > 0)  # Ensure volume exists
+            (dataframe['rsi'] < self.buy_rsi.value) &
+            (dataframe['risk_multiplier'] > self.DEFAULT_RISK_LEVEL) &
+            (dataframe['volume'] > 0)
         )
         
         dataframe.loc[entry_conditions, 'enter_long'] = 1
@@ -270,8 +329,8 @@ class RiskMetrics(IStrategy):
         dataframe.loc[:, 'exit_long'] = 0
         
         exit_conditions = (
-            (dataframe['rsi'] > self.sell_rsi.value) |  # Overbought
-            (dataframe['combined_risk'] < 0.3)  # High risk environment
+            (dataframe['rsi'] > self.sell_rsi.value) |
+            (dataframe['risk_multiplier'] < self.MIN_RISK_THRESHOLD)
         )
         
         dataframe.loc[exit_conditions, 'exit_long'] = 1
