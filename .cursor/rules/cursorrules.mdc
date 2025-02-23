@@ -9,6 +9,7 @@ Every time you choose to apply a rule(s), explicitly state the rule(s) in the ou
 ## Project Context
 - Implementation of academic risk management concepts
 - Focus on VIX-based mean reversion strategies
+- Using the realized volatility directly for trading signals or risk management within the same timeframe
 - Testing volatility estimation models
 - Term structure analysis of volatility
 
@@ -18,6 +19,7 @@ Every time you choose to apply a rule(s), explicitly state the rule(s) in the ou
 - [Strategy Customization](mdc:https:/www.freqtrade.io/en/stable/strategy-customization)
 - [CBOE VIX White Paper](mdc:https:/cdn.cboe.com/api/global/us_indices/governance/VIX_Methodology.pdf)
 - [GARCH Model](mdc:https:/github.com/bashtage/arch)
+
 [RiskMetrics.py](mdc:strategies/RiskMetrics.py)
 ## Code Style and Structure
 - Write concise, technical TypeScript code with accurate examples

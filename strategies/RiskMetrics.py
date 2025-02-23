@@ -135,7 +135,10 @@ class RiskMetrics(IStrategy):
             "main_plot": {},
             "subplots": {
                 "VOL": {
-                    "har_vol": {"color": "red"},
+                    "rv_d": {"color": "blue", "type": "line", "title": "Daily RV"},
+                    "rv_w": {"color": "green", "type": "line", "title": "Weekly RV"},
+                    "rv_m": {"color": "red", "type": "line", "title": "Monthly RV"},
+                    "har_vol": {"color": "yellow", "type": "line", "title": "HAR Forecast"},
                 },
                 "RISK": {
                     "risk_multiplier": {"color": "yellow"},
