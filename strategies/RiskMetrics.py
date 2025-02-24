@@ -66,10 +66,8 @@ class RiskMetrics(IStrategy):
     MONTHLY_CANDLES = CANDLES_PER_DAY * TRADING_DAYS_PER_MONTH  # Target: 6336 candles
     
     # Risk thresholds - Note: These thresholds are now in terms of non-annualized volatility
-    LOW_VOL_THRESHOLD = 0.01  # Adjusted from 0.15
-    MEDIUM_VOL_THRESHOLD = 0.015  # Adjusted from 0.25
-    MIN_RISK_THRESHOLD = 0.02  # Adjusted from 0.3
-    DEFAULT_RISK_LEVEL = 0.5
+    LOW_VOL_THRESHOLD = 0.01
+    MEDIUM_VOL_THRESHOLD = 0.015
     
     # RSI settings
     RSI_PERIOD = 14
@@ -78,39 +76,25 @@ class RiskMetrics(IStrategy):
     can_short: bool = False
     
     # Risk parameters
-    har_lags = [1, 5, 22]  # Daily, weekly, monthly lags
-    vol_window = IntParameter(10, 30, default=20, space="buy", optimize=True)
     risk_reduction_high = DecimalParameter(0.3, 0.7, default=0.5, space="buy", optimize=True)
     risk_reduction_medium = DecimalParameter(0.6, 0.9, default=0.8, space="buy", optimize=True)
-    
-    # Trading parameters
-    buy_rsi = IntParameter(10, 40, default=30, space="buy")
-    sell_rsi = IntParameter(60, 90, default=70, space="sell")
 
     # Minimal ROI designed for the strategy.
-    # This attribute will be overridden if the config file contains "minimal_roi".
     minimal_roi = {
-        "60": 0.01,
-        "30": 0.02,
-        "0": 0.04
+        "360": 0.15,  # Exit after 6 hours if profit is 15%
+        "240": 0.10,  # Exit after 4 hours if profit is 10%
+        "120": 0.07,  # Exit after 2 hours if profit is 7%
+        "60": 0.05,   # Exit after 1 hour if profit is 5%
+        "30": 0.03,   # Exit after 30 min if profit is 3%
+        "0": 0.02     # Exit immediately if profit is 2%
     }
 
-    # Optimal stoploss designed for the strategy.
-    # This attribute will be overridden if the config file contains "stoploss".
-    stoploss = -0.10
-
-    # Trailing stoploss
-    trailing_stop = True
-    trailing_stop_positive = 0.01
-    trailing_stop_positive_offset = 0.02
-
-    # Run "populate_indicators()" only for new candle.
-    process_only_new_candles = True
-
-    # These values can be overridden in the config.
-    use_exit_signal = True
-    exit_profit_only = False
-    ignore_roi_if_entry_signal = False
+    # Disable stoploss since we're using ROI-based exits only
+    stoploss = -1.0  # Effectively disabled
+    trailing_stop = False
+    use_exit_signal = False  # Disable exit signals since we're using ROI
+    exit_profit_only = True  # Only exit in profit
+    ignore_roi_if_entry_signal = False  # Don't ignore ROI even if we have a new entry signal
 
     # Number of candles the strategy requires before producing valid signals
     startup_candle_count: int = 30
@@ -138,7 +122,6 @@ class RiskMetrics(IStrategy):
                     "rv_d": {"color": "blue", "type": "line", "title": "Daily RV"},
                     "rv_w": {"color": "green", "type": "line", "title": "Weekly RV"},
                     "rv_m": {"color": "red", "type": "line", "title": "Monthly RV"},
-                    "har_vol": {"color": "yellow", "type": "line", "title": "HAR Forecast"},
                 },
                 "RISK": {
                     "risk_multiplier": {"color": "yellow"},
@@ -148,13 +131,6 @@ class RiskMetrics(IStrategy):
                 }
             }
         }
-
-    # Risk thresholds mapped to VolatilityRegime
-    RISK_MULTIPLIERS = {
-        VolatilityRegime.LOW: 1.0,
-        VolatilityRegime.MEDIUM: 0.8,  # Will be updated by risk_reduction_medium parameter
-        VolatilityRegime.HIGH: 0.5,    # Will be updated by risk_reduction_high parameter
-    }
     
     def __init__(self, config: dict) -> None:
         super().__init__(config)
@@ -182,7 +158,7 @@ class RiskMetrics(IStrategy):
                             ("BTC/USDT", "15m"),
                             ]
         """
-        return [("ETH/USDC", "5m")]
+        return []  # No informative pairs needed
 
     def _group_by_day(self, timestamps: pd.Series) -> pd.Series:
         """
@@ -256,58 +232,24 @@ class RiskMetrics(IStrategy):
             window=self.MONTHLY_CANDLES
         )
 
-        # Fit HAR model on realized volatility using proper lags
-        if len(dataframe) >= self.MONTHLY_CANDLES:
-            try:
-                # Get end-of-day values for each RV series
-                rv_daily = dataframe.groupby(self._group_by_day(dataframe.index))['rv_d'].last().dropna()
-                rv_weekly = dataframe.groupby(self._group_by_day(dataframe.index))['rv_w'].last().dropna()
-                rv_monthly = dataframe.groupby(self._group_by_day(dataframe.index))['rv_m'].last().dropna()
-                
-                # Align the series
-                aligned_index = rv_monthly.index
-                rv_daily = rv_daily.reindex(aligned_index)
-                rv_weekly = rv_weekly.reindex(aligned_index)
-                
-                # Create HAR model with proper lags
-                x = pd.DataFrame({
-                    'rv_d': rv_daily,
-                    'rv_w': rv_weekly,
-                    'rv_m': rv_monthly
-                })
-                
-                # Fit HAR model
-                self.har_model = HARX(rv_daily, exog=x[['rv_w', 'rv_m']], lags=self.har_lags)
-                self.last_fit = self.har_model.fit(disp='off')
-                
-                # Generate one-step ahead forecast
-                forecasts = self.last_fit.forecast(horizon=1).values
-                
-                # Map the forecast back to intraday timestamps
-                dataframe['har_vol'] = np.nan
-                for day in aligned_index:
-                    day_mask = (self._group_by_day(dataframe.index) == day)
-                    if day in aligned_index:
-                        dataframe.loc[day_mask, 'har_vol'] = forecasts[aligned_index.get_loc(day)]
-                
-                # Forward fill for recent values within the same day only
-                dataframe['har_vol'] = dataframe.groupby(self._group_by_day(dataframe.index))['har_vol'].ffill()
-                
-            except Exception as e:
-                print(f"Error fitting HAR model: {e}")
-                dataframe['har_vol'] = dataframe['rv_d']
-        else:
-            dataframe['har_vol'] = dataframe['rv_d']
+        # Calculate volatility change
+        dataframe['rv_d_change'] = dataframe['rv_d'].pct_change()
         
         # Calculate RSI
         dataframe['rsi'] = ta.RSI(dataframe['close'], timeperiod=self.RSI_PERIOD)
+        
+        # RSI crossing signals
+        dataframe['rsi_cross_30'] = (
+            (dataframe['rsi'] > 30) & 
+            (dataframe['rsi'].shift(1) <= 30)
+        )
         
         # Add regime and risk multiplier columns using volatility model
         dataframe[['vol_regime', 'risk_multiplier']] = pd.DataFrame(
             [self.volatility_model.get_regime_and_multiplier(vol) for vol in dataframe['rv_d']],
             index=dataframe.index
         )
-
+        
         return dataframe
 
     def adjust_trade_position(self, trade: Trade, current_time: datetime,
@@ -319,26 +261,22 @@ class RiskMetrics(IStrategy):
         """Adjust position size based on volatility regime"""
         dataframe, _ = self.dp.get_analyzed_dataframe(trade.pair, self.timeframe)
         current_candle = dataframe.iloc[-1].squeeze()
-        
-        # Get current risk multiplier based on volatility regime
-        risk_multiplier = current_candle['risk_multiplier']
-        
-        # Adjust position size
-        return max_stake * risk_multiplier
+        return max_stake * current_candle['risk_multiplier']
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
-        Based on TA indicators, populates the entry signal for the given dataframe
-        :param dataframe: DataFrame
-        :param metadata: Additional information, like the currently traded pair
-        :return: DataFrame with entry columns populated
+        Entry Conditions:
+        1. RSI crosses above 30
+        2. Volatility is rising (positive change)
+        3. Current volatility is above medium threshold
         """
         dataframe.loc[:, 'enter_long'] = 0
         
         entry_conditions = (
-            (dataframe['rsi'] < self.buy_rsi.value) &
-            (dataframe['vol_regime'] != VolatilityRegime.HIGH.value) &  # Don't enter in high volatility
-            (dataframe['volume'] > 0)
+            dataframe['rsi_cross_30'] &  # RSI crosses above 30
+            (dataframe['rv_d_change'] > 0.05) &  # Rising volatility
+            (dataframe['rv_d'] > self.MEDIUM_VOL_THRESHOLD) &  # Above medium threshold
+            (dataframe['volume'] > 0)  # Ensure volume
         )
         
         dataframe.loc[entry_conditions, 'enter_long'] = 1
@@ -346,17 +284,7 @@ class RiskMetrics(IStrategy):
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
-        Based on TA indicators, populates the exit signal for the given dataframe
-        :param dataframe: DataFrame
-        :param metadata: Additional information, like the currently traded pair
-        :return: DataFrame with exit columns populated
+        No exit signals since we're using ROI-based exits
         """
         dataframe.loc[:, 'exit_long'] = 0
-        
-        exit_conditions = (
-            (dataframe['rsi'] > self.sell_rsi.value) |
-            (dataframe['vol_regime'] == VolatilityRegime.HIGH.value)  # Exit on high volatility
-        )
-        
-        dataframe.loc[exit_conditions, 'exit_long'] = 1
         return dataframe
