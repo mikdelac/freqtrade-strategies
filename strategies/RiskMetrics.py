@@ -64,6 +64,7 @@ class RiskMetrics(IStrategy):
     DAILY_CANDLES = CANDLES_PER_DAY  # Target: 288 candles
     WEEKLY_CANDLES = CANDLES_PER_DAY * TRADING_DAYS_PER_WEEK  # Target: 1440 candles
     MONTHLY_CANDLES = CANDLES_PER_DAY * TRADING_DAYS_PER_MONTH  # Target: 6336 candles
+    ONE_HOUR_CANDLES = 12  # 12 candles = 60 minutes
     
     # Risk thresholds - Note: These thresholds are now in terms of non-annualized volatility
     LOW_VOL_THRESHOLD = 0.01
@@ -78,6 +79,8 @@ class RiskMetrics(IStrategy):
     # Risk parameters
     risk_reduction_high = DecimalParameter(0.3, 0.7, default=0.5, space="buy", optimize=True)
     risk_reduction_medium = DecimalParameter(0.6, 0.9, default=0.8, space="buy", optimize=True)
+    high_vol_threshold_1h = DecimalParameter(0.01, 0.05, default=0.02, space="buy", optimize=True)
+    rv_1h_change_threshold = DecimalParameter(0.05, 0.10, default=0.01, space="buy", optimize=True)
 
     # Minimal ROI designed for the strategy.
     minimal_roi = {
@@ -122,9 +125,11 @@ class RiskMetrics(IStrategy):
                     "rv_d": {"color": "blue", "type": "line", "title": "Daily RV"},
                     "rv_w": {"color": "green", "type": "line", "title": "Weekly RV"},
                     "rv_m": {"color": "red", "type": "line", "title": "Monthly RV"},
+                    "rv_1h": {"color": "purple", "type": "line", "title": "1-Hour RV"}
                 },
                 "RISK": {
                     "risk_multiplier": {"color": "yellow"},
+                    "rising_vol_1h": {"color": "magenta", "type": "line", "title": "Rising Vol"}
                 },
                 "RSI": {
                     "rsi": {"color": "orange"},
@@ -232,8 +237,17 @@ class RiskMetrics(IStrategy):
             window=self.MONTHLY_CANDLES
         )
 
+        # Calculate realized volatility for 1-hour period
+        dataframe['rv_1h'] = self._calculate_realized_volatility(
+            dataframe['returns'],
+            window=self.ONE_HOUR_CANDLES
+        )
+        
         # Calculate volatility change
         dataframe['rv_d_change'] = dataframe['rv_d'].pct_change()
+        dataframe['rv_w_change'] = dataframe['rv_w'].pct_change()
+        dataframe['rv_m_change'] = dataframe['rv_m'].pct_change()
+        dataframe['rv_1h_change'] = dataframe['rv_1h'].pct_change()
         
         # Calculate RSI
         dataframe['rsi'] = ta.RSI(dataframe['close'], timeperiod=self.RSI_PERIOD)
@@ -249,6 +263,12 @@ class RiskMetrics(IStrategy):
             [self.volatility_model.get_regime_and_multiplier(vol) for vol in dataframe['rv_d']],
             index=dataframe.index
         )
+        
+        # Mark periods of high volatility based on 1-hour realized volatility
+        dataframe['high_vol_1h'] = (dataframe['rv_1h'] > self.high_vol_threshold_1h.value).astype(int)
+        
+        # Mark periods of rising volatility based on 1-hour change threshold
+        dataframe['rising_vol_1h'] = (dataframe['rv_1h_change'] > self.rv_1h_change_threshold.value).astype(int)
         
         return dataframe
 
@@ -274,7 +294,7 @@ class RiskMetrics(IStrategy):
         
         entry_conditions = (
             dataframe['rsi_cross_30'] &  # RSI crosses above 30
-            (dataframe['rv_d_change'] > 0.05) &  # Rising volatility
+            (dataframe['rv_1h_change'] > self.rv_1h_change_threshold.value) &  # Rising volatility
             (dataframe['rv_d'] > self.MEDIUM_VOL_THRESHOLD) &  # Above medium threshold
             (dataframe['volume'] > 0)  # Ensure volume
         )
