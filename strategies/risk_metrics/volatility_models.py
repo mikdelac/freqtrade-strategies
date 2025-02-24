@@ -1,6 +1,7 @@
 from typing import List, Tuple, Optional
 import numpy as np
 from enum import Enum
+import pandas as pd
 
 class VolatilityRegime(Enum):
     LOW = "low"
@@ -8,26 +9,50 @@ class VolatilityRegime(Enum):
     HIGH = "high"
 
 class VolatilityModel:
-    def __init__(self, window_size: int = 20):
-        self.window_size = window_size
+    def __init__(self, 
+                 low_threshold: float = 0.01,
+                 medium_threshold: float = 0.015,
+                 risk_multipliers: Optional[dict] = None):
+        self.low_threshold = low_threshold
+        self.medium_threshold = medium_threshold
+        self.risk_multipliers = risk_multipliers or {
+            VolatilityRegime.LOW: 1.0,
+            VolatilityRegime.MEDIUM: 0.8,
+            VolatilityRegime.HIGH: 0.5
+        }
 
-    def detect_regime(self, prices: np.ndarray) -> VolatilityRegime:
+    def get_regime_and_multiplier(self, vol: float) -> Tuple[str, float]:
+        """
+        Determine volatility regime and corresponding risk multiplier
+        
+        Args:
+            vol: Volatility value
+            
+        Returns:
+            Tuple of (regime value, risk multiplier)
+        """
+        regime = self.detect_regime(vol)
+        return regime.value, self.risk_multipliers[regime]
+
+    def detect_regime(self, volatility: float) -> VolatilityRegime:
         """
         Detect current volatility regime
         
         Args:
-            prices: Array of historical prices
+            volatility: Volatility value
         Returns:
             VolatilityRegime: Current volatility regime
         """
-        volatility = self.calculate_volatility(prices)
-        if volatility <= 15:
+        if pd.isna(volatility):
+            return VolatilityRegime.MEDIUM
+            
+        if volatility <= self.low_threshold:
             return VolatilityRegime.LOW
-        elif volatility <= 25:
+        elif volatility <= self.medium_threshold:
             return VolatilityRegime.MEDIUM
         return VolatilityRegime.HIGH
 
     def calculate_volatility(self, prices: np.ndarray) -> float:
         """Calculate historical volatility"""
         returns = np.log(prices[1:] / prices[:-1])
-        return np.std(returns) * np.sqrt(252)  # Annualized volatility 
+        return np.std(returns) 

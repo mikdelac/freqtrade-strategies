@@ -46,7 +46,7 @@ class RiskMetrics(IStrategy):
     for volatility forecasting and risk management.
     """
     INTERFACE_VERSION = 3
-    
+
     # Timeframe settings
     timeframe = "5m"
     MINUTES_IN_DAY = 24 * 60
@@ -86,7 +86,7 @@ class RiskMetrics(IStrategy):
     # Trading parameters
     buy_rsi = IntParameter(10, 40, default=30, space="buy")
     sell_rsi = IntParameter(60, 90, default=70, space="sell")
-    
+
     # Minimal ROI designed for the strategy.
     # This attribute will be overridden if the config file contains "minimal_roi".
     minimal_roi = {
@@ -149,9 +149,25 @@ class RiskMetrics(IStrategy):
             }
         }
 
+    # Risk thresholds mapped to VolatilityRegime
+    RISK_MULTIPLIERS = {
+        VolatilityRegime.LOW: 1.0,
+        VolatilityRegime.MEDIUM: 0.8,  # Will be updated by risk_reduction_medium parameter
+        VolatilityRegime.HIGH: 0.5,    # Will be updated by risk_reduction_high parameter
+    }
+    
     def __init__(self, config: dict) -> None:
         super().__init__(config)
-        self.volatility_model = VolatilityModel(window_size=self.vol_window.value)
+        # Initialize volatility model with thresholds and risk multipliers
+        self.volatility_model = VolatilityModel(
+            low_threshold=self.LOW_VOL_THRESHOLD,
+            medium_threshold=self.MEDIUM_VOL_THRESHOLD,
+            risk_multipliers={
+                VolatilityRegime.LOW: 1.0,
+                VolatilityRegime.MEDIUM: self.risk_reduction_medium.value,
+                VolatilityRegime.HIGH: self.risk_reduction_high.value
+            }
+        )
         self.har_model = None
         self.last_fit = None
 
@@ -286,18 +302,12 @@ class RiskMetrics(IStrategy):
         # Calculate RSI
         dataframe['rsi'] = ta.RSI(dataframe['close'], timeperiod=self.RSI_PERIOD)
         
-        # Risk multiplier based on HAR volatility regime
-        def get_risk_multiplier(vol):
-            if pd.isna(vol):
-                return self.DEFAULT_RISK_LEVEL
-            elif vol <= self.LOW_VOL_THRESHOLD:
-                return 1.0
-            elif vol <= self.MEDIUM_VOL_THRESHOLD:
-                return self.risk_reduction_medium.value
-            return self.risk_reduction_high.value
-                
-        dataframe['risk_multiplier'] = dataframe['har_vol'].apply(get_risk_multiplier)
-        
+        # Add regime and risk multiplier columns using volatility model
+        dataframe[['vol_regime', 'risk_multiplier']] = pd.DataFrame(
+            [self.volatility_model.get_regime_and_multiplier(vol) for vol in dataframe['rv_d']],
+            index=dataframe.index
+        )
+
         return dataframe
 
     def adjust_trade_position(self, trade: Trade, current_time: datetime,
@@ -306,11 +316,11 @@ class RiskMetrics(IStrategy):
                           current_entry_rate: float, current_exit_rate: float,
                           current_entry_profit: float, current_exit_profit: float,
                           **kwargs) -> Optional[float]:
-        """Adjust position size based on risk metrics"""
+        """Adjust position size based on volatility regime"""
         dataframe, _ = self.dp.get_analyzed_dataframe(trade.pair, self.timeframe)
         current_candle = dataframe.iloc[-1].squeeze()
         
-        # Get current risk multiplier
+        # Get current risk multiplier based on volatility regime
         risk_multiplier = current_candle['risk_multiplier']
         
         # Adjust position size
@@ -327,7 +337,7 @@ class RiskMetrics(IStrategy):
         
         entry_conditions = (
             (dataframe['rsi'] < self.buy_rsi.value) &
-            (dataframe['risk_multiplier'] > self.DEFAULT_RISK_LEVEL) &
+            (dataframe['vol_regime'] != VolatilityRegime.HIGH.value) &  # Don't enter in high volatility
             (dataframe['volume'] > 0)
         )
         
@@ -345,7 +355,7 @@ class RiskMetrics(IStrategy):
         
         exit_conditions = (
             (dataframe['rsi'] > self.sell_rsi.value) |
-            (dataframe['risk_multiplier'] < self.MIN_RISK_THRESHOLD)
+            (dataframe['vol_regime'] == VolatilityRegime.HIGH.value)  # Exit on high volatility
         )
         
         dataframe.loc[exit_conditions, 'exit_long'] = 1
