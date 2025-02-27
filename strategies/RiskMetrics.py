@@ -38,6 +38,7 @@ import pandas_ta as pta
 from technical import qtpylib
 from arch.univariate import HARX
 from risk_metrics.volatility_models import VolatilityModel, VolatilityRegime
+from trend_analysis.trendlines import TrendAnalysis
 
 
 class RiskMetrics(IStrategy):
@@ -93,10 +94,10 @@ class RiskMetrics(IStrategy):
     }
 
     # Disable stoploss since we're using ROI-based exits only
-    stoploss = -1.0  # Effectively disabled
+    stoploss = -0.1  # Effectively disabled
     trailing_stop = False
     use_exit_signal = False  # Disable exit signals since we're using ROI
-    exit_profit_only = True  # Only exit in profit
+    exit_profit_only = False  # Only exit in profit
     ignore_roi_if_entry_signal = False  # Don't ignore ROI even if we have a new entry signal
 
     # Number of candles the strategy requires before producing valid signals
@@ -107,7 +108,7 @@ class RiskMetrics(IStrategy):
         "entry": "limit",
         "exit": "limit",
         "stoploss": "market",
-        "stoploss_on_exchange": False
+        "stoploss_on_exchange": True
     }
 
     # Optional order time in force.
@@ -119,13 +120,18 @@ class RiskMetrics(IStrategy):
     @property
     def plot_config(self):
         return {
-            "main_plot": {},
+            "main_plot": {
+                "trend_high": {"color": "green", "type": "line", "style": "dotted"},
+                "trend_low": {"color": "red", "type": "line", "style": "dotted"},
+                "trend_close": {"color": "blue", "type": "line", "style": "dotted"}
+            },
             "subplots": {
                 "VOL": {
                     "rv_d": {"color": "blue", "type": "line", "title": "Daily RV"},
                     "rv_w": {"color": "green", "type": "line", "title": "Weekly RV"},
                     "rv_m": {"color": "red", "type": "line", "title": "Monthly RV"},
-                    "rv_1h": {"color": "purple", "type": "line", "title": "1-Hour RV"}
+                    "rv_1h": {"color": "purple", "type": "line", "title": "1-Hour RV"},
+                    "rv_1h_change": {"color": "cyan", "type": "line", "title": "1h RV Change"}
                 },
                 "RISK": {
                     "risk_multiplier": {"color": "yellow"},
@@ -148,6 +154,12 @@ class RiskMetrics(IStrategy):
                 VolatilityRegime.MEDIUM: self.risk_reduction_medium.value,
                 VolatilityRegime.HIGH: self.risk_reduction_high.value
             }
+        )
+        self.trend_analyzer = TrendAnalysis(
+            min_points=10,  # Require more points for a valid trendline
+            min_slope=0.0001,
+            min_strength=0.3,  # Lower strength requirement for visualization
+            angle_threshold=90  # Allow steeper angles
         )
         self.har_model = None
         self.last_fit = None
@@ -218,6 +230,41 @@ class RiskMetrics(IStrategy):
         if len(dataframe) == 0:
             return dataframe
 
+        # Calculate trendlines
+        lookback = 200  # Use last 20 candles for trendline calculation
+        
+        # Get current trendlines for high, low, and close prices
+        high_trendline = self.trend_analyzer.get_current_trendline(dataframe, lookback, 'high')
+        low_trendline = self.trend_analyzer.get_current_trendline(dataframe, lookback, 'low')
+        close_trendline = self.trend_analyzer.get_current_trendline(dataframe, lookback, 'close')
+        
+        # Initialize trendline columns with NaN
+        dataframe['trend_high'] = np.nan
+        dataframe['trend_low'] = np.nan
+        dataframe['trend_close'] = np.nan
+        
+        # Calculate trendline values if they exist
+        if high_trendline:
+            indices = np.arange(high_trendline.start_index, high_trendline.end_index + 1)
+            normalized_indices = indices - indices[0]
+            dataframe.loc[indices, 'trend_high'] = (
+                high_trendline.slope * normalized_indices + high_trendline.intercept
+            )
+            
+        if low_trendline:
+            indices = np.arange(low_trendline.start_index, low_trendline.end_index + 1)
+            normalized_indices = indices - indices[0]
+            dataframe.loc[indices, 'trend_low'] = (
+                low_trendline.slope * normalized_indices + low_trendline.intercept
+            )
+            
+        if close_trendline:
+            indices = np.arange(close_trendline.start_index, close_trendline.end_index + 1)
+            normalized_indices = indices - indices[0]
+            dataframe.loc[indices, 'trend_close'] = (
+                close_trendline.slope * normalized_indices + close_trendline.intercept
+            )
+
         # Calculate 5-minute returns
         dataframe['returns'] = np.log(dataframe['close'] / dataframe['close'].shift(1))
         
@@ -269,7 +316,9 @@ class RiskMetrics(IStrategy):
         
         # Mark periods of rising volatility based on 1-hour change threshold
         dataframe['rising_vol_1h'] = (dataframe['rv_1h_change'] > self.rv_1h_change_threshold.value).astype(int)
-        
+
+        print(dataframe["rsi"])
+        print(dataframe["trend_high"])
         return dataframe
 
     def adjust_trade_position(self, trade: Trade, current_time: datetime,
