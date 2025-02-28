@@ -121,25 +121,12 @@ class RiskMetrics(IStrategy):
     def plot_config(self):
         return {
             "main_plot": {
-                "trend_high": {"color": "green", "type": "line", "style": "dotted"},
-                "trend_low": {"color": "red", "type": "line", "style": "dotted"},
-                "trend_close": {"color": "blue", "type": "line", "style": "dotted"}
-            },
-            "subplots": {
-                "VOL": {
-                    "rv_d": {"color": "blue", "type": "line", "title": "Daily RV"},
-                    "rv_w": {"color": "green", "type": "line", "title": "Weekly RV"},
-                    "rv_m": {"color": "red", "type": "line", "title": "Monthly RV"},
-                    "rv_1h": {"color": "purple", "type": "line", "title": "1-Hour RV"},
-                    "rv_1h_change": {"color": "cyan", "type": "line", "title": "1h RV Change"}
-                },
-                "RISK": {
-                    "risk_multiplier": {"color": "yellow"},
-                    "rising_vol_1h": {"color": "magenta", "type": "line", "title": "Rising Vol"}
-                },
-                "RSI": {
-                    "rsi": {"color": "orange"},
-                }
+                "resistance_line": {"color": "red", "type": "line"},
+                "support_line": {"color": "green", "type": "line"},
+                "all_highs": {"color": "red", "type": "scatter", "plotly": {"mode": "markers"}},
+                "all_lows": {"color": "green", "type": "scatter", "plotly": {"mode": "markers"}},
+                "resistance_points": {"color": "orange", "type": "scatter", "plotly": {"mode": "markers", "marker": {"size": 12, "symbol": "triangle-down"}}},
+                "support_points": {"color": "blue", "type": "scatter", "plotly": {"mode": "markers", "marker": {"size": 12, "symbol": "triangle-up"}}}
             }
         }
     
@@ -156,10 +143,10 @@ class RiskMetrics(IStrategy):
             }
         )
         self.trend_analyzer = TrendAnalysis(
-            min_points=10,  # Require more points for a valid trendline
-            min_slope=0.0001,
-            min_strength=0.3,  # Lower strength requirement for visualization
-            angle_threshold=90  # Allow steeper angles
+            min_points=2,  # Reduced minimum points
+            min_slope=0.00001,  # Reduced minimum slope
+            min_strength=0.2,  # Reduced strength requirement
+            angle_threshold=85  # Increased angle threshold
         )
         self.har_model = None
         self.last_fit = None
@@ -219,106 +206,100 @@ class RiskMetrics(IStrategy):
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
         Adds several different TA indicators to the given DataFrame
-
-        Performance Note: For the best performance be frugal on the number of indicators
-        you are using. Let uncomment only the indicator you are using in your strategies
-        or your hyperopt configuration, otherwise you will waste your memory and CPU usage.
-        :param dataframe: Dataframe with data from the exchange
-        :param metadata: Additional information, like the currently traded pair
-        :return: a Dataframe with all mandatory indicators for the strategies
         """
         if len(dataframe) == 0:
             return dataframe
 
-        # Calculate trendlines
-        lookback = 200  # Use last 20 candles for trendline calculation
+        # Initialize trendline columns
+        dataframe['resistance_line'] = np.nan
+        dataframe['support_line'] = np.nan
+        dataframe['resistance_points'] = np.nan
+        dataframe['support_points'] = np.nan
+        dataframe['all_highs'] = np.nan
+        dataframe['all_lows'] = np.nan
+
+        # Calculate trendlines using local maxima/minima
+        lookback = 300  # Use last 300 candles for trendline calculation
         
-        # Get current trendlines for high, low, and close prices
-        high_trendline = self.trend_analyzer.get_current_trendline(dataframe, lookback, 'high')
-        low_trendline = self.trend_analyzer.get_current_trendline(dataframe, lookback, 'low')
-        close_trendline = self.trend_analyzer.get_current_trendline(dataframe, lookback, 'close')
+        # Get recent data
+        recent_data = dataframe.tail(lookback).copy()
         
-        # Initialize trendline columns with NaN
-        dataframe['trend_high'] = np.nan
-        dataframe['trend_low'] = np.nan
-        dataframe['trend_close'] = np.nan
+        # Find all swing points first
+        prices_high = recent_data['high'].values
+        prices_low = recent_data['low'].values
         
-        # Calculate trendline values if they exist
-        if high_trendline:
-            indices = np.arange(high_trendline.start_index, high_trendline.end_index + 1)
-            normalized_indices = indices - indices[0]
-            dataframe.loc[indices, 'trend_high'] = (
-                high_trendline.slope * normalized_indices + high_trendline.intercept
+        # Get all swing points with smaller window and more points
+        all_highs = self.trend_analyzer._find_swing_points(
+            prices_high, 
+            window=3,  # Reduced window size to detect more local maxima
+            price_type='high',
+            min_points=2  # Reduced minimum points
+        )
+        all_lows = self.trend_analyzer._find_swing_points(
+            prices_low, 
+            window=3,  # Reduced window size to detect more local minima
+            price_type='low',
+            min_points=2  # Reduced minimum points
+        )
+        
+        # Mark all detected swing points
+        for idx, price in all_highs:
+            dataframe.loc[len(dataframe) - lookback + idx, 'all_highs'] = price
+            
+        for idx, price in all_lows:
+            dataframe.loc[len(dataframe) - lookback + idx, 'all_lows'] = price
+        
+        # Find resistance trendlines using highs
+        resistance_lines = self.trend_analyzer.find_trendlines(
+            recent_data, 
+            window=lookback,
+            price_type='high',
+            min_points=2  # Reduced minimum points for trendlines
+        )
+        
+        # Find support trendlines using lows
+        support_lines = self.trend_analyzer.find_trendlines(
+            recent_data, 
+            window=lookback,
+            price_type='low',
+            min_points=2  # Reduced minimum points for trendlines
+        )
+        
+        # Plot the strongest resistance and support lines
+        if resistance_lines:
+            resistance = max(resistance_lines, key=lambda t: t.strength)
+            start_idx = len(dataframe) - lookback + resistance.start_index
+            end_idx = len(dataframe) - lookback + resistance.end_index
+            
+            # Plot resistance line
+            indices = np.arange(start_idx, end_idx + 1)
+            normalized_indices = np.arange(len(indices))
+            dataframe.loc[indices, 'resistance_line'] = (
+                resistance.slope * normalized_indices + resistance.intercept
             )
             
-        if low_trendline:
-            indices = np.arange(low_trendline.start_index, low_trendline.end_index + 1)
-            normalized_indices = indices - indices[0]
-            dataframe.loc[indices, 'trend_low'] = (
-                low_trendline.slope * normalized_indices + low_trendline.intercept
+            # Mark resistance points
+            for idx, price in [(len(dataframe) - lookback + i, p) 
+                             for i, p in resistance.validation_points]:
+                dataframe.loc[idx, 'resistance_points'] = price
+            
+        if support_lines:
+            support = max(support_lines, key=lambda t: t.strength)
+            start_idx = len(dataframe) - lookback + support.start_index
+            end_idx = len(dataframe) - lookback + support.end_index
+            
+            # Plot support line
+            indices = np.arange(start_idx, end_idx + 1)
+            normalized_indices = np.arange(len(indices))
+            dataframe.loc[indices, 'support_line'] = (
+                support.slope * normalized_indices + support.intercept
             )
             
-        if close_trendline:
-            indices = np.arange(close_trendline.start_index, close_trendline.end_index + 1)
-            normalized_indices = indices - indices[0]
-            dataframe.loc[indices, 'trend_close'] = (
-                close_trendline.slope * normalized_indices + close_trendline.intercept
-            )
+            # Mark support points
+            for idx, price in [(len(dataframe) - lookback + i, p) 
+                             for i, p in support.validation_points]:
+                dataframe.loc[idx, 'support_points'] = price
 
-        # Calculate 5-minute returns
-        dataframe['returns'] = np.log(dataframe['close'] / dataframe['close'].shift(1))
-        
-        # Calculate realized volatility for different frequencies
-        dataframe['rv_d'] = self._calculate_realized_volatility(
-            dataframe['returns'],
-            window=self.DAILY_CANDLES
-        )
-
-        dataframe['rv_w'] = self._calculate_realized_volatility(
-            dataframe['returns'],
-            window=self.WEEKLY_CANDLES
-        )
-
-        dataframe['rv_m'] = self._calculate_realized_volatility(
-            dataframe['returns'],
-            window=self.MONTHLY_CANDLES
-        )
-
-        # Calculate realized volatility for 1-hour period
-        dataframe['rv_1h'] = self._calculate_realized_volatility(
-            dataframe['returns'],
-            window=self.ONE_HOUR_CANDLES
-        )
-        
-        # Calculate volatility change
-        dataframe['rv_d_change'] = dataframe['rv_d'].pct_change()
-        dataframe['rv_w_change'] = dataframe['rv_w'].pct_change()
-        dataframe['rv_m_change'] = dataframe['rv_m'].pct_change()
-        dataframe['rv_1h_change'] = dataframe['rv_1h'].pct_change()
-        
-        # Calculate RSI
-        dataframe['rsi'] = ta.RSI(dataframe['close'], timeperiod=self.RSI_PERIOD)
-        
-        # RSI crossing signals
-        dataframe['rsi_cross_30'] = (
-            (dataframe['rsi'] > 30) & 
-            (dataframe['rsi'].shift(1) <= 30)
-        )
-        
-        # Add regime and risk multiplier columns using volatility model
-        dataframe[['vol_regime', 'risk_multiplier']] = pd.DataFrame(
-            [self.volatility_model.get_regime_and_multiplier(vol) for vol in dataframe['rv_d']],
-            index=dataframe.index
-        )
-        
-        # Mark periods of high volatility based on 1-hour realized volatility
-        dataframe['high_vol_1h'] = (dataframe['rv_1h'] > self.high_vol_threshold_1h.value).astype(int)
-        
-        # Mark periods of rising volatility based on 1-hour change threshold
-        dataframe['rising_vol_1h'] = (dataframe['rv_1h_change'] > self.rv_1h_change_threshold.value).astype(int)
-
-        print(dataframe["rsi"])
-        print(dataframe["trend_high"])
         return dataframe
 
     def adjust_trade_position(self, trade: Trade, current_time: datetime,
@@ -334,26 +315,14 @@ class RiskMetrics(IStrategy):
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
-        Entry Conditions:
-        1. RSI crosses above 30
-        2. Volatility is rising (positive change)
-        3. Current volatility is above medium threshold
+        Entry signal is always 0 since we're just visualizing points
         """
         dataframe.loc[:, 'enter_long'] = 0
-        
-        entry_conditions = (
-            dataframe['rsi_cross_30'] &  # RSI crosses above 30
-            (dataframe['rv_1h_change'] > self.rv_1h_change_threshold.value) &  # Rising volatility
-            (dataframe['rv_d'] > self.MEDIUM_VOL_THRESHOLD) &  # Above medium threshold
-            (dataframe['volume'] > 0)  # Ensure volume
-        )
-        
-        dataframe.loc[entry_conditions, 'enter_long'] = 1
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
-        No exit signals since we're using ROI-based exits
+        Exit signal is always 0 since we're just visualizing points
         """
         dataframe.loc[:, 'exit_long'] = 0
         return dataframe

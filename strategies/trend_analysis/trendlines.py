@@ -18,6 +18,7 @@ class Trendline:
     direction: TrendDirection
     strength: float  # R-squared value
     price_type: str  # 'high' or 'low'
+    validation_points: List[Tuple[int, float]] = None
     
 class TrendAnalysis:
     def __init__(self, 
@@ -100,17 +101,84 @@ class TrendAnalysis:
             
         return True
         
+    def _find_swing_points(self, 
+                        prices: np.ndarray, 
+                        window: int = 5,
+                        price_type: str = 'high',
+                        min_points: int = 3) -> List[Tuple[int, float]]:
+        """
+        Find local maxima or minima in price data using peak detection.
+        
+        Args:
+            prices: Array of price values
+            window: Window size for finding swings
+            price_type: 'high' for swing highs, 'low' for swing lows
+            min_points: Minimum number of points to return
+            
+        Returns:
+            List of (index, price) tuples for swing points
+        """
+        if len(prices) < window:
+            return []
+
+        # Initialize arrays for peak detection
+        swing_points = []
+        half_window = window // 2
+        
+        # Function to check if a point is a local maximum/minimum
+        def is_extreme_point(idx, window_size):
+            if idx < window_size or idx >= len(prices) - window_size:
+                return False
+                
+            window_slice = prices[idx - window_size:idx + window_size + 1]
+            if price_type == 'high':
+                # For maxima, check if center point is highest
+                return prices[idx] == max(window_slice)
+            else:
+                # For minima, check if center point is lowest
+                return prices[idx] == min(window_slice)
+
+        # Find all potential swing points
+        for i in range(half_window, len(prices) - half_window):
+            if is_extreme_point(i, half_window):
+                swing_points.append((i, prices[i]))
+
+        # If we don't have enough points, try with smaller window
+        if len(swing_points) < min_points:
+            smaller_window = max(2, window - 2)
+            return self._find_swing_points(prices, smaller_window, price_type, min_points)
+
+        # Sort points by price value (descending for highs, ascending for lows)
+        swing_points.sort(key=lambda x: x[1], reverse=(price_type == 'high'))
+        
+        # Select the most extreme points that are well-distributed
+        selected_points = []
+        min_distance = len(prices) // (min_points * 2)  # Minimum distance between points
+        
+        for point in swing_points:
+            # Check if point is far enough from already selected points
+            selected_points.append(point)
+            #if not selected_points or all(abs(point[0] - p[0]) >= min_distance for p in selected_points):
+            #    selected_points.append(point)
+            #    if len(selected_points) >= min_points:
+            #        break
+                    
+        # Sort points by time index for connecting
+        return sorted(selected_points, key=lambda x: x[0])
+
     def find_trendlines(self, 
                      dataframe: pd.DataFrame, 
                      window: int = 20,
-                     price_type: str = 'close') -> List[Trendline]:
+                     price_type: str = 'close',
+                     min_points: int = 3) -> List[Trendline]:
         """
-        Find potential trendlines in the given price data.
+        Find potential trendlines by connecting local maxima/minima.
         
         Args:
             dataframe: DataFrame with price data
             window: Rolling window size for trendline detection
             price_type: Which price to use ('high', 'low', 'close')
+            min_points: Minimum number of points to form a trendline
             
         Returns:
             List of detected Trendline objects
@@ -119,31 +187,58 @@ class TrendAnalysis:
         prices = dataframe[price_type].values
         indices = np.arange(len(prices))
         
-        for i in range(len(prices) - window + 1):
-            window_prices = prices[i:i+window]
-            window_indices = indices[i:i+window]
+        # Find swing points
+        swing_points = self._find_swing_points(prices, window=5, price_type=price_type, min_points=min_points)
+        
+        if len(swing_points) < min_points:
+            return []
             
-            # Calculate trendline parameters
-            slope, intercept, strength = self._calculate_linear_regression(
-                window_indices, 
-                window_prices
-            )
-            
-            if self._is_valid_trendline(slope, strength, len(window_prices)):
-                direction = (TrendDirection.UP if slope > 0 
-                           else TrendDirection.DOWN if slope < 0 
-                           else TrendDirection.SIDEWAYS)
+        # Try connecting different combinations of swing points
+        for i in range(len(swing_points) - 1):
+            for j in range(i + 1, len(swing_points)):
+                start_idx, start_price = swing_points[i]
+                end_idx, end_price = swing_points[j]
                 
-                trendline = Trendline(
-                    start_index=i,
-                    end_index=i+window-1,
-                    slope=slope,
-                    intercept=intercept,
-                    direction=direction,
-                    strength=strength,
-                    price_type=price_type
-                )
-                trendlines.append(trendline)
+                # Calculate trendline parameters
+                x = np.array([start_idx, end_idx])
+                y = np.array([start_price, end_price])
+                slope, intercept = np.polyfit(x, y, 1)
+                
+                # Check angle
+                angle = abs(np.degrees(np.arctan(slope)))
+                if angle > self.angle_threshold:
+                    continue
+                    
+                # Find validation points between these two points
+                validation_points = []
+                for k in range(len(swing_points)):
+                    if k != i and k != j:  # Skip the endpoints
+                        idx, price = swing_points[k]
+                        if start_idx < idx < end_idx:  # Only consider points between endpoints
+                            expected_price = slope * idx + intercept
+                            deviation = abs(price - expected_price) / price
+                            if deviation <= 0.02:  # 2% tolerance
+                                validation_points.append((idx, price))
+                
+                # Calculate strength based on number of validation points
+                strength = len(validation_points) / (end_idx - start_idx)
+                
+                if strength >= self.min_strength:
+                    direction = (TrendDirection.UP if slope > 0 
+                               else TrendDirection.DOWN if slope < 0 
+                               else TrendDirection.SIDEWAYS)
+                    
+                    trendline = Trendline(
+                        start_index=start_idx,
+                        end_index=end_idx,
+                        slope=slope,
+                        intercept=intercept,
+                        direction=direction,
+                        strength=strength,
+                        price_type=price_type,
+                        validation_points=validation_points
+                    )
+                    trendlines.append(trendline)
         
         return trendlines
         
