@@ -26,7 +26,8 @@ class TrendAnalysis:
                 min_points: int = 5,
                 min_slope: float = 0.0001,
                 min_strength: float = 0.8, #was 0.8
-                angle_threshold: float = 45):
+                angle_threshold: float = 45,
+                atr_threshold: float = 0.02):  # New ATR threshold parameter
         """
         Initialize TrendAnalysis with parameters for trendline detection.
         
@@ -35,11 +36,13 @@ class TrendAnalysis:
             min_slope: Minimum absolute slope to consider for a trendline
             min_strength: Minimum R-squared value to consider a valid trendline
             angle_threshold: Maximum angle in degrees for valid trendlines
+            atr_threshold: Minimum ATR value to confirm significant swing points
         """
         self.min_points = min_points
         self.min_slope = min_slope
         self.min_strength = min_strength
         self.angle_threshold = angle_threshold
+        self.atr_threshold = atr_threshold  # Store ATR threshold
         
     def _calculate_linear_regression(self, x: np.ndarray, y: np.ndarray) -> Tuple[float, float, float]:
         """
@@ -107,9 +110,10 @@ class TrendAnalysis:
                     window: int = 5,
                     price_type: str = 'high',
                     min_points: int = 3,
-                    distance: int = None) -> List[Tuple[int, float]]:
+                    distance: int = None,
+                    atr_values: np.ndarray = None) -> List[Tuple[int, float]]:
         """
-        Find swing high or low points in the price array.
+        Find swing high or low points in the price array using scipy.signal.find_peaks.
         
         Args:
             prices: Array of price values
@@ -117,6 +121,7 @@ class TrendAnalysis:
             price_type: Type of price to examine ('high' or 'low')
             min_points: Minimum number of points to identify, used only for recursive calls
             distance: Minimum horizontal distance between peaks (if None, derived from window)
+            atr_values: Array of ATR values corresponding to each price point for significance filtering
 
         Returns:
             List of tuples containing (index, price) of swing points
@@ -138,7 +143,6 @@ class TrendAnalysis:
             # Find peaks (local maxima)
             peaks, _ = find_peaks(prices, distance=distance, prominence=prominence)
             swing_points = [(int(idx), float(prices[idx])) for idx in peaks]
-            print("high swing_points: ", swing_points)
         else:  # For 'low' prices
             # For valleys (local minima), invert the signal but keep original price values
             peaks, _ = find_peaks(-prices, distance=distance, prominence=prominence)
@@ -147,16 +151,97 @@ class TrendAnalysis:
         # If we don't have enough points, try with smaller distance
         if len(swing_points) < min_points and distance > 1:
             smaller_distance = max(1, distance - 1)
-            return self._find_swing_points(prices, window, price_type, min_points, smaller_distance)
+            return self._find_swing_points(prices, window, price_type, min_points, smaller_distance, atr_values)
+        
+        # Filter by ATR significance if provided
+        if atr_values is not None and len(atr_values) > 0:
+            swing_points = self._filter_by_atr_significance(prices, swing_points, atr_values, price_type)
             
         # Sort points by time index
         return sorted(swing_points, key=lambda x: x[0])
+        
+    def _filter_by_atr_significance(self, 
+                              prices: np.ndarray, 
+                              swing_points: List[Tuple[int, float]], 
+                              atr_values: np.ndarray,
+                              price_type: str,
+                              atr_multiplier: float = 1.0) -> List[Tuple[int, float]]:
+        """
+        Filter swing points to include only those with price movements significant compared to their candle's ATR.
+        
+        Args:
+            prices: Original price array
+            swing_points: List of (index, price) tuples representing swing points
+            atr_values: Array of ATR values for each candle
+            price_type: Type of price ('high' or 'low')
+            atr_multiplier: Multiplier for ATR threshold (default: 1.0)
+            
+        Returns:
+            Filtered list of swing points with significant price swings
+        """
+        if not swing_points or len(atr_values) == 0:
+            return swing_points
+            
+        significant_points = []
+        
+        for i, (idx, price) in enumerate(swing_points):
+            # Ensure index is valid for ATR array
+            if idx >= len(atr_values):
+                continue
+                
+            # Get ATR value for this specific candle
+            current_atr = atr_values[idx]
+            if current_atr <= 0:
+                continue
+                
+            min_price_change = current_atr * atr_multiplier
+            
+            # Check significance against neighbors
+            is_significant = True
+            
+            # Check left neighbors (previous price points)
+            if idx > 0:
+                # Calculate how many points to look back
+                lookback = min(5, idx)  # Look back up to 5 points or to the start
+                left_min = np.min(prices[idx-lookback:idx])
+                left_max = np.max(prices[idx-lookback:idx])
+                
+                if price_type == 'high':
+                    # For high points, check if it's significantly higher than nearby points
+                    if price - left_max < min_price_change:
+                        is_significant = False
+                else:
+                    # For low points, check if it's significantly lower than nearby points
+                    if left_min - price < min_price_change:
+                        is_significant = False
+            
+            # Check right neighbors (next price points)
+            if idx < len(prices) - 1:
+                # Calculate how many points to look ahead
+                lookahead = min(5, len(prices) - idx - 1)  # Look ahead up to 5 points or to the end
+                right_min = np.min(prices[idx+1:idx+lookahead+1])
+                right_max = np.max(prices[idx+1:idx+lookahead+1])
+                
+                if price_type == 'high':
+                    # For high points, check if it's significantly higher than nearby points
+                    if price - right_max < min_price_change:
+                        is_significant = False
+                else:
+                    # For low points, check if it's significantly lower than nearby points
+                    if right_min - price < min_price_change:
+                        is_significant = False
+            
+            if is_significant:
+                significant_points.append((idx, price))
+        
+        return significant_points
 
     def find_trendlines(self, 
                      dataframe: pd.DataFrame, 
                      window: int = 20,
                      price_type: str = 'close',
-                     min_points: int = 3) -> List[Trendline]:
+                     min_points: int = 3,
+                     atr_values: np.ndarray = None) -> List[Trendline]:
         """
         Find potential trendlines by connecting local maxima/minima.
         
@@ -165,6 +250,7 @@ class TrendAnalysis:
             window: Rolling window size for trendline detection
             price_type: Which price to use ('high', 'low', 'close')
             min_points: Minimum number of points to form a trendline
+            atr_values: Optional array of ATR values for filtering significant swing points
             
         Returns:
             List of detected Trendline objects
@@ -174,7 +260,13 @@ class TrendAnalysis:
         indices = np.arange(len(prices))
         
         # Find swing points
-        swing_points = self._find_swing_points(prices, window=5, price_type=price_type, min_points=min_points)
+        swing_points = self._find_swing_points(
+            prices, 
+            window=5, 
+            price_type=price_type, 
+            min_points=min_points,
+            atr_values=atr_values
+        )
         
         if len(swing_points) < min_points:
             return []

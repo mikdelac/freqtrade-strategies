@@ -123,6 +123,13 @@ class RiskMetrics(IStrategy):
             "main_plot": {
                 "all_highs": {"color": "red", "type": "scatter"},
                 "all_lows": {"color": "green", "type": "scatter"},
+                "resistance_points": {"color": "orange", "type": "scatter"},
+                "support_points": {"color": "blue", "type": "scatter"}
+            },
+            "subplots": {
+                "ATR": {
+                    "atr": {"color": "blue"}
+                }
             }
         }
     
@@ -201,10 +208,13 @@ class RiskMetrics(IStrategy):
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
-        Adds several different TA indicators to the given DataFrame
+        Adds several different TA indicators to the given DataFrame, including ATR.
         """
         if len(dataframe) == 0:
             return dataframe
+        
+        # Calculate ATR and store it for visualization
+        dataframe['atr'] = self.volatility_model.calculate_atr(dataframe)
 
         # Initialize trendline columns
         dataframe['resistance_line'] = np.nan
@@ -224,18 +234,23 @@ class RiskMetrics(IStrategy):
         prices_high = recent_data['high'].values
         prices_low = recent_data['low'].values
         
+        # Get ATR for the recent data
+        atr_values = recent_data['atr'].values  # Use already calculated ATR values
+        
         # Get all swing points with smaller window and more points
         all_highs = self.trend_analyzer._find_swing_points(
             prices_high, 
             window=10,  
             price_type='high',
-            distance=20  # Direct control over minimum distance between peaks
+            distance=5,  # Direct control over minimum distance between peaks
+            #atr_values=atr_values  # Pass entire ATR array for candle-specific filtering
         )
         all_lows = self.trend_analyzer._find_swing_points(
             prices_low, 
             window=10,  
             price_type='low',
-            distance=20  # Direct control over minimum distance between peaks
+            distance=5,  # Direct control over minimum distance between peaks
+            #atr_values=atr_values  # Pass entire ATR array for candle-specific filtering
         )
         
         # Mark all detected swing points
@@ -250,7 +265,8 @@ class RiskMetrics(IStrategy):
             recent_data, 
             window=lookback,
             price_type='high',
-            min_points=2  # Reduced minimum points for trendlines
+            min_points=2,  # Reduced minimum points for trendlines
+            atr_values=atr_values  # Pass ATR values for significance filtering
         )
         
         # Find support trendlines using lows
@@ -258,7 +274,8 @@ class RiskMetrics(IStrategy):
             recent_data, 
             window=lookback,
             price_type='low',
-            min_points=2  # Reduced minimum points for trendlines
+            min_points=2,  # Reduced minimum points for trendlines
+            atr_values=atr_values  # Pass ATR values for significance filtering
         )
         
         # Plot the strongest resistance and support lines

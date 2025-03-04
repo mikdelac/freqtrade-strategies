@@ -12,7 +12,9 @@ class VolatilityModel:
     def __init__(self, 
                  low_threshold: float = 0.01,
                  medium_threshold: float = 0.015,
-                 risk_multipliers: Optional[dict] = None):
+                 risk_multipliers: Optional[dict] = None,
+                 atr_period: int = 14 #ATR period usually 14 days
+                 ):
         self.low_threshold = low_threshold
         self.medium_threshold = medium_threshold
         self.risk_multipliers = risk_multipliers or {
@@ -20,6 +22,8 @@ class VolatilityModel:
             VolatilityRegime.MEDIUM: 0.8,
             VolatilityRegime.HIGH: 0.5
         }
+        self.atr_period = atr_period
+        self.current_atr = None  # To store the latest ATR value
 
     def get_regime_and_multiplier(self, vol: float) -> Tuple[str, float]:
         """
@@ -55,4 +59,32 @@ class VolatilityModel:
     def calculate_volatility(self, prices: np.ndarray) -> float:
         """Calculate historical volatility"""
         returns = np.log(prices[1:] / prices[:-1])
-        return np.std(returns) 
+        return np.std(returns)
+    
+    def calculate_atr(self, dataframe: pd.DataFrame) -> pd.Series:
+        """
+        Calculate the Average True Range (ATR) for the given dataframe.
+        
+        Args:
+            dataframe: DataFrame containing 'high', 'low', and 'close' price columns.
+            
+        Returns:
+            pd.Series: ATR values.
+        """
+        high = dataframe['high']
+        low = dataframe['low']
+        close = dataframe['close']
+        
+        true_range = pd.DataFrame({
+            'TR1': high - low,
+            'TR2': np.abs(high - close.shift(1)),
+            'TR3': np.abs(low - close.shift(1))
+        }).max(axis=1)
+        
+        atr = true_range.rolling(window=self.atr_period, min_periods=1).mean()
+        self.current_atr = atr.iloc[-1]
+        return atr
+
+    def get_atr(self) -> Optional[float]:
+        """Retrieve the latest ATR value."""
+        return self.current_atr 
