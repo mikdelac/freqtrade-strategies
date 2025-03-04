@@ -13,8 +13,16 @@ class VolatilityModel:
                  low_threshold: float = 0.01,
                  medium_threshold: float = 0.015,
                  risk_multipliers: Optional[dict] = None,
-                 atr_period: int = 14 #ATR period usually 14 days
-                 ):
+                 atr_period: int = 14):
+        """
+        Initialize VolatilityModel with thresholds and risk multipliers.
+        
+        Args:
+            low_threshold: Threshold for low volatility
+            medium_threshold: Threshold for medium volatility
+            risk_multipliers: Dict mapping regimes to risk multipliers
+            atr_period: Period for ATR calculation
+        """
         self.low_threshold = low_threshold
         self.medium_threshold = medium_threshold
         self.risk_multipliers = risk_multipliers or {
@@ -23,7 +31,6 @@ class VolatilityModel:
             VolatilityRegime.HIGH: 0.5
         }
         self.atr_period = atr_period
-        self.current_atr = None  # To store the latest ATR value
 
     def get_regime_and_multiplier(self, vol: float) -> Tuple[str, float]:
         """
@@ -71,20 +78,31 @@ class VolatilityModel:
         Returns:
             pd.Series: ATR values.
         """
-        high = dataframe['high']
-        low = dataframe['low']
-        close = dataframe['close']
-        
-        true_range = pd.DataFrame({
-            'TR1': high - low,
-            'TR2': np.abs(high - close.shift(1)),
-            'TR3': np.abs(low - close.shift(1))
-        }).max(axis=1)
-        
-        atr = true_range.rolling(window=self.atr_period, min_periods=1).mean()
-        self.current_atr = atr.iloc[-1]
+        try:
+            import talib
+            # Use TA-Lib ATR function
+            atr = pd.Series(
+                talib.ATR(
+                    dataframe['high'].values,
+                    dataframe['low'].values,
+                    dataframe['close'].values,
+                    timeperiod=self.atr_period
+                ),
+                index=dataframe.index
+            )
+        except ImportError:
+            # Fallback to manual calculation if TA-Lib is not available
+            high = dataframe['high']
+            low = dataframe['low']
+            close = dataframe['close']
+            
+            true_range = pd.DataFrame({
+                'TR1': high - low,
+                'TR2': np.abs(high - close.shift(1)),
+                'TR3': np.abs(low - close.shift(1))
+            }).max(axis=1)
+            
+            atr = true_range.rolling(window=self.atr_period, min_periods=1).mean()
+            
+        # Store current ATR value
         return atr
-
-    def get_atr(self) -> Optional[float]:
-        """Retrieve the latest ATR value."""
-        return self.current_atr 
