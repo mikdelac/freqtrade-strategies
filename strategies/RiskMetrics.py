@@ -123,8 +123,10 @@ class RiskMetrics(IStrategy):
             "main_plot": {
                 "all_highs": {"color": "red", "type": "scatter"},
                 "all_lows": {"color": "green", "type": "scatter"},
-                "resistance_points": {"color": "orange", "type": "scatter"},
-                "support_points": {"color": "blue", "type": "scatter"}
+                "resistance_line": {"color": "red", "width": 2.0},
+                "support_line": {"color": "green", "width": 2.0},
+                "current_trendline": {"color": "purple", "width": 2.0},
+                "trendline_forecast": {"color": "purple", "style": "dashdot", "width": 1.5}
             },
             "subplots": {
                 "ATR": {
@@ -216,70 +218,66 @@ class RiskMetrics(IStrategy):
         # Calculate ATR and store it for visualization
         dataframe['atr'] = self.volatility_model.calculate_atr(dataframe)
 
-        # Initialize trendline columns
-        dataframe['resistance_line'] = np.nan
-        dataframe['support_line'] = np.nan
-        dataframe['resistance_points'] = np.nan
-        dataframe['support_points'] = np.nan
+        # Initialize marker columns for support and resistance points
         dataframe['all_highs'] = np.nan
         dataframe['all_lows'] = np.nan
-
-        # Calculate trendlines using local maxima/minima
-        lookback = 300  # Use last 300 candles for trendline calculation
+        dataframe['resistance_line'] = np.nan
+        dataframe['support_line'] = np.nan
+        dataframe['current_trendline'] = np.nan
+        dataframe['trendline_forecast'] = np.nan
         
-        # Get recent data
+        # Calculate trendlines using local maxima/minima
+        lookback = 2000  # Use last 300 candles for trendline calculation
+
+        # Don't calculate trendlines if we don't have enough data
+        if len(dataframe) < 30:
+            return dataframe
+            
         recent_data = dataframe.tail(lookback).copy()
         
-        # Find all swing points first
-        prices_high = recent_data['high'].values
-        prices_low = recent_data['low'].values
-        
-        # Get ATR for the recent data
-        atr_values = recent_data['atr'].values  # Use already calculated ATR values
-        
-        # Get all swing points with smaller window and more points
-        all_highs = self.trend_analyzer._find_swing_points(
-            prices_high, 
-            window=10,  
-            price_type='high',
-            distance=5,  # Direct control over minimum distance between peaks
-            #atr_values=atr_values  # Pass entire ATR array for candle-specific filtering
-        )
-        all_lows = self.trend_analyzer._find_swing_points(
-            prices_low, 
-            window=10,  
-            price_type='low',
-            distance=5,  # Direct control over minimum distance between peaks
-            #atr_values=atr_values  # Pass entire ATR array for candle-specific filtering
+        # Find swing points for both highs and lows with ATR-based filtering
+        high_swing_points = self.trend_analyzer._find_swing_points(
+            recent_data['high'].values, 
+            price_type='high', 
+            min_points=2,
+            distance=5
         )
         
-        # Mark all detected swing points
-        for idx, price in all_highs:
-            dataframe.loc[len(dataframe) - lookback + idx, 'all_highs'] = price
+        low_swing_points = self.trend_analyzer._find_swing_points(
+            recent_data['low'].values, 
+            price_type='low', 
+            min_points=2,
+            distance=5
+        )
+        
+        # Mark swing points on the chart
+        for idx, price in high_swing_points:
+            actual_idx = len(dataframe) - lookback + idx
+            dataframe.loc[actual_idx, 'all_highs'] = price
             
-        for idx, price in all_lows:
-            dataframe.loc[len(dataframe) - lookback + idx, 'all_lows'] = price
-        
-        # Find resistance trendlines using highs
+        for idx, price in low_swing_points:
+            actual_idx = len(dataframe) - lookback + idx
+            dataframe.loc[actual_idx, 'all_lows'] = price
+            
+        # Find resistance (high) trendlines
         resistance_lines = self.trend_analyzer.find_trendlines(
-            recent_data, 
-            window=lookback,
+            recent_data,
+            high_swing_points,
             price_type='high',
-            min_points=2,  # Reduced minimum points for trendlines
-            atr_values=atr_values  # Pass ATR values for significance filtering
+            min_points=2
         )
+        print("resistance_lines: ", resistance_lines)
         
-        # Find support trendlines using lows
+        # Find support (low) trendlines
         support_lines = self.trend_analyzer.find_trendlines(
             recent_data, 
-            window=lookback,
+            low_swing_points,
             price_type='low',
-            min_points=2,  # Reduced minimum points for trendlines
-            atr_values=atr_values  # Pass ATR values for significance filtering
+            min_points=2
         )
         
-        # Plot the strongest resistance and support lines
-        if resistance_lines:
+        # Plot the strongest resistance line (if any)
+        if resistance_lines and len(resistance_lines) > 0:
             resistance = max(resistance_lines, key=lambda t: t.strength)
             start_idx = len(dataframe) - lookback + resistance.start_index
             end_idx = len(dataframe) - lookback + resistance.end_index
@@ -291,12 +289,20 @@ class RiskMetrics(IStrategy):
                 resistance.slope * normalized_indices + resistance.intercept
             )
             
-            # Mark resistance points
-            for idx, price in [(len(dataframe) - lookback + i, p) 
-                             for i, p in resistance.validation_points]:
-                dataframe.loc[idx, 'resistance_points'] = price
+            # Extrapolate resistance line into the future
+            steps_forward = 10
+            future_values = self.trend_analyzer.extrapolate_trendline(resistance, steps_forward)
+            future_indices = np.arange(
+                end_idx + 1,
+                end_idx + steps_forward + 1
+            )
             
-        if support_lines:
+            for i, idx in enumerate(future_indices):
+                if idx < len(dataframe):
+                    dataframe.loc[idx, 'resistance_line'] = future_values[i]
+        
+        # Plot the strongest support line (if any)
+        if support_lines and len(support_lines) > 0:
             support = max(support_lines, key=lambda t: t.strength)
             start_idx = len(dataframe) - lookback + support.start_index
             end_idx = len(dataframe) - lookback + support.end_index
@@ -308,10 +314,17 @@ class RiskMetrics(IStrategy):
                 support.slope * normalized_indices + support.intercept
             )
             
-            # Mark support points
-            for idx, price in [(len(dataframe) - lookback + i, p) 
-                             for i, p in support.validation_points]:
-                dataframe.loc[idx, 'support_points'] = price
+            # Extrapolate support line into the future
+            steps_forward = 10
+            future_values = self.trend_analyzer.extrapolate_trendline(support, steps_forward)
+            future_indices = np.arange(
+                end_idx + 1,
+                end_idx + steps_forward + 1
+            )
+            
+            for i, idx in enumerate(future_indices):
+                if idx < len(dataframe):
+                    dataframe.loc[idx, 'support_line'] = future_values[i]
 
         return dataframe
 

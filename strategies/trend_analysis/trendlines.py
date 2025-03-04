@@ -107,10 +107,9 @@ class TrendAnalysis:
         
     def _find_swing_points(self, 
                     prices: np.ndarray, 
-                    window: int = 5,
                     price_type: str = 'high',
-                    min_points: int = 3,
-                    distance: int = None,
+                    min_points: int = 2,
+                    distance: int = 5,
                     atr_values: np.ndarray = None) -> List[Tuple[int, float]]:
         """
         Find swing high or low points in the price array using scipy.signal.find_peaks.
@@ -127,14 +126,7 @@ class TrendAnalysis:
             List of tuples containing (index, price) of swing points
         """
         from scipy.signal import find_peaks
-        
-        if len(prices) < window:
-            return []
-
-        # Use provided distance or derive from window
-        if distance is None:
-            distance = max(1, window // 2)
-        
+                
         # Calculate prominence as a percentage of price range
         price_range = np.max(prices) - np.min(prices)
         prominence = price_range * 0.01  # 1% of price range as minimum prominence
@@ -151,7 +143,7 @@ class TrendAnalysis:
         # If we don't have enough points, try with smaller distance
         if len(swing_points) < min_points and distance > 1:
             smaller_distance = max(1, distance - 1)
-            return self._find_swing_points(prices, window, price_type, min_points, smaller_distance, atr_values)
+            return self._find_swing_points(prices, price_type, min_points, smaller_distance, atr_values)
         
         # Filter by ATR significance if provided
         if atr_values is not None and len(atr_values) > 0:
@@ -238,36 +230,24 @@ class TrendAnalysis:
 
     def find_trendlines(self, 
                      dataframe: pd.DataFrame, 
-                     window: int = 20,
-                     price_type: str = 'close',
-                     min_points: int = 3,
-                     atr_values: np.ndarray = None) -> List[Trendline]:
+                     swing_points: List[Tuple[int, float]],
+                     price_type: str = 'high',
+                     min_points: int = 3) -> List[Trendline]:
         """
-        Find potential trendlines by connecting local maxima/minima.
+        Find potential trendlines using pre-calculated swing points.
         
         Args:
-            dataframe: DataFrame with price data
-            window: Rolling window size for trendline detection
-            price_type: Which price to use ('high', 'low', 'close')
+            dataframe: Price dataframe (used only for reference)
+            swing_points: List of pre-calculated swing points as (index, price) tuples
+            price_type: Type of price the swing points represent ('high', 'low')
             min_points: Minimum number of points to form a trendline
-            atr_values: Optional array of ATR values for filtering significant swing points
             
         Returns:
-            List of detected Trendline objects
+            List of detected trendlines
         """
         trendlines = []
-        prices = dataframe[price_type].values
-        indices = np.arange(len(prices))
         
-        # Find swing points
-        swing_points = self._find_swing_points(
-            prices, 
-            window=5, 
-            price_type=price_type, 
-            min_points=min_points,
-            atr_values=atr_values
-        )
-        
+        # Check if we have enough swing points
         if len(swing_points) < min_points:
             return []
             
@@ -280,13 +260,21 @@ class TrendAnalysis:
                 # Calculate trendline parameters
                 x = np.array([start_idx, end_idx])
                 y = np.array([start_price, end_price])
-                slope, intercept = np.polyfit(x, y, 1)
                 
-                # Check angle
-                angle = abs(np.degrees(np.arctan(slope)))
-                if angle > self.angle_threshold:
+                slope, intercept, strength = self._calculate_linear_regression(x, y)
+                
+                # Determine trendline direction
+                if abs(slope) < self.min_slope:
+                    direction = TrendDirection.SIDEWAYS
+                elif slope > 0:
+                    direction = TrendDirection.UP
+                else:
+                    direction = TrendDirection.DOWN
+                
+                # Check if this is a valid trendline
+                if not self._is_valid_trendline(slope, strength, 2):
                     continue
-                    
+                
                 # Find validation points between these two points
                 validation_points = []
                 for k in range(len(swing_points)):
@@ -294,32 +282,38 @@ class TrendAnalysis:
                         idx, price = swing_points[k]
                         if start_idx < idx < end_idx:  # Only consider points between endpoints
                             expected_price = slope * idx + intercept
-                            deviation = abs(price - expected_price) / price
-                            if deviation <= 0.02:  # 2% tolerance
-                                validation_points.append((idx, price))
+                            
+                            # Check if point is close to trendline
+                            if price_type == 'high':
+                                # For resistance lines (high prices), the actual price should be below or on the line
+                                if price <= expected_price * 1.01:  # 1% tolerance
+                                    validation_points.append((idx, price))
+                            else:  # price_type == 'low'
+                                # For support lines (low prices), the actual price should be above or on the line
+                                if price >= expected_price * 0.99:  # 1% tolerance
+                                    validation_points.append((idx, price))
                 
-                # Calculate strength based on number of validation points
-                strength = len(validation_points) / (end_idx - start_idx)
-                
-                if strength >= self.min_strength:
-                    direction = (TrendDirection.UP if slope > 0 
-                               else TrendDirection.DOWN if slope < 0 
-                               else TrendDirection.SIDEWAYS)
-                    
-                    trendline = Trendline(
-                        start_index=start_idx,
-                        end_index=end_idx,
-                        slope=slope,
-                        intercept=intercept,
-                        direction=direction,
-                        strength=strength,
-                        price_type=price_type,
-                        validation_points=validation_points
+                # Include at least one validation point
+                if len(validation_points) >= 1:
+                    # Add this trendline
+                    trendlines.append(
+                        Trendline(
+                            start_index=start_idx,
+                            end_index=end_idx,
+                            slope=slope,
+                            intercept=intercept,
+                            direction=direction,
+                            strength=strength,
+                            price_type=price_type,
+                            validation_points=validation_points
+                        )
                     )
-                    trendlines.append(trendline)
         
-        return trendlines
+        # Sort trendlines by strength (highest first)
+        trendlines.sort(key=lambda t: t.strength, reverse=True)
         
+        return trendlines 
+            
     def get_current_trendline(self, 
                            dataframe: pd.DataFrame,
                            lookback_period: int = 20,
@@ -406,3 +400,4 @@ class TrendAnalysis:
         deviation = abs(current_price - expected_price) / expected_price
         
         return deviation > threshold 
+
