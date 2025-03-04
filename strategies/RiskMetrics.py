@@ -121,12 +121,8 @@ class RiskMetrics(IStrategy):
     def plot_config(self):
         return {
             "main_plot": {
-                "resistance_line": {"color": "red", "type": "line"},
-                "support_line": {"color": "green", "type": "line"},
-                "all_highs": {"color": "red", "type": "scatter", "plotly": {"mode": "markers"}},
-                "all_lows": {"color": "green", "type": "scatter", "plotly": {"mode": "markers"}},
-                "resistance_points": {"color": "orange", "type": "scatter", "plotly": {"mode": "markers", "marker": {"size": 12, "symbol": "triangle-down"}}},
-                "support_points": {"color": "blue", "type": "scatter", "plotly": {"mode": "markers", "marker": {"size": 12, "symbol": "triangle-up"}}}
+                "all_highs": {"color": "red", "type": "scatter"},
+                "all_lows": {"color": "green", "type": "scatter"},
             }
         }
     
@@ -231,15 +227,15 @@ class RiskMetrics(IStrategy):
         # Get all swing points with smaller window and more points
         all_highs = self.trend_analyzer._find_swing_points(
             prices_high, 
-            window=3,  # Reduced window size to detect more local maxima
+            window=10,  
             price_type='high',
-            min_points=2  # Reduced minimum points
+            distance=20  # Direct control over minimum distance between peaks
         )
         all_lows = self.trend_analyzer._find_swing_points(
             prices_low, 
-            window=3,  # Reduced window size to detect more local minima
+            window=10,  
             price_type='low',
-            min_points=2  # Reduced minimum points
+            distance=20  # Direct control over minimum distance between peaks
         )
         
         # Mark all detected swing points

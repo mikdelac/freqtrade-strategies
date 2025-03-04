@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 from dataclasses import dataclass
 from enum import Enum
+from scipy.signal import find_peaks
 
 class TrendDirection(Enum):
     UP = "up"
@@ -102,69 +103,54 @@ class TrendAnalysis:
         return True
         
     def _find_swing_points(self, 
-                        prices: np.ndarray, 
-                        window: int = 5,
-                        price_type: str = 'high',
-                        min_points: int = 3) -> List[Tuple[int, float]]:
+                    prices: np.ndarray, 
+                    window: int = 5,
+                    price_type: str = 'high',
+                    min_points: int = 3,
+                    distance: int = None) -> List[Tuple[int, float]]:
         """
-        Find local maxima or minima in price data using peak detection.
+        Find swing high or low points in the price array.
         
         Args:
             prices: Array of price values
-            window: Window size for finding swings
-            price_type: 'high' for swing highs, 'low' for swing lows
-            min_points: Minimum number of points to return
-            
+            window: Window size for peak detection (used if distance is None)
+            price_type: Type of price to examine ('high' or 'low')
+            min_points: Minimum number of points to identify, used only for recursive calls
+            distance: Minimum horizontal distance between peaks (if None, derived from window)
+
         Returns:
-            List of (index, price) tuples for swing points
+            List of tuples containing (index, price) of swing points
         """
+        from scipy.signal import find_peaks
+        
         if len(prices) < window:
             return []
 
-        # Initialize arrays for peak detection
-        swing_points = []
-        half_window = window // 2
+        # Use provided distance or derive from window
+        if distance is None:
+            distance = max(1, window // 2)
         
-        # Function to check if a point is a local maximum/minimum
-        def is_extreme_point(idx, window_size):
-            if idx < window_size or idx >= len(prices) - window_size:
-                return False
-                
-            window_slice = prices[idx - window_size:idx + window_size + 1]
-            if price_type == 'high':
-                # For maxima, check if center point is highest
-                return prices[idx] == max(window_slice)
-            else:
-                # For minima, check if center point is lowest
-                return prices[idx] == min(window_slice)
-
-        # Find all potential swing points
-        for i in range(half_window, len(prices) - half_window):
-            if is_extreme_point(i, half_window):
-                swing_points.append((i, prices[i]))
-
-        # If we don't have enough points, try with smaller window
-        if len(swing_points) < min_points:
-            smaller_window = max(2, window - 2)
-            return self._find_swing_points(prices, smaller_window, price_type, min_points)
-
-        # Sort points by price value (descending for highs, ascending for lows)
-        swing_points.sort(key=lambda x: x[1], reverse=(price_type == 'high'))
+        # Calculate prominence as a percentage of price range
+        price_range = np.max(prices) - np.min(prices)
+        prominence = price_range * 0.01  # 1% of price range as minimum prominence
         
-        # Select the most extreme points that are well-distributed
-        selected_points = []
-        min_distance = len(prices) // (min_points * 2)  # Minimum distance between points
+        if price_type == 'high':
+            # Find peaks (local maxima)
+            peaks, _ = find_peaks(prices, distance=distance, prominence=prominence)
+            swing_points = [(int(idx), float(prices[idx])) for idx in peaks]
+            print("high swing_points: ", swing_points)
+        else:  # For 'low' prices
+            # For valleys (local minima), invert the signal but keep original price values
+            peaks, _ = find_peaks(-prices, distance=distance, prominence=prominence)
+            swing_points = [(int(idx), float(prices[idx])) for idx in peaks]
         
-        for point in swing_points:
-            # Check if point is far enough from already selected points
-            selected_points.append(point)
-            #if not selected_points or all(abs(point[0] - p[0]) >= min_distance for p in selected_points):
-            #    selected_points.append(point)
-            #    if len(selected_points) >= min_points:
-            #        break
-                    
-        # Sort points by time index for connecting
-        return sorted(selected_points, key=lambda x: x[0])
+        # If we don't have enough points, try with smaller distance
+        if len(swing_points) < min_points and distance > 1:
+            smaller_distance = max(1, distance - 1)
+            return self._find_swing_points(prices, window, price_type, min_points, smaller_distance)
+            
+        # Sort points by time index
+        return sorted(swing_points, key=lambda x: x[0])
 
     def find_trendlines(self, 
                      dataframe: pd.DataFrame, 
