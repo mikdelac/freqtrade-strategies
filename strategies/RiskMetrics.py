@@ -39,6 +39,8 @@ from technical import qtpylib
 from arch.univariate import HARX
 from risk_metrics.volatility_models import VolatilityModel, VolatilityRegime
 from trend_analysis.trendlines import TrendAnalysis
+# Import the trendline functions
+from strategies.trend_analysis.trendline import gentrends, segtrends
 
 
 class RiskMetrics(IStrategy):
@@ -124,7 +126,8 @@ class RiskMetrics(IStrategy):
             "main_plot": {
                 "all_highs": {"color": "red", "type": "scatter"},
                 "all_lows": {"color": "green", "type": "scatter"},
-                "support_line": {"color": "green", "width": 2.0},
+                "Max Line": {"color": "red", "width": 2.0},
+                "Min Line": {"color": "green", "width": 2.0},
                 "current_trendline": {"color": "purple", "width": 2.0},
                 "trendline_forecast": {"color": "purple", "style": "dashdot", "width": 1.5}
             },
@@ -135,15 +138,23 @@ class RiskMetrics(IStrategy):
             }
         }
         
-        # Dynamically add resistance line configurations
-        # The actual number will be determined during indicator population
-        for i in range(145):  # Support up to 10 resistance lines
-            line_name = f'resistance_line_{i}'
-            # Use different shades of red for different resistance lines
-            intensity = max(30, 100 - i * 7)  # Decreasing intensity for weaker lines
+        # Add segment trend lines
+        segments = 5  # Maximum number of segments to support
+        for i in range(segments):
+            # Max lines (resistance)
+            line_name = f'Max_Seg_{i}'
+            intensity = max(30, 100 - i * 5)  # Decreasing intensity for weaker lines
             plot_config["main_plot"][line_name] = {
                 "color": f"rgb(255, {intensity}, {intensity})",
-                "width": max(0.5, 2.0 - i * 0.15)  # Thinner lines for weaker resistance
+                "width": max(0.5, 2.0 - i * 0.1)  # Thinner lines for weaker resistance
+            }
+            
+            # Min lines (support)
+            line_name = f'Min_Seg_{i}'
+            intensity = max(30, 100 - i * 5)  # Decreasing intensity for weaker lines
+            plot_config["main_plot"][line_name] = {
+                "color": f"rgb({intensity}, 255, {intensity})",
+                "width": max(0.5, 2.0 - i * 0.1)  # Thinner lines for weaker support
             }
             
         return plot_config
@@ -234,12 +245,15 @@ class RiskMetrics(IStrategy):
         # Initialize marker columns for support and resistance points
         dataframe['all_highs'] = np.nan
         dataframe['all_lows'] = np.nan
-        # Initialize columns for resistance lines (up to 10)
-        for i in range(145):
-            dataframe[f'resistance_line_{i}'] = np.nan
-        dataframe['support_line'] = np.nan
-        dataframe['current_trendline'] = np.nan
-        dataframe['trendline_forecast'] = np.nan
+        # Initialize columns for Max and Min lines from trendline.py
+        dataframe['Max Line'] = np.nan
+        dataframe['Min Line'] = np.nan
+        
+        # Initialize segment trend columns
+        segments = 10  # Maximum number of segments
+        for i in range(segments):
+            dataframe[f'Max_Seg_{i}'] = np.nan
+            dataframe[f'Min_Seg_{i}'] = np.nan
         
         # Calculate trendlines using local maxima/minima
         lookback = 200  # Use last 2000 candles for trendline calculation
@@ -250,98 +264,59 @@ class RiskMetrics(IStrategy):
             
         recent_data = dataframe.tail(lookback).copy()
         
-        # Find swing points for both highs and lows with ATR-based filtering
-        high_swing_points = self.trend_analyzer._find_swing_points(
-            recent_data['high'].values, 
-            price_type='high', 
-            min_points=2,
-            distance=5
-        )
-        
-        low_swing_points = self.trend_analyzer._find_swing_points(
-            recent_data['low'].values, 
-            price_type='low', 
-            min_points=2,
-            distance=5
-        )
-        
-        # Mark swing points on the chart
-        for idx, price in high_swing_points:
-            actual_idx = len(dataframe) - lookback + idx
-            dataframe.loc[actual_idx, 'all_highs'] = price
+        # Find global trendlines using gentrends
+        try:
+            # Generate trends using the gentrends function
+            # This gives us the main max and min lines (resistance and support)
+            trends = gentrends(recent_data, field='close', window=1/3.0)
             
-        for idx, price in low_swing_points:
-            actual_idx = len(dataframe) - lookback + idx
-            dataframe.loc[actual_idx, 'all_lows'] = price
-            
-        # Find resistance (high) trendlines
-        resistance_lines = self.trend_analyzer.find_trendlines(
-            recent_data,
-            high_swing_points,
-            price_type='high'
-        )
-        print("resistance_lines", len(resistance_lines))  
-        print("ehofaghdiupoghdfsaoiuh")     
-        # Find support (low) trendlines
-        support_lines = self.trend_analyzer.find_trendlines(
-            recent_data, 
-            low_swing_points,
-            price_type='low'
-        )
+            # Map the trend lines to the dataframe
+            last_idx = len(dataframe) - len(recent_data)
+            for i in range(len(trends)):
+                current_idx = last_idx + i
+                if current_idx < len(dataframe):
+                    dataframe.loc[current_idx, 'Max Line'] = trends['Max Line'].iloc[i]
+                    dataframe.loc[current_idx, 'Min Line'] = trends['Min Line'].iloc[i]
+        except Exception as e:
+            # Fail gracefully if gentrends fails
+            print(f"Error in gentrends: {e}")
         
-        # Plot all resistance lines
-        if resistance_lines and len(resistance_lines) > 0:
-            # Sort resistance lines by strength (strongest first)
-            sorted_resistance_lines = sorted(resistance_lines, key=lambda t: t.strength, reverse=True)
-            
-            # Plot up to 10 resistance lines (or fewer if there aren't that many)
-            for i, resistance in enumerate(sorted_resistance_lines[:145]):
-                start_idx = len(dataframe) - lookback + resistance.start_index
-                end_idx = len(dataframe) - lookback + resistance.end_index
+        # Use segtrends to find multiple resistance and support lines
+        # Try different segment counts
+        max_segments = min(segments, lookback // 30)  # Ensure we have enough data per segment
+        
+        for seg_count in range(2, max_segments + 1):
+            try:
+                # Generate segmented trends
+                seg_trends = segtrends(recent_data, field='close', segments=seg_count)
                 
-                # Plot resistance line
-                indices = np.arange(start_idx, end_idx + 1)
-                normalized_indices = np.arange(len(indices))
-                dataframe.loc[indices, f'resistance_line_{i}'] = (
-                    resistance.slope * normalized_indices + resistance.intercept
-                )
-                
-                # Extrapolate resistance line into the future
-                steps_forward = 10
-                future_values = self.trend_analyzer.extrapolate_trendline(resistance, steps_forward)
-                future_indices = np.arange(
-                    end_idx + 1,
-                    end_idx + steps_forward + 1
-                )
-                
-                for j, idx in enumerate(future_indices):
-                    if idx < len(dataframe):
-                        dataframe.loc[idx, f'resistance_line_{i}'] = future_values[j]
+                # Map the segmented trend lines to the dataframe
+                last_idx = len(dataframe) - len(recent_data)
+                for i in range(len(seg_trends)):
+                    current_idx = last_idx + i
+                    if current_idx < len(dataframe):
+                        # Store each segment's max and min lines in separate columns
+                        dataframe.loc[current_idx, f'Max_Seg_{seg_count-2}'] = seg_trends['Max Line'].iloc[i]
+                        dataframe.loc[current_idx, f'Min_Seg_{seg_count-2}'] = seg_trends['Min Line'].iloc[i]
+            except Exception as e:
+                # Fail gracefully if segtrends fails
+                print(f"Error in segtrends with {seg_count} segments: {e}")
+                continue
         
-        # Plot the strongest support line (if any)
-        if support_lines and len(support_lines) > 0:
-            support = max(support_lines, key=lambda t: t.strength)
-            start_idx = len(dataframe) - lookback + support.start_index
-            end_idx = len(dataframe) - lookback + support.end_index
-            
-            # Plot support line
-            indices = np.arange(start_idx, end_idx + 1)
-            normalized_indices = np.arange(len(indices))
-            dataframe.loc[indices, 'support_line'] = (
-                support.slope * normalized_indices + support.intercept
-            )
-            
-            # Extrapolate support line into the future
-            steps_forward = 10
-            future_values = self.trend_analyzer.extrapolate_trendline(support, steps_forward)
-            future_indices = np.arange(
-                end_idx + 1,
-                end_idx + steps_forward + 1
-            )
-            
-            for i, idx in enumerate(future_indices):
-                if idx < len(dataframe):
-                    dataframe.loc[idx, 'support_line'] = future_values[i]
+        # Mark high and low points for visualization
+        # Use the high and low values instead of calculated swing points
+        highest_points = recent_data.sort_values('high', ascending=False).head(20)
+        lowest_points = recent_data.sort_values('low', ascending=True).head(20)
+        
+        for idx in highest_points.index:
+            actual_idx = len(dataframe) - len(recent_data) + (idx - recent_data.index[0])
+            if actual_idx < len(dataframe):
+                dataframe.loc[actual_idx, 'all_highs'] = highest_points.loc[idx, 'high']
+                
+        for idx in lowest_points.index:
+            actual_idx = len(dataframe) - len(recent_data) + (idx - recent_data.index[0])
+            if actual_idx < len(dataframe):
+                dataframe.loc[actual_idx, 'all_lows'] = lowest_points.loc[idx, 'low']
 
         return dataframe
 
