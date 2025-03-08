@@ -138,11 +138,13 @@ class RiskMetrics(IStrategy):
             }
         }
         
-        # Add segment trend lines
-        segments = 5  # Maximum number of segments to support
-        for i in range(segments):
+        # Define the maximum number of segments we'll use
+        max_segments = 10
+        
+        # Add individual trend lines from segtrends for each segment
+        for i in range(max_segments):
             # Max lines (resistance)
-            line_name = f'Max_Seg_{i}'
+            line_name = f'Max_Line_{i}'
             intensity = max(30, 100 - i * 5)  # Decreasing intensity for weaker lines
             plot_config["main_plot"][line_name] = {
                 "color": f"rgb(255, {intensity}, {intensity})",
@@ -150,7 +152,7 @@ class RiskMetrics(IStrategy):
             }
             
             # Min lines (support)
-            line_name = f'Min_Seg_{i}'
+            line_name = f'Min_Line_{i}'
             intensity = max(30, 100 - i * 5)  # Decreasing intensity for weaker lines
             plot_config["main_plot"][line_name] = {
                 "color": f"rgb({intensity}, 255, {intensity})",
@@ -245,15 +247,18 @@ class RiskMetrics(IStrategy):
         # Initialize marker columns for support and resistance points
         dataframe['all_highs'] = np.nan
         dataframe['all_lows'] = np.nan
-        # Initialize columns for Max and Min lines from trendline.py
+        
+        # Initialize columns for main trend lines
         dataframe['Max Line'] = np.nan
         dataframe['Min Line'] = np.nan
         
-        # Initialize segment trend columns
-        segments = 10  # Maximum number of segments
-        for i in range(segments):
-            dataframe[f'Max_Seg_{i}'] = np.nan
-            dataframe[f'Min_Seg_{i}'] = np.nan
+        # Define the maximum number of segments we'll use
+        max_segments = 10
+        
+        # Initialize columns for all individual segment trend lines
+        for i in range(max_segments):
+            dataframe[f'Max_Line_{i}'] = np.nan
+            dataframe[f'Min_Line_{i}'] = np.nan
         
         # Calculate trendlines using local maxima/minima
         lookback = 200  # Use last 2000 candles for trendline calculation
@@ -281,42 +286,48 @@ class RiskMetrics(IStrategy):
             # Fail gracefully if gentrends fails
             print(f"Error in gentrends: {e}")
         
-        # Use segtrends to find multiple resistance and support lines
-        # Try different segment counts
-        max_segments = min(segments, lookback // 30)  # Ensure we have enough data per segment
-        
-        for seg_count in range(2, max_segments + 1):
-            try:
-                # Generate segmented trends
-                seg_trends = segtrends(recent_data, field='close', segments=seg_count)
-                
-                # Map the segmented trend lines to the dataframe
-                last_idx = len(dataframe) - len(recent_data)
-                for i in range(len(seg_trends)):
-                    current_idx = last_idx + i
-                    if current_idx < len(dataframe):
-                        # Store each segment's max and min lines in separate columns
-                        dataframe.loc[current_idx, f'Max_Seg_{seg_count-2}'] = seg_trends['Max Line'].iloc[i]
-                        dataframe.loc[current_idx, f'Min_Seg_{seg_count-2}'] = seg_trends['Min Line'].iloc[i]
-            except Exception as e:
-                # Fail gracefully if segtrends fails
-                print(f"Error in segtrends with {seg_count} segments: {e}")
-                continue
+        # Use segtrends with different segment counts to find multiple resistance and support lines
+        # Try with max_segments + 1 segments to get max_segments maxlines and minlines
+        try:
+            # Generate segmented trends
+            seg_trends = segtrends(recent_data, field='close', segments=max_segments + 1)
+            
+            # Map all the individual max and min lines to the dataframe
+            last_idx = len(dataframe) - len(recent_data)
+            for i in range(len(seg_trends)):
+                current_idx = last_idx + i
+                if current_idx < len(dataframe):
+                    # Copy all available Max_Line_X and Min_Line_X columns
+                    for j in range(max_segments):
+                        max_col = f'Max_Line_{j}'
+                        min_col = f'Min_Line_{j}'
+                        
+                        if max_col in seg_trends.columns:
+                            dataframe.loc[current_idx, max_col] = seg_trends[max_col].iloc[i]
+                        
+                        if min_col in seg_trends.columns:
+                            dataframe.loc[current_idx, min_col] = seg_trends[min_col].iloc[i]
+        except Exception as e:
+            # Fail gracefully if segtrends fails
+            print(f"Error in segtrends: {e}")
         
         # Mark high and low points for visualization
-        # Use the high and low values instead of calculated swing points
-        highest_points = recent_data.sort_values('high', ascending=False).head(20)
-        lowest_points = recent_data.sort_values('low', ascending=True).head(20)
-        
-        for idx in highest_points.index:
-            actual_idx = len(dataframe) - len(recent_data) + (idx - recent_data.index[0])
-            if actual_idx < len(dataframe):
-                dataframe.loc[actual_idx, 'all_highs'] = highest_points.loc[idx, 'high']
-                
-        for idx in lowest_points.index:
-            actual_idx = len(dataframe) - len(recent_data) + (idx - recent_data.index[0])
-            if actual_idx < len(dataframe):
-                dataframe.loc[actual_idx, 'all_lows'] = lowest_points.loc[idx, 'low']
+        try:
+            # Use the high and low values instead of calculated swing points
+            highest_points = recent_data.sort_values('high', ascending=False).head(20)
+            lowest_points = recent_data.sort_values('low', ascending=True).head(20)
+            
+            for idx in highest_points.index:
+                actual_idx = len(dataframe) - len(recent_data) + (idx - recent_data.index[0])
+                if actual_idx < len(dataframe):
+                    dataframe.loc[actual_idx, 'all_highs'] = highest_points.loc[idx, 'high']
+                    
+            for idx in lowest_points.index:
+                actual_idx = len(dataframe) - len(recent_data) + (idx - recent_data.index[0])
+                if actual_idx < len(dataframe):
+                    dataframe.loc[actual_idx, 'all_lows'] = lowest_points.loc[idx, 'low']
+        except Exception as e:
+            print(f"Error marking high/low points: {e}")
 
         return dataframe
 

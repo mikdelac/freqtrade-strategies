@@ -116,16 +116,22 @@ def segtrends(dataframe, field="close", segments=2, charts=False):
         plt.plot(y)
         plt.grid(True)
 
+    # Store all trendlines
+    all_maxlines = {}
+    all_minlines = {}
+
     for i in range(0, segments - 1):
         maxslope = (maxima[i + 1] - maxima[i]) / (x_maxima[i + 1] - x_maxima[i])
         a_max = maxima[i] - (maxslope * x_maxima[i])
         b_max = maxima[i] + (maxslope * (len(y) - x_maxima[i]))
         maxline = np.linspace(a_max, b_max, len(y))
+        all_maxlines[f'Max_Line_{i}'] = maxline
 
         minslope = (minima[i + 1] - minima[i]) / (x_minima[i + 1] - x_minima[i])
         a_min = minima[i] - (minslope * x_minima[i])
         b_min = minima[i] + (minslope * (len(y) - x_minima[i]))
         minline = np.linspace(a_min, b_min, len(y))
+        all_minlines[f'Min_Line_{i}'] = minline
 
         if charts:
             plt.plot(maxline, "g")
@@ -136,11 +142,22 @@ def segtrends(dataframe, field="close", segments=2, charts=False):
 
     import pandas as pd
 
-    # OUTPUT
-    #    return x_maxima, maxima, x_minima, minima
-    trends = np.transpose(np.array((x, maxline, minline)))
+    # Create a DataFrame with the original data
     trends = pd.DataFrame(
-        trends, index=np.arange(0, len(x)), columns=["Data", "Max Line", "Min Line"]
+        y, index=np.arange(0, len(x)), columns=["Data"]
     )
-    print(trends)
+    
+    # Add all maxlines and minlines to the DataFrame
+    for i in range(segments - 1):
+        if f'Max_Line_{i}' in all_maxlines:
+            trends[f'Max_Line_{i}'] = all_maxlines[f'Max_Line_{i}']
+        if f'Min_Line_{i}' in all_minlines:
+            trends[f'Min_Line_{i}'] = all_minlines[f'Min_Line_{i}']
+    
+    # Add standard Max Line and Min Line for backward compatibility
+    if len(all_maxlines) > 0:
+        trends['Max Line'] = all_maxlines[f'Max_Line_{segments-2}']  # Last segment
+    if len(all_minlines) > 0:
+        trends['Min Line'] = all_minlines[f'Min_Line_{segments-2}']  # Last segment
+    
     return trends
