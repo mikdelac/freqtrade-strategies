@@ -163,3 +163,108 @@ def segtrends(dataframe, field="close", segments=2, charts=False):
         trends['Min Line'] = all_minlines[f'Min_Line_{segments-2}']  # Last segment
     
     return trends
+
+
+def rank_trendlines(trends, price_field="Data", threshold=0.01, touch_weight=2.0, max_prefix="Max_Line_", min_prefix="Min_Line_"):
+    """
+    Ranks trendlines based on how often price closes near them.
+    
+    This function evaluates the strength and reliability of trendlines by measuring how frequently
+    price interacts with them. It assigns scores to each trendline based on:
+    1. Near misses: When price comes within a threshold percentage of the trendline
+    2. Touches: When price comes very close to the trendline (within half the threshold)
+    
+    Touches are weighted more heavily than near misses using the touch_weight parameter.
+    The function returns dictionaries of ranked maxlines (resistance) and minlines (support)
+    sorted by their scores in descending order.
+    
+    For maxlines (resistance):
+    - A near miss occurs when price is below but within threshold% of the line
+    - A touch occurs when price is below but within (threshold/2)% of the line
+    
+    For minlines (support):
+    - A near miss occurs when price is above but within threshold% of the line
+    - A touch occurs when price is above but within (threshold/2)% of the line
+    
+    :param trends: DataFrame containing price data and trendlines
+    :param price_field: Column name for price data (default: "Data")
+    :param threshold: Proximity threshold as a percentage (default: 0.01 or 1%)
+    :param touch_weight: Weight multiplier for touches vs near misses (default: 2.0)
+    :param max_prefix: Prefix for maxline columns (default: "Max_Line_")
+    :param min_prefix: Prefix for minline columns (default: "Min_Line_")
+    :return: Dictionary with ranked maxlines and minlines
+    """
+    import pandas as pd
+    import numpy as np
+    
+    # Initialize dictionaries to store scores
+    maxline_scores = {}
+    minline_scores = {}
+    
+    # Get all maxline and minline columns
+    maxline_cols = [col for col in trends.columns if col.startswith(max_prefix) or col == "Max Line"]
+    minline_cols = [col for col in trends.columns if col.startswith(min_prefix) or col == "Min Line"]
+    
+    # Calculate scores for each maxline
+    for col in maxline_cols:
+        # Skip columns with all NaN values
+        if trends[col].isna().all():
+            continue
+            
+        # Calculate proximity score
+        # For maxlines: price is near when price is close to but not above the line
+        price_data = trends[price_field]
+        trendline_data = trends[col]
+        
+        # Calculate distance as percentage of price
+        distance = (trendline_data - price_data) / price_data
+        
+        # Count instances where price is near the maxline (within threshold below)
+        near_count = ((distance >= 0) & (distance <= threshold)).sum()
+        
+        # Calculate touch score (when price is very close to the line)
+        touch_count = ((distance >= 0) & (distance <= threshold/2)).sum()
+        
+        # Calculate total score with configurable weight for touches
+        total_score = near_count + (touch_count * touch_weight)
+        
+        # Store score
+        maxline_scores[col] = total_score
+    
+    # Calculate scores for each minline
+    for col in minline_cols:
+        # Skip columns with all NaN values
+        if trends[col].isna().all():
+            continue
+            
+        # Calculate proximity score
+        # For minlines: price is near when price is close to but not below the line
+        price_data = trends[price_field]
+        trendline_data = trends[col]
+        
+        # Calculate distance as percentage of price
+        distance = (price_data - trendline_data) / price_data
+        
+        # Count instances where price is near the minline (within threshold above)
+        near_count = ((distance >= 0) & (distance <= threshold)).sum()
+        
+        # Calculate touch score (when price is very close to the line)
+        touch_count = ((distance >= 0) & (distance <= threshold/2)).sum()
+        
+        # Calculate total score with configurable weight for touches
+        total_score = near_count + (touch_count * touch_weight)
+        
+        # Store score
+        minline_scores[col] = total_score
+    
+    # Sort dictionaries by score in descending order
+    ranked_maxlines = {k: v for k, v in sorted(maxline_scores.items(), key=lambda item: item[1], reverse=True)}
+    ranked_minlines = {k: v for k, v in sorted(minline_scores.items(), key=lambda item: item[1], reverse=True)}
+    
+    # Create result dictionary with ranked lines and their scores
+    result = {
+        "ranked_maxlines": ranked_maxlines,
+        "ranked_minlines": ranked_minlines
+    }
+    
+    return result

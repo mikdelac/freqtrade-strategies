@@ -40,13 +40,19 @@ from arch.univariate import HARX
 from risk_metrics.volatility_models import VolatilityModel, VolatilityRegime
 from trend_analysis.trendlines import TrendAnalysis
 # Import the trendline functions
-from strategies.trend_analysis.trendline import gentrends, segtrends
+from strategies.trend_analysis.trendline import gentrends, segtrends, rank_trendlines
 
 
 class RiskMetrics(IStrategy):
     """
     RiskMetrics strategy using HAR-RV (Heterogeneous Autoregression Realized Volatility) model
     for volatility forecasting and risk management.
+    
+    Features:
+    - Volatility forecasting using HAR-RV model
+    - Risk-adjusted position sizing based on volatility regime
+    - Trendline analysis with support and resistance identification
+    - Trendline ranking based on price proximity and touch frequency
     """
     INTERFACE_VERSION = 3
 
@@ -84,6 +90,10 @@ class RiskMetrics(IStrategy):
     risk_reduction_medium = DecimalParameter(0.6, 0.9, default=0.8, space="buy", optimize=True)
     high_vol_threshold_1h = DecimalParameter(0.01, 0.05, default=0.02, space="buy", optimize=True)
     rv_1h_change_threshold = DecimalParameter(0.05, 0.10, default=0.01, space="buy", optimize=True)
+    
+    # Trendline parameters
+    trendline_proximity_threshold = DecimalParameter(0.005, 0.02, default=0.002, space="buy", optimize=True)
+    trendline_touch_weight = DecimalParameter(1.5, 3.0, default=2.5, space="buy", optimize=True)
 
     # Minimal ROI designed for the strategy.
     minimal_roi = {
@@ -157,6 +167,25 @@ class RiskMetrics(IStrategy):
             plot_config["main_plot"][line_name] = {
                 "color": f"rgb({intensity}, 255, {intensity})",
                 "width": max(0.5, 2.0 - i * 0.1)  # Thinner lines for weaker support
+            }
+        
+        # Add ranked trendlines with distinct colors and styles
+        # Top 3 ranked maxlines (resistance)
+        for i in range(1, 4):
+            line_name = f'Ranked_Max_{i}'
+            plot_config["main_plot"][line_name] = {
+                "color": f"rgb(220, 50, {50 + i * 50})",  # Distinct red shades
+                "width": 3.0 - (i - 1) * 0.5,  # Thicker lines for higher ranks
+                "style": "solid" if i == 1 else ("dashdot" if i == 2 else "dotted")
+            }
+            
+        # Top 3 ranked minlines (support)
+        for i in range(1, 4):
+            line_name = f'Ranked_Min_{i}'
+            plot_config["main_plot"][line_name] = {
+                "color": f"rgb(50, 220, {50 + i * 50})",  # Distinct green shades
+                "width": 3.0 - (i - 1) * 0.5,  # Thicker lines for higher ranks
+                "style": "solid" if i == 1 else ("dashdot" if i == 2 else "dotted")
             }
             
         return plot_config
@@ -310,6 +339,58 @@ class RiskMetrics(IStrategy):
         except Exception as e:
             # Fail gracefully if segtrends fails
             print(f"Error in segtrends: {e}")
+        
+        # Rank trendlines based on proximity to price
+        try:
+            # Use the rank_trendlines function to score and rank the trendlines
+            trendline_rankings = rank_trendlines(
+                seg_trends, 
+                price_field="Data", 
+                threshold=self.trendline_proximity_threshold.value,
+                touch_weight=self.trendline_touch_weight.value,
+                max_prefix="Max_Line_", 
+                min_prefix="Min_Line_"
+            )
+            
+            # Store the top ranked maxlines and minlines in the dataframe
+            # Add columns for the rankings
+            ranked_maxlines = trendline_rankings["ranked_maxlines"]
+            ranked_minlines = trendline_rankings["ranked_minlines"]
+            
+            # Store the ranking information in the dataframe
+            # First, create columns for the top 3 ranked lines
+            for rank in range(1, 4):  # Top 3 ranks
+                if len(ranked_maxlines) >= rank:
+                    max_col_name = list(ranked_maxlines.keys())[rank-1]
+                    max_score = ranked_maxlines[max_col_name]
+                    dataframe[f'Ranked_Max_{rank}'] = np.nan
+                    dataframe[f'Ranked_Max_{rank}_Score'] = np.nan
+                    
+                    # Map the values from the ranked maxline to the new column
+                    last_idx = len(dataframe) - len(recent_data)
+                    for i in range(len(seg_trends)):
+                        current_idx = last_idx + i
+                        if current_idx < len(dataframe):
+                            dataframe.loc[current_idx, f'Ranked_Max_{rank}'] = seg_trends[max_col_name].iloc[i]
+                            dataframe.loc[current_idx, f'Ranked_Max_{rank}_Score'] = max_score
+                
+                if len(ranked_minlines) >= rank:
+                    min_col_name = list(ranked_minlines.keys())[rank-1]
+                    min_score = ranked_minlines[min_col_name]
+                    dataframe[f'Ranked_Min_{rank}'] = np.nan
+                    dataframe[f'Ranked_Min_{rank}_Score'] = np.nan
+                    
+                    # Map the values from the ranked minline to the new column
+                    last_idx = len(dataframe) - len(recent_data)
+                    for i in range(len(seg_trends)):
+                        current_idx = last_idx + i
+                        if current_idx < len(dataframe):
+                            dataframe.loc[current_idx, f'Ranked_Min_{rank}'] = seg_trends[min_col_name].iloc[i]
+                            dataframe.loc[current_idx, f'Ranked_Min_{rank}_Score'] = min_score
+        
+        except Exception as e:
+            # Fail gracefully if ranking fails
+            print(f"Error in ranking trendlines: {e}")
         
         # Mark high and low points for visualization
         try:
