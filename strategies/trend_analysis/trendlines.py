@@ -24,9 +24,9 @@ class Trendline:
 class TrendAnalysis:
     def __init__(self, 
                 min_points: int = 5,
-                min_slope: float = 0.0001,
+                min_slope: float = 0.001,
                 min_strength: float = 0.8, #was 0.8
-                angle_threshold: float = 45,
+                angle_threshold: float = 5,
                 atr_threshold: float = 0.02):  # New ATR threshold parameter
         """
         Initialize TrendAnalysis with parameters for trendline detection.
@@ -231,8 +231,7 @@ class TrendAnalysis:
     def find_trendlines(self, 
                      dataframe: pd.DataFrame, 
                      swing_points: List[Tuple[int, float]],
-                     price_type: str = 'high',
-                     min_points: int = 3) -> List[Trendline]:
+                     price_type: str = 'high') -> List[Trendline]:
         """
         Find potential trendlines using pre-calculated swing points.
         
@@ -247,9 +246,6 @@ class TrendAnalysis:
         """
         trendlines = []
         
-        # Check if we have enough swing points
-        if len(swing_points) < min_points:
-            return []
             
         # Try connecting different combinations of swing points
         for i in range(len(swing_points) - 1):

@@ -119,11 +119,11 @@ class RiskMetrics(IStrategy):
 
     @property
     def plot_config(self):
-        return {
+        # Basic configuration with default plots
+        plot_config = {
             "main_plot": {
                 "all_highs": {"color": "red", "type": "scatter"},
                 "all_lows": {"color": "green", "type": "scatter"},
-                "resistance_line": {"color": "red", "width": 2.0},
                 "support_line": {"color": "green", "width": 2.0},
                 "current_trendline": {"color": "purple", "width": 2.0},
                 "trendline_forecast": {"color": "purple", "style": "dashdot", "width": 1.5}
@@ -134,6 +134,19 @@ class RiskMetrics(IStrategy):
                 }
             }
         }
+        
+        # Dynamically add resistance line configurations
+        # The actual number will be determined during indicator population
+        for i in range(145):  # Support up to 10 resistance lines
+            line_name = f'resistance_line_{i}'
+            # Use different shades of red for different resistance lines
+            intensity = max(30, 100 - i * 7)  # Decreasing intensity for weaker lines
+            plot_config["main_plot"][line_name] = {
+                "color": f"rgb(255, {intensity}, {intensity})",
+                "width": max(0.5, 2.0 - i * 0.15)  # Thinner lines for weaker resistance
+            }
+            
+        return plot_config
     
     def __init__(self, config: dict) -> None:
         super().__init__(config)
@@ -151,7 +164,7 @@ class RiskMetrics(IStrategy):
             min_points=2,  # Reduced minimum points
             min_slope=0.00001,  # Reduced minimum slope
             min_strength=0.2,  # Reduced strength requirement
-            angle_threshold=85  # Increased angle threshold
+            angle_threshold=90  # Increased angle threshold
         )
         self.har_model = None
         self.last_fit = None
@@ -221,13 +234,15 @@ class RiskMetrics(IStrategy):
         # Initialize marker columns for support and resistance points
         dataframe['all_highs'] = np.nan
         dataframe['all_lows'] = np.nan
-        dataframe['resistance_line'] = np.nan
+        # Initialize columns for resistance lines (up to 10)
+        for i in range(145):
+            dataframe[f'resistance_line_{i}'] = np.nan
         dataframe['support_line'] = np.nan
         dataframe['current_trendline'] = np.nan
         dataframe['trendline_forecast'] = np.nan
         
         # Calculate trendlines using local maxima/minima
-        lookback = 2000  # Use last 300 candles for trendline calculation
+        lookback = 200  # Use last 2000 candles for trendline calculation
 
         # Don't calculate trendlines if we don't have enough data
         if len(dataframe) < 30:
@@ -263,43 +278,45 @@ class RiskMetrics(IStrategy):
         resistance_lines = self.trend_analyzer.find_trendlines(
             recent_data,
             high_swing_points,
-            price_type='high',
-            min_points=2
+            price_type='high'
         )
-        print("resistance_lines: ", resistance_lines)
-        
+        print("resistance_lines", len(resistance_lines))  
+        print("ehofaghdiupoghdfsaoiuh")     
         # Find support (low) trendlines
         support_lines = self.trend_analyzer.find_trendlines(
             recent_data, 
             low_swing_points,
-            price_type='low',
-            min_points=2
+            price_type='low'
         )
         
-        # Plot the strongest resistance line (if any)
+        # Plot all resistance lines
         if resistance_lines and len(resistance_lines) > 0:
-            resistance = max(resistance_lines, key=lambda t: t.strength)
-            start_idx = len(dataframe) - lookback + resistance.start_index
-            end_idx = len(dataframe) - lookback + resistance.end_index
+            # Sort resistance lines by strength (strongest first)
+            sorted_resistance_lines = sorted(resistance_lines, key=lambda t: t.strength, reverse=True)
             
-            # Plot resistance line
-            indices = np.arange(start_idx, end_idx + 1)
-            normalized_indices = np.arange(len(indices))
-            dataframe.loc[indices, 'resistance_line'] = (
-                resistance.slope * normalized_indices + resistance.intercept
-            )
-            
-            # Extrapolate resistance line into the future
-            steps_forward = 10
-            future_values = self.trend_analyzer.extrapolate_trendline(resistance, steps_forward)
-            future_indices = np.arange(
-                end_idx + 1,
-                end_idx + steps_forward + 1
-            )
-            
-            for i, idx in enumerate(future_indices):
-                if idx < len(dataframe):
-                    dataframe.loc[idx, 'resistance_line'] = future_values[i]
+            # Plot up to 10 resistance lines (or fewer if there aren't that many)
+            for i, resistance in enumerate(sorted_resistance_lines[:145]):
+                start_idx = len(dataframe) - lookback + resistance.start_index
+                end_idx = len(dataframe) - lookback + resistance.end_index
+                
+                # Plot resistance line
+                indices = np.arange(start_idx, end_idx + 1)
+                normalized_indices = np.arange(len(indices))
+                dataframe.loc[indices, f'resistance_line_{i}'] = (
+                    resistance.slope * normalized_indices + resistance.intercept
+                )
+                
+                # Extrapolate resistance line into the future
+                steps_forward = 10
+                future_values = self.trend_analyzer.extrapolate_trendline(resistance, steps_forward)
+                future_indices = np.arange(
+                    end_idx + 1,
+                    end_idx + steps_forward + 1
+                )
+                
+                for j, idx in enumerate(future_indices):
+                    if idx < len(dataframe):
+                        dataframe.loc[idx, f'resistance_line_{i}'] = future_values[j]
         
         # Plot the strongest support line (if any)
         if support_lines and len(support_lines) > 0:
