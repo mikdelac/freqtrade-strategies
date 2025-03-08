@@ -91,6 +91,8 @@ def segtrends(dataframe, field="close", segments=2, charts=False):
     import numpy as np
 
     y = np.array(x)
+    high_values = np.array(dataframe["high"])
+    low_values = np.array(dataframe["low"])
 
     # Implement trendlines
     segments = int(segments)
@@ -100,15 +102,15 @@ def segtrends(dataframe, field="close", segments=2, charts=False):
     for i in range(1, segments + 1):
         ind2 = i * segsize
         ind1 = ind2 - segsize
-        maxima[i - 1] = max(y[ind1:ind2])
-        minima[i - 1] = min(y[ind1:ind2])
+        maxima[i - 1] = max(high_values[ind1:ind2])
+        minima[i - 1] = min(low_values[ind1:ind2])
 
     # Find the indexes of these maxima in the data
     x_maxima = np.ones(segments)
     x_minima = np.ones(segments)
     for i in range(0, segments):
-        x_maxima[i] = np.where(y == maxima[i])[0][0]
-        x_minima[i] = np.where(y == minima[i])[0][0]
+        x_maxima[i] = np.where(high_values == maxima[i])[0][0]
+        x_minima[i] = np.where(low_values == minima[i])[0][0]
 
     if charts:
         import matplotlib.pyplot as plt
