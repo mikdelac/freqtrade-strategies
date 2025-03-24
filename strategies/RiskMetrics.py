@@ -144,6 +144,14 @@ class RiskMetrics(IStrategy):
             "subplots": {
                 "ATR": {
                     "atr": {"color": "blue"}
+                },
+                "Trendline Scores": {
+                    "Ranked_Max_1_Score": {"color": "darkred", "type": "line", "width": 2.0},
+                    "Ranked_Max_2_Score": {"color": "red", "type": "line", "width": 1.5},
+                    "Ranked_Max_3_Score": {"color": "lightcoral", "type": "line", "width": 1.0},
+                    "Ranked_Min_1_Score": {"color": "darkgreen", "type": "line", "width": 2.0},
+                    "Ranked_Min_2_Score": {"color": "green", "type": "line", "width": 1.5},
+                    "Ranked_Min_3_Score": {"color": "lightgreen", "type": "line", "width": 1.0}
                 }
             }
         }
@@ -173,19 +181,51 @@ class RiskMetrics(IStrategy):
         # Top 3 ranked maxlines (resistance)
         for i in range(1, 4):
             line_name = f'Ranked_Max_{i}'
+            score_name = f'Ranked_Max_{i}_Score'
+            text_name = f'Ranked_Max_{i}_Text'
+            
             plot_config["main_plot"][line_name] = {
                 "color": f"rgb(220, 50, {50 + i * 50})",  # Distinct red shades
                 "width": 3.0 - (i - 1) * 0.5,  # Thicker lines for higher ranks
                 "style": "solid" if i == 1 else ("dashdot" if i == 2 else "dotted")
             }
             
+            # Add the text column with the actual score text
+            plot_config["main_plot"][text_name] = {
+                "color": f"rgb(220, 50, {50 + i * 50})",
+                "type": "text",
+                "location": "above", 
+                "offset": i * 10,  # Offset to prevent overlap
+                "fontsize": 12,    # Larger font
+                "plotly": {
+                    "textposition": "top right",
+                    "textfont": {"size": 12, "color": f"rgb(220, 50, {50 + i * 50})"}
+                }
+            }
+            
         # Top 3 ranked minlines (support)
         for i in range(1, 4):
             line_name = f'Ranked_Min_{i}'
+            score_name = f'Ranked_Min_{i}_Score'
+            text_name = f'Ranked_Min_{i}_Text'
+            
             plot_config["main_plot"][line_name] = {
                 "color": f"rgb(50, 220, {50 + i * 50})",  # Distinct green shades
                 "width": 3.0 - (i - 1) * 0.5,  # Thicker lines for higher ranks
                 "style": "solid" if i == 1 else ("dashdot" if i == 2 else "dotted")
+            }
+            
+            # Add the text column with the actual score text
+            plot_config["main_plot"][text_name] = {
+                "color": f"rgb(50, 220, {50 + i * 50})",
+                "type": "text",
+                "location": "below", 
+                "offset": i * 10,  # Offset to prevent overlap
+                "fontsize": 12,    # Larger font
+                "plotly": {
+                    "textposition": "bottom right",
+                    "textfont": {"size": 12, "color": f"rgb(50, 220, {50 + i * 50})"}
+                }
             }
             
         return plot_config
@@ -373,6 +413,15 @@ class RiskMetrics(IStrategy):
                         if current_idx < len(dataframe):
                             dataframe.loc[current_idx, f'Ranked_Max_{rank}'] = seg_trends[max_col_name].iloc[i]
                             dataframe.loc[current_idx, f'Ranked_Max_{rank}_Score'] = max_score
+                    
+                    # Add a column with score text for displaying on the chart
+                    dataframe[f'Ranked_Max_{rank}_Text'] = ""
+                    if len(recent_data) > 30:
+                        # Add label near the end of visible chart
+                        point = last_idx + len(recent_data) - 10
+                        if 0 <= point < len(dataframe):
+                            # Store the score text in a dedicated text column
+                            dataframe.loc[point, f'Ranked_Max_{rank}_Text'] = f"R{rank} Score: {max_score:.0f}"
                 
                 if len(ranked_minlines) >= rank:
                     min_col_name = list(ranked_minlines.keys())[rank-1]
@@ -387,6 +436,15 @@ class RiskMetrics(IStrategy):
                         if current_idx < len(dataframe):
                             dataframe.loc[current_idx, f'Ranked_Min_{rank}'] = seg_trends[min_col_name].iloc[i]
                             dataframe.loc[current_idx, f'Ranked_Min_{rank}_Score'] = min_score
+                    
+                    # Add a column with score text for displaying on the chart
+                    dataframe[f'Ranked_Min_{rank}_Text'] = ""
+                    if len(recent_data) > 30:
+                        # Add label near the end of visible chart
+                        point = last_idx + len(recent_data) - 10
+                        if 0 <= point < len(dataframe):
+                            # Store the score text in a dedicated text column
+                            dataframe.loc[point, f'Ranked_Min_{rank}_Text'] = f"S{rank} Score: {min_score:.0f}"
         
         except Exception as e:
             # Fail gracefully if ranking fails
