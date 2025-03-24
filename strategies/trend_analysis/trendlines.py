@@ -378,22 +378,78 @@ class TrendAnalysis:
                      current_price: float,
                      threshold: float = 0.02) -> bool:
         """
-        Detect if current price represents a breakout from trendline.
+        Detect if the current price has broken out from the trendline.
         
         Args:
-            trendline: Current trendline
-            current_price: Latest price
-            threshold: Minimum percentage deviation to consider a breakout
+            trendline: Trendline object to check against
+            current_price: Current price
+            threshold: Price deviation threshold as a percentage
             
         Returns:
-            bool: True if price has broken out of trendline
+            True if breakout detected, False otherwise
         """
-        # Calculate expected price at current point
-        current_idx = trendline.end_index + 1
-        expected_price = trendline.slope * current_idx + trendline.intercept
+        # Get expected price from trendline
+        last_index = trendline.end_index
+        expected_price = trendline.slope * last_index + trendline.intercept
         
-        # Calculate percentage deviation
-        deviation = abs(current_price - expected_price) / expected_price
+        # Determine breakout based on direction
+        if trendline.direction == TrendDirection.UP:
+            # For uptrend, breakout is when price goes below the trendline by threshold
+            return current_price < expected_price * (1 - threshold)
+        elif trendline.direction == TrendDirection.DOWN:
+            # For downtrend, breakout is when price goes above the trendline by threshold
+            return current_price > expected_price * (1 + threshold)
+        else:
+            # For sideways trend, any significant deviation is a breakout
+            deviation = abs((current_price - expected_price) / expected_price)
+            return deviation > threshold
+            
+    def calculate_trendline_set_scores(self, ranked_maxlines: dict, ranked_minlines: dict) -> dict:
+        """
+        Calculate mean scores for each set of trendlines and select the set with the highest score.
         
-        return deviation > threshold 
+        Args:
+            ranked_maxlines: Dictionary of ranked maxlines (resistance) with their scores
+            ranked_minlines: Dictionary of ranked minlines (support) with their scores
+            
+        Returns:
+            Dictionary with mean scores and highest scoring set information
+        """
+        result = {}
+        
+        # Calculate mean score for maxlines (resistance)
+        max_scores = list(ranked_maxlines.values())
+        max_mean_score = np.mean(max_scores) if max_scores else 0
+        result["max_mean_score"] = float(max_mean_score)
+        
+        # Calculate mean score for minlines (support)
+        min_scores = list(ranked_minlines.values())
+        min_mean_score = np.mean(min_scores) if min_scores else 0
+        result["min_mean_score"] = float(min_mean_score)
+        
+        # Determine which set has the highest mean score
+        if max_mean_score >= min_mean_score:
+            result["highest_set"] = "max"  # Resistance has higher score
+            if max_scores:
+                # Get the line with the highest score (first item, since the dict is sorted)
+                highest_line_name = list(ranked_maxlines.keys())[0]
+                highest_score = ranked_maxlines[highest_line_name]
+                result["highest_line_name"] = highest_line_name
+                result["highest_line_score"] = float(highest_score)
+            else:
+                result["highest_line_name"] = None
+                result["highest_line_score"] = 0.0
+        else:
+            result["highest_set"] = "min"  # Support has higher score
+            if min_scores:
+                # Get the line with the highest score (first item, since the dict is sorted)
+                highest_line_name = list(ranked_minlines.keys())[0]
+                highest_score = ranked_minlines[highest_line_name]
+                result["highest_line_name"] = highest_line_name
+                result["highest_line_score"] = float(highest_score)
+            else:
+                result["highest_line_name"] = None
+                result["highest_line_score"] = 0.0
+                
+        return result
 

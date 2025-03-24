@@ -138,6 +138,7 @@ class RiskMetrics(IStrategy):
                 "all_lows": {"color": "green", "type": "scatter"},
                 "Max Line": {"color": "red", "width": 2.0},
                 "Min Line": {"color": "green", "width": 2.0},
+                "Highest_Scored_Line": {"color": "purple", "width": 3.0},
                 "current_trendline": {"color": "purple", "width": 2.0},
                 "trendline_forecast": {"color": "purple", "style": "dashdot", "width": 1.5}
             },
@@ -145,13 +146,10 @@ class RiskMetrics(IStrategy):
                 "ATR": {
                     "atr": {"color": "blue"}
                 },
-                "Trendline Scores": {
-                    "Ranked_Max_1_Score": {"color": "darkred", "type": "line", "width": 2.0},
-                    "Ranked_Max_2_Score": {"color": "red", "type": "line", "width": 1.5},
-                    "Ranked_Max_3_Score": {"color": "lightcoral", "type": "line", "width": 1.0},
-                    "Ranked_Min_1_Score": {"color": "darkgreen", "type": "line", "width": 2.0},
-                    "Ranked_Min_2_Score": {"color": "green", "type": "line", "width": 1.5},
-                    "Ranked_Min_3_Score": {"color": "lightgreen", "type": "line", "width": 1.0}
+                "Mean Scores": {
+                    "Max_Mean_Score": {"color": "red", "type": "line", "width": 2.0},
+                    "Min_Mean_Score": {"color": "green", "type": "line", "width": 2.0},
+                    "Highest_Line_Score": {"color": "purple", "type": "line", "width": 2.5}
                 }
             }
         }
@@ -159,75 +157,19 @@ class RiskMetrics(IStrategy):
         # Define the maximum number of segments we'll use
         max_segments = 10
         
-        # Add individual trend lines from segtrends for each segment
-        for i in range(max_segments):
-            # Max lines (resistance)
-            line_name = f'Max_Line_{i}'
-            intensity = max(30, 100 - i * 5)  # Decreasing intensity for weaker lines
-            plot_config["main_plot"][line_name] = {
-                "color": f"rgb(255, {intensity}, {intensity})",
-                "width": max(0.5, 2.0 - i * 0.1)  # Thinner lines for weaker resistance
-            }
-            
-            # Min lines (support)
-            line_name = f'Min_Line_{i}'
-            intensity = max(30, 100 - i * 5)  # Decreasing intensity for weaker lines
-            plot_config["main_plot"][line_name] = {
-                "color": f"rgb({intensity}, 255, {intensity})",
-                "width": max(0.5, 2.0 - i * 0.1)  # Thinner lines for weaker support
-            }
         
-        # Add ranked trendlines with distinct colors and styles
-        # Top 3 ranked maxlines (resistance)
-        for i in range(1, 4):
-            line_name = f'Ranked_Max_{i}'
-            score_name = f'Ranked_Max_{i}_Score'
-            text_name = f'Ranked_Max_{i}_Text'
-            
-            plot_config["main_plot"][line_name] = {
-                "color": f"rgb(220, 50, {50 + i * 50})",  # Distinct red shades
-                "width": 3.0 - (i - 1) * 0.5,  # Thicker lines for higher ranks
-                "style": "solid" if i == 1 else ("dashdot" if i == 2 else "dotted")
+        # Add the text column for the highest scored line
+        plot_config["main_plot"]["Highest_Line_Text"] = {
+            "color": "purple",
+            "type": "text",
+            "location": "middle",
+            "fontsize": 14,
+            "plotly": {
+                "textposition": "top right",
+                "textfont": {"size": 14, "color": "purple", "family": "Arial, bold"}
             }
-            
-            # Add the text column with the actual score text
-            plot_config["main_plot"][text_name] = {
-                "color": f"rgb(220, 50, {50 + i * 50})",
-                "type": "text",
-                "location": "above", 
-                "offset": i * 10,  # Offset to prevent overlap
-                "fontsize": 12,    # Larger font
-                "plotly": {
-                    "textposition": "top right",
-                    "textfont": {"size": 12, "color": f"rgb(220, 50, {50 + i * 50})"}
-                }
-            }
-            
-        # Top 3 ranked minlines (support)
-        for i in range(1, 4):
-            line_name = f'Ranked_Min_{i}'
-            score_name = f'Ranked_Min_{i}_Score'
-            text_name = f'Ranked_Min_{i}_Text'
-            
-            plot_config["main_plot"][line_name] = {
-                "color": f"rgb(50, 220, {50 + i * 50})",  # Distinct green shades
-                "width": 3.0 - (i - 1) * 0.5,  # Thicker lines for higher ranks
-                "style": "solid" if i == 1 else ("dashdot" if i == 2 else "dotted")
-            }
-            
-            # Add the text column with the actual score text
-            plot_config["main_plot"][text_name] = {
-                "color": f"rgb(50, 220, {50 + i * 50})",
-                "type": "text",
-                "location": "below", 
-                "offset": i * 10,  # Offset to prevent overlap
-                "fontsize": 12,    # Larger font
-                "plotly": {
-                    "textposition": "bottom right",
-                    "textfont": {"size": 12, "color": f"rgb(50, 220, {50 + i * 50})"}
-                }
-            }
-            
+        }
+        
         return plot_config
     
     def __init__(self, config: dict) -> None:
@@ -321,6 +263,13 @@ class RiskMetrics(IStrategy):
         dataframe['Max Line'] = np.nan
         dataframe['Min Line'] = np.nan
         
+        # Initialize new columns for highest scored line
+        dataframe['Highest_Scored_Line'] = np.nan
+        dataframe['Highest_Set_Mean'] = np.nan
+        dataframe['Highest_Line_Score'] = np.nan
+        dataframe['Highest_Line_Type'] = ""  # Will be "Resistance" or "Support"
+        dataframe['Highest_Line_Text'] = ""  # For displaying text on the chart
+        
         # Define the maximum number of segments we'll use
         max_segments = 10
         
@@ -397,54 +346,37 @@ class RiskMetrics(IStrategy):
             ranked_maxlines = trendline_rankings["ranked_maxlines"]
             ranked_minlines = trendline_rankings["ranked_minlines"]
             
-            # Store the ranking information in the dataframe
-            # First, create columns for the top 3 ranked lines
-            for rank in range(1, 4):  # Top 3 ranks
-                if len(ranked_maxlines) >= rank:
-                    max_col_name = list(ranked_maxlines.keys())[rank-1]
-                    max_score = ranked_maxlines[max_col_name]
-                    dataframe[f'Ranked_Max_{rank}'] = np.nan
-                    dataframe[f'Ranked_Max_{rank}_Score'] = np.nan
-                    
-                    # Map the values from the ranked maxline to the new column
-                    last_idx = len(dataframe) - len(recent_data)
-                    for i in range(len(seg_trends)):
-                        current_idx = last_idx + i
-                        if current_idx < len(dataframe):
-                            dataframe.loc[current_idx, f'Ranked_Max_{rank}'] = seg_trends[max_col_name].iloc[i]
-                            dataframe.loc[current_idx, f'Ranked_Max_{rank}_Score'] = max_score
-                    
-                    # Add a column with score text for displaying on the chart
-                    dataframe[f'Ranked_Max_{rank}_Text'] = ""
-                    if len(recent_data) > 30:
-                        # Add label near the end of visible chart
-                        point = last_idx + len(recent_data) - 10
-                        if 0 <= point < len(dataframe):
-                            # Store the score text in a dedicated text column
-                            dataframe.loc[point, f'Ranked_Max_{rank}_Text'] = f"R{rank} Score: {max_score:.0f}"
+            # Calculate mean scores for each set and select the highest scored line
+            scores_result = self.trend_analyzer.calculate_trendline_set_scores(ranked_maxlines, ranked_minlines)
+            
+            # Store mean scores in the dataframe
+            max_mean_score = scores_result["max_mean_score"]
+            min_mean_score = scores_result["min_mean_score"]
+            highest_set = scores_result["highest_set"]
+            highest_line_name = scores_result["highest_line_name"]
+            highest_line_score = scores_result["highest_line_score"]
+            
+            # Add indicators for visualization
+            dataframe['Max_Mean_Score'] = max_mean_score
+            dataframe['Min_Mean_Score'] = min_mean_score
+            
+            # Copy the highest scored line to the Highest_Scored_Line column
+            if highest_line_name is not None:
+                last_idx = len(dataframe) - len(recent_data)
+                for i in range(len(seg_trends)):
+                    current_idx = last_idx + i
+                    if current_idx < len(dataframe):
+                        dataframe.loc[current_idx, 'Highest_Scored_Line'] = seg_trends[highest_line_name].iloc[i]
+                        dataframe.loc[current_idx, 'Highest_Set_Mean'] = max_mean_score if highest_set == "max" else min_mean_score
+                        dataframe.loc[current_idx, 'Highest_Line_Score'] = highest_line_score
+                        dataframe.loc[current_idx, 'Highest_Line_Type'] = "Resistance" if highest_set == "max" else "Support"
                 
-                if len(ranked_minlines) >= rank:
-                    min_col_name = list(ranked_minlines.keys())[rank-1]
-                    min_score = ranked_minlines[min_col_name]
-                    dataframe[f'Ranked_Min_{rank}'] = np.nan
-                    dataframe[f'Ranked_Min_{rank}_Score'] = np.nan
-                    
-                    # Map the values from the ranked minline to the new column
-                    last_idx = len(dataframe) - len(recent_data)
-                    for i in range(len(seg_trends)):
-                        current_idx = last_idx + i
-                        if current_idx < len(dataframe):
-                            dataframe.loc[current_idx, f'Ranked_Min_{rank}'] = seg_trends[min_col_name].iloc[i]
-                            dataframe.loc[current_idx, f'Ranked_Min_{rank}_Score'] = min_score
-                    
-                    # Add a column with score text for displaying on the chart
-                    dataframe[f'Ranked_Min_{rank}_Text'] = ""
-                    if len(recent_data) > 30:
-                        # Add label near the end of visible chart
-                        point = last_idx + len(recent_data) - 10
-                        if 0 <= point < len(dataframe):
-                            # Store the score text in a dedicated text column
-                            dataframe.loc[point, f'Ranked_Min_{rank}_Text'] = f"S{rank} Score: {min_score:.0f}"
+                # Add a label for the highest scored line
+                if len(recent_data) > 30:
+                    point = last_idx + len(recent_data) - 15
+                    if 0 <= point < len(dataframe):
+                        line_type = "Resistance" if highest_set == "max" else "Support"
+                        dataframe.loc[point, 'Highest_Line_Text'] = f"Best {line_type} Line (Score: {highest_line_score:.0f})"
         
         except Exception as e:
             # Fail gracefully if ranking fails
