@@ -169,6 +169,16 @@ Rules:
    - Exit when price reverts to mean
    - Adjust thresholds based on volatility regime
 
+## TODO
+1. Make a new Linear_Regression_Line that replaces Highest_Scored_Lined in the graph. This new line should be a linear regression of the selected datapoints 
+
+2. For the max lines, give a good amount of score to the lines that has a short distance with the datapoints in all_lows
+For the min lines, give a good amount of score to the lines that has a short distance with datapoints in all_highs
+
+3. for the Max Line or Min Line that has the closest slope value to the Highest_Scored_Line, create a channel using a new parallel line to that Max Line or Min Line that englobes every datapoint
+
+4. The lookback value should be tested against many values to detect a trend where the slope of Max Line and Min Line are almost the same
+
 ## Development Guidelines
 - Implement proper unit tests for VIX calculation
 - Document all risk parameters and their rationale
