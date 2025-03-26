@@ -57,9 +57,9 @@ class RiskMetrics(IStrategy):
     INTERFACE_VERSION = 3
 
     # Timeframe settings
-    timeframe = "5m"
+    timeframe = "1h"
     MINUTES_IN_DAY = 24 * 60
-    MINUTES_PER_CANDLE = 5
+    MINUTES_PER_CANDLE = 60
     CANDLES_PER_DAY = MINUTES_IN_DAY // MINUTES_PER_CANDLE  # 288 5-min candles per day
     TRADING_DAYS_PER_YEAR = 252
     WEEKS_PER_MONTH = 4.33
@@ -92,7 +92,7 @@ class RiskMetrics(IStrategy):
     rv_1h_change_threshold = DecimalParameter(0.05, 0.10, default=0.01, space="buy", optimize=True)
     
     # Trendline parameters
-    trendline_proximity_threshold = DecimalParameter(0.005, 0.02, default=0.002, space="buy", optimize=True)
+    trendline_proximity_threshold = DecimalParameter(0.005, 0.02, default=0.2, space="buy", optimize=True)
     trendline_touch_weight = DecimalParameter(1.5, 3.0, default=2.5, space="buy", optimize=True)
 
     # Minimal ROI designed for the strategy.
@@ -134,8 +134,8 @@ class RiskMetrics(IStrategy):
         # Basic configuration with default plots
         plot_config = {
             "main_plot": {
-                "all_highs": {"color": "red", "type": "scatter"},
-                "all_lows": {"color": "green", "type": "scatter"},
+                "all_highs": {"color": "red", "type": "scatter", "symbol": "triangle-down", "size": 12, "fillcolor": "red"},
+                "all_lows": {"color": "green", "type": "scatter", "symbol": "triangle-up", "size": 12, "fillcolor": "green"},
                 "Max Line": {"color": "red", "width": 2.0},
                 "Min Line": {"color": "green", "width": 2.0},
                 "Highest_Scored_Line": {"color": "purple", "width": 3.0},
@@ -150,13 +150,16 @@ class RiskMetrics(IStrategy):
                     "Max_Mean_Score": {"color": "red", "type": "line", "width": 2.0},
                     "Min_Mean_Score": {"color": "green", "type": "line", "width": 2.0},
                     "Highest_Line_Score": {"color": "purple", "type": "line", "width": 2.5}
+                },
+                "Total Line Scores": {
+                    "Max_Line_Score": {"color": "red", "type": "line", "width": 2.0},
+                    "Min_Line_Score": {"color": "green", "type": "line", "width": 2.0}
                 }
             }
         }
         
         # Define the maximum number of segments we'll use
         max_segments = 10
-        
         
         # Add the text column for the highest scored line
         plot_config["main_plot"]["Highest_Line_Text"] = {
@@ -286,7 +289,48 @@ class RiskMetrics(IStrategy):
             return dataframe
             
         recent_data = dataframe.tail(lookback).copy()
-        
+
+        # Mark high and low points for visualization
+        try:
+            # Use the TrendAnalysis._find_swing_points function to find significant swing points
+            # This provides better identification of true support and resistance levels
+            high_swing_points = self.trend_analyzer._find_swing_points(
+                prices=recent_data['high'].values,
+                price_type='high',
+                min_points=5,
+                distance=200
+            )
+            
+            low_swing_points = self.trend_analyzer._find_swing_points(
+                prices=recent_data['low'].values,
+                price_type='low',
+                min_points=5,
+                distance=200
+            )
+            
+            # Initialize all_highs and all_lows in recent_data with NaN values
+            recent_data['all_highs'] = np.nan
+            recent_data['all_lows'] = np.nan
+            
+            # Map swing high points to the dataframe
+            for idx, price in high_swing_points:
+                if idx < len(recent_data):
+                    actual_idx = len(dataframe) - len(recent_data) + idx
+                    if 0 <= actual_idx < len(dataframe):
+                        dataframe.loc[actual_idx, 'all_highs'] = price
+                        recent_data.iloc[idx, recent_data.columns.get_loc('all_highs')] = price
+            
+            # Map swing low points to the dataframe
+            for idx, price in low_swing_points:
+                if idx < len(recent_data):
+                    actual_idx = len(dataframe) - len(recent_data) + idx
+                    if 0 <= actual_idx < len(dataframe):
+                        dataframe.loc[actual_idx, 'all_lows'] = price
+                        recent_data.iloc[idx, recent_data.columns.get_loc('all_lows')] = price
+            
+        except Exception as e:
+            print(f"Error finding swing points: {e}")
+
         # Find global trendlines using gentrends
         try:
             # Generate trends using the gentrends function
@@ -338,7 +382,10 @@ class RiskMetrics(IStrategy):
                 threshold=self.trendline_proximity_threshold.value,
                 touch_weight=self.trendline_touch_weight.value,
                 max_prefix="Max_Line_", 
-                min_prefix="Min_Line_"
+                min_prefix="Min_Line_",
+                all_highs=recent_data['all_highs'],
+                all_lows=recent_data['all_lows'],
+                pivot_bonus=8.0  # Increased pivot bonus to emphasize swing points
             )
             
             # Store the top ranked maxlines and minlines in the dataframe
@@ -359,6 +406,36 @@ class RiskMetrics(IStrategy):
             # Add indicators for visualization
             dataframe['Max_Mean_Score'] = max_mean_score
             dataframe['Min_Mean_Score'] = min_mean_score
+            
+            # Calculate and store scores for the main Max Line and Min Line
+            main_lines_score = rank_trendlines(
+                trends,  # Use the gentrends output that has Max Line and Min Line
+                price_field="Data", 
+                threshold=self.trendline_proximity_threshold.value,
+                touch_weight=self.trendline_touch_weight.value,
+                all_highs=recent_data['all_highs'],
+                all_lows=recent_data['all_lows'],
+                pivot_bonus=9.0  # Increased pivot bonus to emphasize swing points
+            )
+            
+            # Extract the scores for Max Line and Min Line
+            max_line_score = main_lines_score["ranked_maxlines"].get("Max Line", 0)
+            min_line_score = main_lines_score["ranked_minlines"].get("Min Line", 0)
+            
+            # Store the scores in the dataframe
+            dataframe['Max_Line_Score'] = max_line_score
+            dataframe['Min_Line_Score'] = min_line_score
+            
+            # Add text labels for Max Line and Min Line scores
+            if len(recent_data) > 30:
+                max_point = last_idx + len(recent_data) - 30
+                min_point = last_idx + len(recent_data) - 45
+                
+                if 0 <= max_point < len(dataframe):
+                    dataframe.loc[max_point, 'Max_Line_Text'] = f"Max Line Score: {max_line_score:.0f}"
+                    
+                if 0 <= min_point < len(dataframe):
+                    dataframe.loc[min_point, 'Min_Line_Text'] = f"Min Line Score: {min_line_score:.0f}"
             
             # Copy the highest scored line to the Highest_Scored_Line column
             if highest_line_name is not None:
@@ -381,24 +458,6 @@ class RiskMetrics(IStrategy):
         except Exception as e:
             # Fail gracefully if ranking fails
             print(f"Error in ranking trendlines: {e}")
-        
-        # Mark high and low points for visualization
-        try:
-            # Use the high and low values instead of calculated swing points
-            highest_points = recent_data.sort_values('high', ascending=False).head(20)
-            lowest_points = recent_data.sort_values('low', ascending=True).head(20)
-            
-            for idx in highest_points.index:
-                actual_idx = len(dataframe) - len(recent_data) + (idx - recent_data.index[0])
-                if actual_idx < len(dataframe):
-                    dataframe.loc[actual_idx, 'all_highs'] = highest_points.loc[idx, 'high']
-                    
-            for idx in lowest_points.index:
-                actual_idx = len(dataframe) - len(recent_data) + (idx - recent_data.index[0])
-                if actual_idx < len(dataframe):
-                    dataframe.loc[actual_idx, 'all_lows'] = lowest_points.loc[idx, 'low']
-        except Exception as e:
-            print(f"Error marking high/low points: {e}")
 
         return dataframe
 
