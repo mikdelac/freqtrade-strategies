@@ -53,13 +53,17 @@ class RiskMetrics(IStrategy):
     - Risk-adjusted position sizing based on volatility regime
     - Trendline analysis with support and resistance identification
     - Trendline ranking based on price proximity and touch frequency
+    - Linear regression trendlines using TA-Lib's LINEARREG functions
+      * Provides straight-line trendlines using the least squares method
+      * Visualizes slope, angle, and projected forecasts
+      * Useful for identifying short to medium-term trends
     """
     INTERFACE_VERSION = 3
 
     # Timeframe settings
-    timeframe = "1h"
+    timeframe = "5m"
     MINUTES_IN_DAY = 24 * 60
-    MINUTES_PER_CANDLE = 60
+    MINUTES_PER_CANDLE = 5
     CANDLES_PER_DAY = MINUTES_IN_DAY // MINUTES_PER_CANDLE  # 288 5-min candles per day
     TRADING_DAYS_PER_YEAR = 252
     WEEKS_PER_MONTH = 4.33
@@ -94,6 +98,10 @@ class RiskMetrics(IStrategy):
     # Trendline parameters
     trendline_proximity_threshold = DecimalParameter(0.005, 0.02, default=0.2, space="buy", optimize=True)
     trendline_touch_weight = DecimalParameter(1.5, 3.0, default=2.5, space="buy", optimize=True)
+    
+    # Linear Regression parameters
+    linearreg_timeperiod = IntParameter(10, 500, default=200, space="buy", optimize=True)
+    linearreg_price_field = CategoricalParameter(['close', 'open', 'high', 'low'], default='close', space="buy", optimize=False)
 
     # Minimal ROI designed for the strategy.
     minimal_roi = {
@@ -140,7 +148,8 @@ class RiskMetrics(IStrategy):
                 "Min Line": {"color": "green", "width": 2.0},
                 "Highest_Scored_Line": {"color": "purple", "width": 3.0},
                 "current_trendline": {"color": "purple", "width": 2.0},
-                "trendline_forecast": {"color": "purple", "style": "dashdot", "width": 1.5}
+                "linear_reg_line": {"color": "blue", "width": 3.0},  # Increased width for better visibility
+                "linear_reg_forecast": {"color": "blue", "style": "dashdot", "width": 2.0}  # Increased width
             },
             "subplots": {
                 "ATR": {
@@ -160,18 +169,6 @@ class RiskMetrics(IStrategy):
         
         # Define the maximum number of segments we'll use
         max_segments = 10
-        
-        # Add the text column for the highest scored line
-        plot_config["main_plot"]["Highest_Line_Text"] = {
-            "color": "purple",
-            "type": "text",
-            "location": "middle",
-            "fontsize": 14,
-            "plotly": {
-                "textposition": "top right",
-                "textfont": {"size": 14, "color": "purple", "family": "Arial, bold"}
-            }
-        }
         
         return plot_config
     
@@ -282,13 +279,42 @@ class RiskMetrics(IStrategy):
             dataframe[f'Min_Line_{i}'] = np.nan
         
         # Calculate trendlines using local maxima/minima
-        lookback = 200  # Use last 2000 candles for trendline calculation
+        lookback = 200  # Use last 200 candles for trendline calculation
 
         # Don't calculate trendlines if we don't have enough data
         if len(dataframe) < 30:
             return dataframe
             
         recent_data = dataframe.tail(lookback).copy()
+        
+        # Calculate linear regression trendlines using TA-Lib
+        # These will provide straight line trendlines using the least squares method
+        try:
+            # Get appropriate timeperiod for linear regression
+            timeperiod = self.linearreg_timeperiod.value
+            price_field = self.linearreg_price_field.value
+            
+            # The linear regression trendline is a true straight line calculated using
+            # the least squares fit method over the specified timeperiod. Unlike the other
+            # trendlines that connect pivot points, this line represents the statistical
+            # best fit line through the price data and can help identify the trend
+            # direction and strength. A steeper slope indicates a stronger trend.
+            linearreg_data = self.trend_analyzer.calculate_talib_linearreg(
+                dataframe, 
+                timeperiod=timeperiod,
+                price_field=price_field
+            )
+            
+            # Copy the linear regression columns back to the original dataframe
+            dataframe['linear_reg'] = linearreg_data['linear_reg']
+            dataframe['linear_reg_slope'] = linearreg_data['linear_reg_slope']
+            dataframe['linear_reg_angle'] = linearreg_data['linear_reg_angle']
+            dataframe['linear_reg_intercept'] = linearreg_data['linear_reg_intercept']
+            dataframe['linear_reg_forecast'] = linearreg_data['linear_reg_forecast']
+            dataframe['linear_reg_line'] = linearreg_data['linear_reg_line']
+                    
+        except Exception as e:
+            print(f"Error calculating linear regression: {e}")
 
         # Mark high and low points for visualization
         try:

@@ -4,6 +4,7 @@ import pandas as pd
 from dataclasses import dataclass
 from enum import Enum
 from scipy.signal import find_peaks
+import talib.abstract as ta  # Add this import
 
 class TrendDirection(Enum):
     UP = "up"
@@ -451,5 +452,95 @@ class TrendAnalysis:
                 result["highest_line_name"] = None
                 result["highest_line_score"] = 0.0
                 
+        return result
+
+    def calculate_talib_linearreg(self, dataframe: pd.DataFrame, timeperiod: int = 14, 
+                                 price_field: str = 'close') -> pd.DataFrame:
+        """
+        Calculate and visualize a linear regression trendline using TA-Lib's LINEARREG functions.
+        
+        This method creates a true straight line representing the linear regression for the most
+        recent data window. Unlike the default TA-Lib behavior which calculates a new regression
+        value at each point, this method:
+        
+        1. Uses TA-Lib's LINEARREG functions to calculate regression parameters (slope, intercept)
+        2. Identifies the most recent valid regression point
+        3. Draws a single straight line covering the most recent timeperiod candles
+        4. Adds a forecast line extending a few candles into the future
+        
+        This approach results in a clean, straight line on the chart that clearly shows the current
+        trend direction as determined by linear regression.
+        
+        Args:
+            dataframe: Price dataframe with OHLCV data
+            timeperiod: Lookback period for calculating linear regression (default: 14)
+            price_field: Which price to use for regression (default: 'close')
+            
+        Returns:
+            DataFrame with added linear regression indicators and a straight trendline
+        """
+        # Make a copy to avoid modifying the original dataframe
+        result = dataframe.copy()
+        
+        # Get the price series for regression
+        price_series = result[price_field]
+        
+        # Calculate linear regression line endpoint values
+        # This gives the projected value of the regression line at each point
+        result['linear_reg'] = ta.LINEARREG(price_series, timeperiod=timeperiod)
+        
+        # Calculate slope of the regression line
+        result['linear_reg_slope'] = ta.LINEARREG_SLOPE(price_series, timeperiod=timeperiod)
+        
+        # Calculate angle of the regression line (in degrees)
+        result['linear_reg_angle'] = ta.LINEARREG_ANGLE(price_series, timeperiod=timeperiod)
+        
+        # Calculate intercept of the regression line
+        result['linear_reg_intercept'] = ta.LINEARREG_INTERCEPT(price_series, timeperiod=timeperiod)
+        
+        # Calculate linear regression-based forecast (TSF) for one period ahead
+        result['linear_reg_forecast'] = ta.TSF(price_series, timeperiod=timeperiod)
+        
+        # Initialize column for the linear regression line
+        result['linear_reg_line'] = np.nan
+        
+        # We'll draw a proper straight line using only the latest valid regression data
+        # Find the last valid regression point
+        last_valid_idx = None
+        last_valid_slope = None
+        last_valid_intercept = None
+        
+        # Start from the end of the dataframe and find the last valid regression point
+        for i in range(len(result)-1, timeperiod-2, -1):
+            if not (np.isnan(result.loc[i, 'linear_reg_slope']) or np.isnan(result.loc[i, 'linear_reg_intercept'])):
+                last_valid_idx = i
+                last_valid_slope = result.loc[i, 'linear_reg_slope']
+                last_valid_intercept = result.loc[i, 'linear_reg_intercept']
+                break
+        
+        # If we found a valid point, draw the line
+        if last_valid_idx is not None:
+            # Calculate line for the most recent timeperiod candles
+            # This will ensure we have a single straight line on the chart
+            start_idx = max(0, last_valid_idx - timeperiod + 1)
+            end_idx = last_valid_idx
+            
+            # Draw the line for these candles
+            for i in range(start_idx, end_idx + 1):
+                # Calculate x relative to the start of the segment (0-based)
+                x_value = i - start_idx
+                # Calculate y using the linear regression formula: y = mx + b
+                line_value = last_valid_slope * x_value + last_valid_intercept
+                # Store the line value
+                result.loc[i, 'linear_reg_line'] = line_value
+            
+            # Add a forecast line extending a few candles into the future
+            forecast_periods = 5
+            for i in range(1, forecast_periods + 1):
+                if end_idx + i < len(result):
+                    forecast_x = timeperiod - 1 + i
+                    forecast_value = last_valid_slope * forecast_x + last_valid_intercept
+                    result.loc[end_idx + i, 'linear_reg_forecast'] = forecast_value
+        
         return result
 
