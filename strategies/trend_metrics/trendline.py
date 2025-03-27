@@ -16,49 +16,53 @@ def gentrends(dataframe, field="close", window=1 / 3.0, charts=False):
     :param charts: Boolean value saying whether to print chart to screen
     """
 
-    x = dataframe[field]
-
     import numpy as np
     import pandas as pd
 
-    x = np.array(x)
+    # Use high values for resistance (Max Line)
+    x_high = np.array(dataframe["high"])
+    # Use low values for support (Min Line)
+    x_low = np.array(dataframe["low"])
+    # Use the specified field for Data
+    x_data = np.array(dataframe[field])
 
     if window < 1:
-        window = int(window * len(x))
+        window = int(window * len(x_data))
 
-    max1 = np.where(x == max(x))[0][0]  # find the index of the abs max
-    min1 = np.where(x == min(x))[0][0]  # find the index of the abs min
+    # Find max and min points using high and low data respectively
+    max1 = np.where(x_high == max(x_high))[0][0]  # find the index of the abs max in high
+    min1 = np.where(x_low == min(x_low))[0][0]  # find the index of the abs min in low
 
     # First the max
-    if max1 + window >= len(x):
-        max2 = max(x[0 : (max1 - window)])
+    if max1 + window >= len(x_high):
+        max2 = max(x_high[0 : (max1 - window)])
     else:
-        max2 = max(x[(max1 + window) :])
+        max2 = max(x_high[(max1 + window) :])
 
     # Now the min
     if min1 - window <= 0:
-        min2 = min(x[(min1 + window) :])
+        min2 = min(x_low[(min1 + window) :])
     else:
-        min2 = min(x[0 : (min1 - window)])
+        min2 = min(x_low[0 : (min1 - window)])
 
     # Now find the indices of the secondary extrema
-    max2 = np.where(x == max2)[0][0]  # find the index of the 2nd max
-    min2 = np.where(x == min2)[0][0]  # find the index of the 2nd min
+    max2 = np.where(x_high == max2)[0][0]  # find the index of the 2nd max
+    min2 = np.where(x_low == min2)[0][0]  # find the index of the 2nd min
 
     # Create & extend the lines
-    maxslope = (x[max1] - x[max2]) / (max1 - max2)  # slope between max points
-    minslope = (x[min1] - x[min2]) / (min1 - min2)  # slope between min points
-    a_max = x[max1] - (maxslope * max1)  # y-intercept for max trendline
-    a_min = x[min1] - (minslope * min1)  # y-intercept for min trendline
-    b_max = x[max1] + (maxslope * (len(x) - max1))  # extend to last data pt
-    b_min = x[min1] + (minslope * (len(x) - min1))  # extend to last data point
-    maxline = np.linspace(a_max, b_max, len(x))  # Y values between max's
-    minline = np.linspace(a_min, b_min, len(x))  # Y values between min's
+    maxslope = (x_high[max1] - x_high[max2]) / (max1 - max2)  # slope between max points
+    minslope = (x_low[min1] - x_low[min2]) / (min1 - min2)  # slope between min points
+    a_max = x_high[max1] - (maxslope * max1)  # y-intercept for max trendline
+    a_min = x_low[min1] - (minslope * min1)  # y-intercept for min trendline
+    b_max = x_high[max1] + (maxslope * (len(x_high) - max1))  # extend to last data pt
+    b_min = x_low[min1] + (minslope * (len(x_low) - min1))  # extend to last data point
+    maxline = np.linspace(a_max, b_max, len(x_data))  # Y values between max's
+    minline = np.linspace(a_min, b_min, len(x_data))  # Y values between min's
 
     # OUTPUT
-    trends = np.transpose(np.array((x, maxline, minline)))
+    trends = np.transpose(np.array((x_data, maxline, minline)))
     trends = pd.DataFrame(
-        trends, index=np.arange(0, len(x)), columns=["Data", "Max Line", "Min Line"]
+        trends, index=np.arange(0, len(x_data)), columns=["Data", "Max Line", "Min Line"]
     )
 
     if charts:
@@ -70,7 +74,7 @@ def gentrends(dataframe, field="close", window=1 / 3.0, charts=False):
         if isinstance(charts, str):
             savefig(f"{charts}.png")
         else:
-            savefig(f"{x[0]}_{x[len(x) - 1]}.png")
+            savefig(f"{x_data[0]}_{x_data[len(x_data) - 1]}.png")
         close()
 
     return trends

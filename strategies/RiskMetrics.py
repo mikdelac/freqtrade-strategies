@@ -33,14 +33,9 @@ from freqtrade.strategy import (
 
 # --------------------------------
 # Add your lib to import here
-import talib.abstract as ta
-import pandas_ta as pta
-from technical import qtpylib
-from arch.univariate import HARX
 from risk_metrics.volatility_models import VolatilityModel, VolatilityRegime
-from trend_analysis.trendlines import TrendAnalysis
-# Import the trendline functions
-from strategies.trend_analysis.trendline import gentrends, segtrends, rank_trendlines
+from trend_metrics.trend_analysis import TrendAnalysis
+from trend_metrics.trendline import gentrends, segtrends, rank_trendlines
 
 
 class RiskMetrics(IStrategy):
@@ -61,9 +56,9 @@ class RiskMetrics(IStrategy):
     INTERFACE_VERSION = 3
 
     # Timeframe settings
-    timeframe = "5m"
+    timeframe = "1h"
     MINUTES_IN_DAY = 24 * 60
-    MINUTES_PER_CANDLE = 5
+    MINUTES_PER_CANDLE = 60
     CANDLES_PER_DAY = MINUTES_IN_DAY // MINUTES_PER_CANDLE  # 288 5-min candles per day
     TRADING_DAYS_PER_YEAR = 252
     WEEKS_PER_MONTH = 4.33
@@ -147,9 +142,7 @@ class RiskMetrics(IStrategy):
                 "Max Line": {"color": "red", "width": 2.0},
                 "Min Line": {"color": "green", "width": 2.0},
                 "Highest_Scored_Line": {"color": "purple", "width": 3.0},
-                "current_trendline": {"color": "purple", "width": 2.0},
-                "linear_reg_line": {"color": "blue", "width": 3.0},  # Increased width for better visibility
-                "linear_reg_forecast": {"color": "blue", "style": "dashdot", "width": 2.0}  # Increased width
+                "linear_reg_line": {"color": "blue", "width": 3.0}
             },
             "subplots": {
                 "ATR": {
@@ -166,10 +159,7 @@ class RiskMetrics(IStrategy):
                 }
             }
         }
-        
-        # Define the maximum number of segments we'll use
-        max_segments = 10
-        
+                
         return plot_config
     
     def __init__(self, config: dict) -> None:
@@ -310,7 +300,6 @@ class RiskMetrics(IStrategy):
             dataframe['linear_reg_slope'] = linearreg_data['linear_reg_slope']
             dataframe['linear_reg_angle'] = linearreg_data['linear_reg_angle']
             dataframe['linear_reg_intercept'] = linearreg_data['linear_reg_intercept']
-            dataframe['linear_reg_forecast'] = linearreg_data['linear_reg_forecast']
             dataframe['linear_reg_line'] = linearreg_data['linear_reg_line']
                     
         except Exception as e:
@@ -362,7 +351,7 @@ class RiskMetrics(IStrategy):
             # Generate trends using the gentrends function
             # This gives us the main max and min lines (resistance and support)
             trends = gentrends(recent_data, field='close', window=1/3.0)
-            
+
             # Map the trend lines to the dataframe
             last_idx = len(dataframe) - len(recent_data)
             for i in range(len(trends)):
@@ -451,18 +440,7 @@ class RiskMetrics(IStrategy):
             # Store the scores in the dataframe
             dataframe['Max_Line_Score'] = max_line_score
             dataframe['Min_Line_Score'] = min_line_score
-            
-            # Add text labels for Max Line and Min Line scores
-            if len(recent_data) > 30:
-                max_point = last_idx + len(recent_data) - 30
-                min_point = last_idx + len(recent_data) - 45
-                
-                if 0 <= max_point < len(dataframe):
-                    dataframe.loc[max_point, 'Max_Line_Text'] = f"Max Line Score: {max_line_score:.0f}"
-                    
-                if 0 <= min_point < len(dataframe):
-                    dataframe.loc[min_point, 'Min_Line_Text'] = f"Min Line Score: {min_line_score:.0f}"
-            
+                        
             # Copy the highest scored line to the Highest_Scored_Line column
             if highest_line_name is not None:
                 last_idx = len(dataframe) - len(recent_data)
@@ -473,14 +451,7 @@ class RiskMetrics(IStrategy):
                         dataframe.loc[current_idx, 'Highest_Set_Mean'] = max_mean_score if highest_set == "max" else min_mean_score
                         dataframe.loc[current_idx, 'Highest_Line_Score'] = highest_line_score
                         dataframe.loc[current_idx, 'Highest_Line_Type'] = "Resistance" if highest_set == "max" else "Support"
-                
-                # Add a label for the highest scored line
-                if len(recent_data) > 30:
-                    point = last_idx + len(recent_data) - 15
-                    if 0 <= point < len(dataframe):
-                        line_type = "Resistance" if highest_set == "max" else "Support"
-                        dataframe.loc[point, 'Highest_Line_Text'] = f"Best {line_type} Line (Score: {highest_line_score:.0f})"
-        
+                        
         except Exception as e:
             # Fail gracefully if ranking fails
             print(f"Error in ranking trendlines: {e}")
