@@ -209,176 +209,151 @@ def rank_trendlines(trends, price_field="Data", threshold=0.01, touch_weight=2.0
     import pandas as pd
     import numpy as np
     
-    # Initialize dictionaries to store scores
-    maxline_scores = {}
-    minline_scores = {}
-    
-    # Get all maxline and minline columns
-    maxline_cols = [col for col in trends.columns if col.startswith(max_prefix) or col == "Max Line"]
-    minline_cols = [col for col in trends.columns if col.startswith(min_prefix) or col == "Min Line"]
+    # --- Initialization ---
+    # Get all trendline columns and create dictionaries to store scores
+    trendlines = {
+        'resistance': {
+            'columns': [col for col in trends.columns if col.startswith(max_prefix) or col == "Max Line"],
+            'scores': {},
+            'pivot_points': all_lows,  # Resistance lines connect low points
+            'is_max_line': True
+        },
+        'support': {
+            'columns': [col for col in trends.columns if col.startswith(min_prefix) or col == "Min Line"],
+            'scores': {},
+            'pivot_points': all_highs,  # Support lines connect high points
+            'is_max_line': False
+        }
+    }
     
     # Total number of datapoints
     n_points = len(trends)
     
     # Calculate recency weights - linear increase from oldest to newest point
-    recency_weights = np.linspace(1.0, 3.0, n_points)  # Newest point is 3x more valuable than oldest
+    # Newest point is 3x more valuable than oldest
+    recency_weights = np.linspace(1.0, 3.0, n_points)
     
-    # Prepare highs and lows for matching with trends
-    # Convert from Series with potentially different indices to numpy arrays for positional matching
-    all_highs_array = None
-    all_lows_array = None
-    
-    if all_highs is not None and not all_highs.isna().all():
+    # --- Prepare pivot point arrays ---
+    def prepare_pivot_array(pivot_points, n_points):
+        """Helper function to prepare pivot point arrays with consistent length"""
+        if pivot_points is None or pivot_points.isna().all():
+            return None
+            
         # Extract valid values and reset to positional indexing
-        all_highs_array = all_highs.reset_index(drop=True).values
-        # If the arrays are different lengths, trim or pad 
-        if len(all_highs_array) > n_points:
-            # Trim to match trends length
-            all_highs_array = all_highs_array[:n_points]
-        elif len(all_highs_array) < n_points:
+        array = pivot_points.reset_index(drop=True).values
+        
+        # If arrays are different lengths, trim or pad to match trends length
+        if len(array) > n_points:
+            return array[:n_points]  # Trim to match trends length
+        elif len(array) < n_points:
             # Pad with NaN to match trends length
-            padding = np.full(n_points - len(all_highs_array), np.nan)
-            all_highs_array = np.concatenate([all_highs_array, padding])
+            padding = np.full(n_points - len(array), np.nan)
+            return np.concatenate([array, padding])
+        return array
     
-    if all_lows is not None and not all_lows.isna().all():
-        # Extract valid values and reset to positional indexing
-        all_lows_array = all_lows.reset_index(drop=True).values
-        # If the arrays are different lengths, trim or pad
-        if len(all_lows_array) > n_points:
-            # Trim to match trends length
-            all_lows_array = all_lows_array[:n_points]
-        elif len(all_lows_array) < n_points:
-            # Pad with NaN to match trends length
-            padding = np.full(n_points - len(all_lows_array), np.nan)
-            all_lows_array = np.concatenate([all_lows_array, padding])
-    
-    # Calculate scores for each maxline
-    for col in maxline_cols:
-        # Skip columns with all NaN values
-        if trends[col].isna().all():
-            continue
-            
-        # Calculate proximity score
-        # For maxlines: price is near when price is close to but not above the line
-        price_data = trends[price_field]
-        trendline_data = trends[col]
-        
-        # Calculate distance as percentage of price
-        distance = (trendline_data - price_data) / price_data
-        
-        # Identify near misses and touches with boolean masks
-        near_misses = (distance >= 0) & (distance <= threshold)
-        touches = (distance >= 0) & (distance <= threshold/2)
-        
-        # Apply recency weighting to each interaction
-        weighted_near_misses = np.where(near_misses, recency_weights, 0)
-        weighted_touches = np.where(touches, recency_weights * touch_weight, 0)
-        
-        # Calculate base score
-        base_score = np.sum(weighted_near_misses) + np.sum(weighted_touches)
-        
-        # Add bonus for proximity to all_lows if provided
-        low_pivot_bonus = 0
-        if all_lows_array is not None:
-            # Get non-nan indices in all_lows_array
-            low_indices = np.where(~np.isnan(all_lows_array))[0]
-            
-            for idx in low_indices:
-                # Skip if index is out of bounds for trendline data
-                if idx >= len(trendline_data):
-                    continue
-                    
-                # Calculate distance between the trendline and the low point
-                low_value = all_lows_array[idx]
-                trendline_value = trendline_data.iloc[idx]
-                
-                # Distance as percentage
-                if not pd.isna(trendline_value) and not pd.isna(low_value) and low_value > 0:
-                    dist_pct = (trendline_value - low_value) / low_value
-                    # Award bonus points if the trendline is close to the low point
-                    if 0 <= abs(dist_pct) <= threshold:
-                        # More points for closer proximity
-                        proximity_factor = 1.0 - (abs(dist_pct) / threshold)  # 1.0 for exact match, 0.0 for threshold
-                        
-                        # Apply recency weighting to the bonus
-                        recency_factor = recency_weights[min(idx, len(recency_weights)-1)]
-                        low_pivot_bonus += pivot_bonus * proximity_factor * recency_factor
-        
-        # Add the low pivot bonus to the score
-        total_score = base_score + low_pivot_bonus
-        print(f"Total score for {col}: {total_score} and base score: {base_score} and low pivot bonus: {low_pivot_bonus}")
-        
-        # Store score
-        maxline_scores[col] = total_score
-    
-    # Calculate scores for each minline
-    for col in minline_cols:
-        # Skip columns with all NaN values
-        if trends[col].isna().all():
-            continue
-            
-        # Calculate proximity score
-        # For minlines: price is near when price is close to but not below the line
-        price_data = trends[price_field]
-        trendline_data = trends[col]
-        
-        # Calculate distance as percentage of price
-        distance = (price_data - trendline_data) / price_data
-        
-        # Identify near misses and touches with boolean masks
-        near_misses = (distance >= 0) & (distance <= threshold)
-        touches = (distance >= 0) & (distance <= threshold/2)
-        
-        # Apply recency weighting to each interaction
-        weighted_near_misses = np.where(near_misses, recency_weights, 0)
-        weighted_touches = np.where(touches, recency_weights * touch_weight, 0)
-        
-        # Calculate base score
-        base_score = np.sum(weighted_near_misses) + np.sum(weighted_touches)
-        
-        # Add bonus for proximity to all_highs if provided
-        high_pivot_bonus = 0
-        if all_highs_array is not None:
-            # Get non-nan indices in all_highs_array
-            high_indices = np.where(~np.isnan(all_highs_array))[0]
-            
-            for idx in high_indices:
-                # Skip if index is out of bounds for trendline data
-                if idx >= len(trendline_data):
-                    continue
-                    
-                # Calculate distance between the trendline and the high point
-                high_value = all_highs_array[idx]
-                trendline_value = trendline_data.iloc[idx]
-                
-                # Distance as percentage
-                if not pd.isna(trendline_value) and not pd.isna(high_value) and high_value > 0:
-                    dist_pct = (high_value - trendline_value) / high_value
-                    print(f"dist_pct: {dist_pct} and threshold: {threshold}")
-                    
-                    # Award bonus points if the trendline is close to the high point
-                    if 0 <= abs(dist_pct) <= threshold:
-                        # More points for closer proximity
-                        proximity_factor = 1.0 - (abs(dist_pct) / threshold)  # 1.0 for exact match, 0.0 for threshold
-                        
-                        # Apply recency weighting to the bonus
-                        recency_factor = recency_weights[min(idx, len(recency_weights)-1)]
-                        high_pivot_bonus += pivot_bonus * proximity_factor * recency_factor
-        
-        # Add the high pivot bonus to the score
-        total_score = base_score + high_pivot_bonus
-        
-        # Store score
-        minline_scores[col] = total_score
-    
-    # Sort dictionaries by score in descending order
-    ranked_maxlines = {k: v for k, v in sorted(maxline_scores.items(), key=lambda item: item[1], reverse=True)}
-    ranked_minlines = {k: v for k, v in sorted(minline_scores.items(), key=lambda item: item[1], reverse=True)}
-    
-    # Create result dictionary with ranked lines and their scores
-    result = {
-        "ranked_maxlines": ranked_maxlines,
-        "ranked_minlines": ranked_minlines
+    # Prepare pivot arrays once
+    prepared_pivots = {
+        'highs': prepare_pivot_array(all_highs, n_points),
+        'lows': prepare_pivot_array(all_lows, n_points)
     }
     
-    return result
+    # --- Calculate scores for each type of trendline ---
+    for trendline_type, config in trendlines.items():
+        columns = config['columns']
+        scores = config['scores']
+        is_max_line = config['is_max_line']
+        
+        # Get the appropriate pivot points for this trendline type
+        pivot_points = prepared_pivots['lows'] if is_max_line else prepared_pivots['highs']
+        
+        for col in columns:
+            # Skip columns with all NaN values
+            if trends[col].isna().all():
+                continue
+                
+            # Get price and trendline data
+            price_data = trends[price_field]
+            trendline_data = trends[col]
+            
+            # --- Calculate proximity scores ---
+            # For maxlines: distance = trendline - price (positive when price is below line)
+            # For minlines: distance = price - trendline (positive when price is above line)
+            if is_max_line:
+                distance_pct = (trendline_data - price_data) / price_data
+            else:
+                distance_pct = (price_data - trendline_data) / price_data
+            
+            # Identify near misses and touches
+            near_misses = (distance_pct >= 0) & (distance_pct <= threshold)
+            touches = (distance_pct >= 0) & (distance_pct <= threshold/2)
+            
+            # Apply recency weighting to each interaction
+            weighted_near_misses = np.where(near_misses, recency_weights, 0)
+            weighted_touches = np.where(touches, recency_weights * touch_weight, 0)
+            
+            # Calculate base score
+            base_score = np.sum(weighted_near_misses) + np.sum(weighted_touches)
+            
+            # --- Calculate pivot point bonus ---
+            pivot_bonus_score = 0
+            
+            if pivot_points is not None:
+                # Get indices of non-NaN pivot points
+                valid_indices = np.where(~np.isnan(pivot_points))[0]
+                
+                for idx in valid_indices:
+                    # Skip if index is out of bounds for trendline data
+                    if idx >= len(trendline_data):
+                        continue
+                    
+                    # Get values for pivot point and trendline at this index
+                    pivot_value = pivot_points[idx]
+                    trendline_value = trendline_data.iloc[idx]
+                    
+                    # Skip if either value is NaN or pivot is zero (avoid division by zero)
+                    if pd.isna(trendline_value) or pd.isna(pivot_value) or pivot_value <= 0:
+                        continue
+                    
+                    # Calculate distance as percentage
+                    if is_max_line:
+                        # For resistance lines: distance from trendline to low pivot
+                        dist_pct = (trendline_value - pivot_value) / pivot_value
+                    else:
+                        # For support lines: distance from high pivot to trendline
+                        dist_pct = (pivot_value - trendline_value) / pivot_value
+                    
+                    # Award bonus points if trendline is close to pivot point
+                    if 0 <= abs(dist_pct) <= threshold:
+                        # More points for closer proximity (1.0 for exact match, 0.0 for threshold)
+                        proximity_factor = 1.0 - (abs(dist_pct) / threshold)
+                        
+                        # Apply recency weighting
+                        recency_factor = recency_weights[min(idx, len(recency_weights)-1)]
+                        pivot_bonus_score += pivot_bonus * proximity_factor * recency_factor
+                        
+                        # Debugging output for minlines
+                        if not is_max_line:
+                            print(f"dist_pct: {dist_pct} and threshold: {threshold}")
+            
+            # --- Calculate total score and store results ---
+            # total_score = base_score + pivot_bonus_score
+            total_score = pivot_bonus_score
+
+            # Debugging output
+            print(f"Total score for {col}: {total_score} and base score: {base_score} and low pivot bonus: {pivot_bonus_score}")
+            
+            # Store the score
+            scores[col] = total_score
+    
+    # --- Sort and return results ---
+    # Sort dictionaries by score in descending order
+    ranked_results = {
+        "ranked_maxlines": {k: v for k, v in sorted(trendlines['resistance']['scores'].items(), 
+                                                   key=lambda item: item[1], 
+                                                   reverse=True)},
+        "ranked_minlines": {k: v for k, v in sorted(trendlines['support']['scores'].items(), 
+                                                   key=lambda item: item[1], 
+                                                   reverse=True)}
+    }
+    
+    return ranked_results
