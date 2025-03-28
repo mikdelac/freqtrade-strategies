@@ -339,7 +339,7 @@ def rank_trendlines(trends, price_field="Data", threshold=0.01, touch_weight=2.0
                         pivot_bonus_score += pivot_bonus * proximity_factor * recency_factor
                         
                         # Debugging output for minlines
-                        if not is_max_line:
+                        if is_max_line:
                             print(f"dist_pct: {dist_pct} and threshold: {threshold} and pivot_value: {pivot_value} and trendline_value: {trendline_value}")
                             print(f"pivot_bonus_score: {pivot_bonus_score} and proximity_factor: {proximity_factor} and recency_factor: {recency_factor}")
 
