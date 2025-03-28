@@ -3,7 +3,21 @@ defines trendline based indicator logic
 based on
 https://github.com/dysonance/Trendy
 """
+class TrendDirection(Enum):
+    UP = "up"
+    DOWN = "down"
+    SIDEWAYS = "sideways"
 
+@dataclass
+class Trendline:
+    start_index: int
+    end_index: int
+    slope: float
+    intercept: float
+    direction: TrendDirection
+    strength: float  # R-squared value
+    price_type: str  # 'high' or 'low'
+    validation_points: List[Tuple[int, float]] = None
 
 def gentrends(dataframe, field="close", window=1 / 3.0, charts=False):
     """
