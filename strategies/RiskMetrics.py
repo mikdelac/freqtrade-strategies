@@ -36,7 +36,7 @@ from freqtrade.strategy import (
 from risk_metrics.volatility_models import VolatilityModel, VolatilityRegime
 from trend_metrics.trend_analysis import TrendAnalysis
 from trend_metrics.trendline import gentrends, segtrends, rank_trendlines
-
+from technical.util import resample_to_interval, resampled_merge
 
 class RiskMetrics(IStrategy):
     """
@@ -52,13 +52,16 @@ class RiskMetrics(IStrategy):
       * Provides straight-line trendlines using the least squares method
       * Visualizes slope, angle, and projected forecasts
       * Useful for identifying short to medium-term trends
+    - Dynamic timeframe selection based on available data
+      * Automatically selects the highest appropriate timeframe
+      * Adapts analysis based on available historical data length
     """
     INTERFACE_VERSION = 3
 
     # Timeframe settings
-    timeframe = "1m"
+    timeframe = "5m"
     MINUTES_IN_DAY = 24 * 60
-    MINUTES_PER_CANDLE = 1
+    MINUTES_PER_CANDLE = 5
     CANDLES_PER_DAY = MINUTES_IN_DAY // MINUTES_PER_CANDLE  # 288 5-min candles per day
     TRADING_DAYS_PER_YEAR = 252
     WEEKS_PER_MONTH = 4.33
@@ -73,6 +76,18 @@ class RiskMetrics(IStrategy):
     WEEKLY_CANDLES = CANDLES_PER_DAY * TRADING_DAYS_PER_WEEK  # Target: 1440 candles
     MONTHLY_CANDLES = CANDLES_PER_DAY * TRADING_DAYS_PER_MONTH  # Target: 6336 candles
     ONE_HOUR_CANDLES = 12  # 12 candles = 60 minutes
+    
+    # Timeframe thresholds for resampling
+    # Minimum number of candles needed for each timeframe
+    TIMEFRAME_THRESHOLDS = {
+        '1d': CANDLES_PER_DAY,           # Need at least 1 day of data
+        '3d': CANDLES_PER_DAY * 3,       # Need at least 3 days of data
+        '1w': WEEKLY_CANDLES,            # Need at least 1 week of data
+        '1M': MONTHLY_CANDLES,           # Need at least 1 month of data
+    }
+    
+    # Supported higher timeframes in order of preference (highest first)
+    HIGHER_TIMEFRAMES = ['1M', '1w', '3d', '1d']
     
     # Risk thresholds - Note: These thresholds are now in terms of non-annualized volatility
     LOW_VOL_THRESHOLD = 0.01
@@ -156,10 +171,39 @@ class RiskMetrics(IStrategy):
                 "Total Line Scores": {
                     "Max_Line_Score": {"color": "red", "type": "line", "width": 2.0},
                     "Min_Line_Score": {"color": "green", "type": "line", "width": 2.0}
+                },
+                "Timeframes": {
+                    "highest_timeframe_indicator": {"color": "blue", "type": "line", "width": 2.0}
+                },
+                "Risk Metrics": {
+                    "risk_multiplier": {"color": "orange", "type": "line", "width": 2.0}
                 }
             }
         }
+        
+        # Dynamically add higher timeframe plots based on available timeframes
+        # These won't be added until determine_highest_timeframe is called
+        if hasattr(self, 'highest_timeframe') and self.highest_timeframe != self.timeframe:
+            suffix = f"_{self.highest_timeframe}"
+            
+            # Add higher timeframe volatility to subplots
+            if "Risk Metrics" not in plot_config["subplots"]:
+                plot_config["subplots"]["Risk Metrics"] = {}
                 
+            plot_config["subplots"]["Risk Metrics"][f"rv{suffix}"] = {
+                "color": "red", 
+                "type": "line", 
+                "width": 2.0
+            }
+            
+            # Add higher timeframe price data to main plot with semi-transparent color
+            for field in ['open', 'high', 'low', 'close']:
+                field_name = f"{field}{suffix}"
+                plot_config["main_plot"][field_name] = {
+                    "color": "rgba(100, 100, 255, 0.3)",  # Semi-transparent blue
+                    "width": 1.0
+                }
+        
         return plot_config
     
     def __init__(self, config: dict) -> None:
@@ -182,6 +226,79 @@ class RiskMetrics(IStrategy):
         )
         self.har_model = None
         self.last_fit = None
+        # Initialize highest timeframe as None - will be determined dynamically
+        self.highest_timeframe = None
+        self.available_timeframes = []
+
+    def determine_highest_timeframe(self, dataframe: DataFrame) -> str:
+        """
+        Determine the highest possible timeframe based on available data length.
+        
+        Args:
+            dataframe: DataFrame with current timeframe's OHLCV data
+            
+        Returns:
+            str: The highest timeframe that can be used ('1M', '1w', '3d', '1d' or base timeframe)
+        """
+        data_length = len(dataframe)
+        returned_tf = []
+
+        # Log available data
+        print(f"Available data: {data_length} candles at {self.timeframe} timeframe")
+                
+        # Check each higher timeframe from highest to lowest
+        for tf in self.HIGHER_TIMEFRAMES:
+            threshold = self.TIMEFRAME_THRESHOLDS.get(tf, 0)
+            print(f"Threshold for {tf}: {threshold}")
+            if data_length >= threshold:
+                # Add to available timeframes
+                self.available_timeframes.append(tf)
+                
+                if returned_tf == []:
+                    # Return the highest timeframe (first one that matches)
+                    returned_tf = tf
+        
+        if returned_tf == []:
+            # If no higher timeframe has enough data, return the base timeframe
+            print(f"Not enough data for higher timeframes. Using base timeframe: {self.timeframe}")
+            return self.timeframe
+        else:
+            return returned_tf
+
+    def resample_to_higher_timeframes(self, dataframe: DataFrame) -> Dict[str, DataFrame]:
+        """
+        Resample the dataframe to all available higher timeframes.
+        
+        Args:
+            dataframe: DataFrame with current timeframe's OHLCV data
+            
+        Returns:
+            Dict[str, DataFrame]: Dictionary of resampled dataframes keyed by timeframe
+        """
+        resampled_dfs = {}
+        
+        # Skip if no data
+        if len(dataframe) == 0:
+            return resampled_dfs
+        
+        print(f"Available timeframes: {self.available_timeframes}")
+        # For each available higher timeframe, resample the data
+        for tf in self.available_timeframes:
+            if tf == self.timeframe:
+                continue  # Skip the base timeframe
+                
+            try:
+                # Use resample_to_interval to convert to higher timeframe
+                resampled = resample_to_interval(dataframe, self.TIMEFRAME_THRESHOLDS[tf])
+                
+                # Add to our dictionary
+                resampled_dfs[tf] = resampled
+                
+                print(f"Successfully resampled to {tf} timeframe: {len(resampled)} candles")
+            except Exception as e:
+                print(f"Error resampling to {tf}: {e}")
+        
+        return resampled_dfs
 
     def informative_pairs(self):
         """
@@ -194,7 +311,45 @@ class RiskMetrics(IStrategy):
                             ("BTC/USDT", "15m"),
                             ]
         """
-        return []  # No informative pairs needed
+        # We'll dynamically determine the informative pairs based on the highest timeframe
+        # This is done at runtime in populate_indicators
+        return []
+
+    @informative('1d')
+    def populate_indicators_1d(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        """
+        Populate indicators for the 1-day timeframe
+        This is called automatically via the @informative decorator
+        """
+        # Add daily realized volatility
+        dataframe['returns_1d'] = dataframe['close'].pct_change()
+        dataframe['rv_1d'] = self._calculate_realized_volatility(dataframe['returns_1d'], 22)  # 22 days = about 1 month
+        
+        return dataframe
+        
+    @informative('1w')
+    def populate_indicators_1w(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        """
+        Populate indicators for the 1-week timeframe
+        This is called automatically via the @informative decorator
+        """
+        # Add weekly realized volatility
+        dataframe['returns_1w'] = dataframe['close'].pct_change()
+        dataframe['rv_1w'] = self._calculate_realized_volatility(dataframe['returns_1w'], 4)  # 4 weeks = about 1 month
+        
+        return dataframe
+        
+    @informative('1M')
+    def populate_indicators_1M(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        """
+        Populate indicators for the 1-month timeframe
+        This is called automatically via the @informative decorator
+        """
+        # Add monthly realized volatility
+        dataframe['returns_1M'] = dataframe['close'].pct_change()
+        dataframe['rv_1M'] = self._calculate_realized_volatility(dataframe['returns_1M'], 12)  # 12 months = 1 year
+        
+        return dataframe
 
     def _group_by_day(self, timestamps: pd.Series) -> pd.Series:
         """
@@ -241,7 +396,18 @@ class RiskMetrics(IStrategy):
         """
         if len(dataframe) == 0:
             return dataframe
+            
+        # Determine the highest timeframe we can use based on available data
+        self.highest_timeframe = self.determine_highest_timeframe(dataframe)
         
+        # Add an indicator showing which highest timeframe was selected
+        dataframe['highest_timeframe_indicator'] = 1.0
+        dataframe['highest_timeframe'] = self.highest_timeframe
+        print(f"Highest timeframe: {self.highest_timeframe}")
+        # Resample to higher timeframes if possible
+        resampled_dfs = self.resample_to_higher_timeframes(dataframe)
+        print(f"Resampled dataframes: {resampled_dfs}")
+
         # Calculate ATR and store it for visualization
         dataframe['atr'] = self.volatility_model.calculate_atr(dataframe)
 
@@ -482,3 +648,69 @@ class RiskMetrics(IStrategy):
         """
         dataframe.loc[:, 'exit_long'] = 0
         return dataframe
+
+    def get_market_condition_description(self, dataframe: DataFrame) -> Dict[str, str]:
+        """
+        Generate a human-readable description of current market conditions
+        based on the timeframe analysis.
+        
+        Args:
+            dataframe: The analyzed dataframe with indicators
+            
+        Returns:
+            A dictionary containing market condition descriptions
+        """
+        if len(dataframe) < 10:
+            return {"error": "Not enough data for market condition analysis"}
+            
+        # Get the most recent candle
+        current_candle = dataframe.iloc[-1].squeeze()
+        
+        # Get the highest timeframe used
+        highest_tf = current_candle.get('highest_timeframe', self.timeframe)
+        
+        # Get volatility regime
+        volatility_regime = current_candle.get('volatility_regime', 'Unknown')
+        
+        # Get risk multiplier
+        risk_multiplier = current_candle.get('risk_multiplier', 1.0)
+        
+        # Get linear regression angle to determine trend direction
+        trend_angle = current_candle.get('linear_reg_angle', 0)
+        
+        # Determine trend direction based on angle
+        if trend_angle > 45:
+            trend_direction = "Strong uptrend"
+        elif trend_angle > 20:
+            trend_direction = "Moderate uptrend"
+        elif trend_angle > 5:
+            trend_direction = "Mild uptrend"
+        elif trend_angle > -5:
+            trend_direction = "Sideways"
+        elif trend_angle > -20:
+            trend_direction = "Mild downtrend"
+        elif trend_angle > -45:
+            trend_direction = "Moderate downtrend"
+        else:
+            trend_direction = "Strong downtrend"
+        
+        # Get highest scored line type (support/resistance)
+        strongest_level_type = current_candle.get('Highest_Line_Type', 'Unknown')
+        
+        # Format the percentage of risk based on the multiplier
+        risk_percentage = risk_multiplier * 100
+        
+        # Create description
+        description = {
+            "timeframe": f"Analysis based on {highest_tf} data",
+            "volatility": f"{volatility_regime} volatility environment",
+            "trend": trend_direction,
+            "important_level": f"Most significant level: {strongest_level_type}",
+            "risk_assessment": f"Recommended position size: {risk_percentage:.1f}% of maximum",
+            "summary": (
+                f"Market is in a {trend_direction.lower()} with {volatility_regime.lower()} volatility. "
+                f"Position sizing set to {risk_percentage:.1f}% based on {highest_tf} analysis."
+            )
+        }
+        
+        return description
