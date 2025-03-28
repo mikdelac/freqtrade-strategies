@@ -220,13 +220,15 @@ def rank_trendlines(trends, price_field="Data", threshold=0.01, touch_weight=2.0
             'columns': [col for col in trends.columns if col.startswith(max_prefix) or col == "Max Line"],
             'scores': {},
             'pivot_points': all_lows,  # Resistance lines connect low points
-            'is_max_line': True
+            'is_max_line': True if "Max Line" in trends.columns else False,
+            'is_min_line': False
         },
         'support': {
             'columns': [col for col in trends.columns if col.startswith(min_prefix) or col == "Min Line"],
             'scores': {},
             'pivot_points': all_highs,  # Support lines connect high points
-            'is_max_line': False
+            'is_max_line': False,
+            'is_min_line': True if "Min Line" in trends.columns else False
         }
     }
     
@@ -266,9 +268,10 @@ def rank_trendlines(trends, price_field="Data", threshold=0.01, touch_weight=2.0
         columns = config['columns']
         scores = config['scores']
         is_max_line = config['is_max_line']
-        
+        is_min_line = config['is_min_line']
+
         # Get the appropriate pivot points for this trendline type
-        pivot_points = prepared_pivots['lows'] if is_max_line else prepared_pivots['highs']
+        pivot_points = prepared_pivots['lows'] if trendline_type == 'support' else prepared_pivots['highs']
         
         for col in columns:
             # Skip columns with all NaN values
@@ -282,7 +285,7 @@ def rank_trendlines(trends, price_field="Data", threshold=0.01, touch_weight=2.0
             # --- Calculate proximity scores ---
             # For maxlines: distance = trendline - price (positive when price is below line)
             # For minlines: distance = price - trendline (positive when price is above line)
-            if is_max_line:
+            if trendline_type == 'resistance':
                 distance_pct = (trendline_data - price_data) / price_data
             else:
                 distance_pct = (price_data - trendline_data) / price_data
@@ -319,7 +322,7 @@ def rank_trendlines(trends, price_field="Data", threshold=0.01, touch_weight=2.0
                         continue
                     
                     # Calculate distance as percentage
-                    if is_max_line:
+                    if trendline_type == 'resistance':
                         # For resistance lines: distance from trendline to low pivot
                         dist_pct = (trendline_value - pivot_value) / pivot_value
                     else:
@@ -337,7 +340,9 @@ def rank_trendlines(trends, price_field="Data", threshold=0.01, touch_weight=2.0
                         
                         # Debugging output for minlines
                         if not is_max_line:
-                            print(f"dist_pct: {dist_pct} and threshold: {threshold}")
+                            print(f"dist_pct: {dist_pct} and threshold: {threshold} and pivot_value: {pivot_value} and trendline_value: {trendline_value}")
+                            print(f"pivot_bonus_score: {pivot_bonus_score} and proximity_factor: {proximity_factor} and recency_factor: {recency_factor}")
+
             
             # --- Calculate total score and store results ---
             # total_score = base_score + pivot_bonus_score

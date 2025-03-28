@@ -313,14 +313,14 @@ class RiskMetrics(IStrategy):
                 prices=recent_data['high'].values,
                 price_type='high',
                 min_points=5,
-                distance=200
+                distance=10
             )
             
             low_swing_points = self.trend_analyzer._find_swing_points(
                 prices=recent_data['low'].values,
                 price_type='low',
                 min_points=5,
-                distance=200
+                distance=10
             )
             
             # Initialize all_highs and all_lows in recent_data with NaN values

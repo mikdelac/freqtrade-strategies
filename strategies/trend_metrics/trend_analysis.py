@@ -130,7 +130,7 @@ class TrendAnalysis:
                 
         # Calculate prominence as a percentage of price range
         price_range = np.max(prices) - np.min(prices)
-        prominence = price_range * 0.02  # 2% of price range as minimum prominence
+        prominence = price_range * 0.04  # 2% of price range as minimum prominence
         
         if price_type == 'high':
             # Find peaks (local maxima)
