@@ -179,3 +179,23 @@ class GARCHModel(VolatilityModel):
         
         # Return volatility as square root of variance (standard deviation)
         return np.sqrt(self.variance)
+
+    def simulate_returns(self, T: int, iterations: int) -> np.ndarray:
+        """
+        Simulate returns using the GARCH(1,1) model.
+
+        Args:
+            T: Number of time steps to simulate.
+            iterations: Number of simulation paths.
+
+        Returns:
+            np.ndarray: Simulated returns.
+        """
+        R = np.zeros((iterations, T))
+        for i in range(iterations):
+            sigma2_t = self.variance  # Start with current variance
+            for t in range(T):
+                z_t = np.random.normal()  # Random shock
+                R[i, t] = np.sqrt(sigma2_t) * z_t  # Calculate return at t
+                sigma2_t = self.update_conditional_variance(R[i, t])
+        return R
