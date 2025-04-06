@@ -106,3 +106,50 @@ class VolatilityModel:
             
         # Store current ATR value
         return atr
+
+class GARCHModel(VolatilityModel):
+    def __init__(self, 
+                 omega: float = 0.000005,
+                 alpha: float = 0.1,
+                 beta: float = 0.85,
+                 atr_period: int = 14,
+                 risk_multipliers: Optional[dict] = None):
+        """
+        Initialize GARCHModel with specific parameters for GARCH(1,1).
+
+        Args:
+            omega: Constant term in the GARCH equation.
+            alpha: Coefficient for the squared return.
+            beta: Coefficient for the lagged variance.
+            atr_period: Period for ATR calculation.
+            risk_multipliers: Dict mapping regimes to risk multipliers.
+        """
+        super().__init__(
+            low_threshold=0.01,
+            medium_threshold=0.015,
+            risk_multipliers=risk_multipliers,
+            atr_period=atr_period
+        )
+        self.omega = omega
+        self.alpha = alpha
+        self.beta = beta
+
+        # Validate parameters to ensure stationarity
+        if self.alpha + self.beta >= 1:
+            raise ValueError("The sum of alpha and beta must be less than 1 for the GARCH(1,1) model to be stationary.")
+
+        # Initialize variance with long-term variance
+        self.variance = self.omega / (1 - self.alpha - self.beta)
+
+    def update_conditional_variance(self, R_t: float) -> float:
+        """
+        Update the conditional variance using the GARCH(1,1) model.
+
+        Args:
+            R_t: Return at time t.
+
+        Returns:
+            float: Updated variance at time t+1.
+        """
+        self.variance = self.omega + self.alpha * (R_t ** 2) + self.beta * self.variance
+        return self.variance
