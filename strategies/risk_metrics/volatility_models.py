@@ -151,3 +151,31 @@ class GARCHModel(VolatilityModel):
         """
         self.variance = self.omega + self.alpha * (R_t ** 2) + self.beta * self.variance
         return self.variance
+        
+    def calculate_volatility(self, prices: np.ndarray) -> float:
+        """
+        Calculate volatility using GARCH(1,1) model.
+        First get the log returns, then iteratively update the variances using the GARCH(1,1) formula.
+        Finally, return the square root of the final estimated variance (standard deviation).
+        
+        Args:
+            prices: Array of price values.
+            
+        Returns:
+            float: Estimated volatility (standard deviation) from GARCH model.
+        """
+        # Calculate log returns
+        returns = np.log(prices[1:] / prices[:-1])
+        
+        if len(returns) == 0:
+            return float('nan')
+        
+        # Initialize variance with long-term variance
+        self.variance = self.omega / (1 - self.alpha - self.beta)
+        
+        # Iteratively update variances using GARCH(1,1) formula
+        for R_t in returns:
+            self.update_conditional_variance(R_t)
+        
+        # Return volatility as square root of variance (standard deviation)
+        return np.sqrt(self.variance)
