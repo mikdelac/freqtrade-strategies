@@ -112,7 +112,6 @@ class GARCHModel(VolatilityModel):
                  omega: float = 0.000005,
                  alpha: float = 0.1,
                  beta: float = 0.85,
-                 atr_period: int = 14,
                  risk_multipliers: Optional[dict] = None):
         """
         Initialize GARCHModel with specific parameters for GARCH(1,1).
@@ -127,8 +126,7 @@ class GARCHModel(VolatilityModel):
         super().__init__(
             low_threshold=0.01,
             medium_threshold=0.015,
-            risk_multipliers=risk_multipliers,
-            atr_period=atr_period
+            risk_multipliers=risk_multipliers
         )
         self.omega = omega
         self.alpha = alpha
