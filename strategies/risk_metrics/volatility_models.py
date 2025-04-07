@@ -107,7 +107,7 @@ class VolatilityModel:
         # Store current ATR value
         return atr
 
-class GARCHModel(VolatilityModel):
+class GARCHModel():
     def __init__(self, 
                  omega: float = 0.000005,
                  alpha: float = 0.1,
@@ -123,11 +123,6 @@ class GARCHModel(VolatilityModel):
             atr_period: Period for ATR calculation.
             risk_multipliers: Dict mapping regimes to risk multipliers.
         """
-        super().__init__(
-            low_threshold=0.01,
-            medium_threshold=0.015,
-            risk_multipliers=risk_multipliers
-        )
         self.omega = omega
         self.alpha = alpha
         self.beta = beta
@@ -196,6 +191,32 @@ class GARCHModel(VolatilityModel):
             sigma2_t = self.variance  # Start with current variance
             for t in range(T):
                 z_t = np.random.normal()  # Random shock
-                R[i, t] = np.sqrt(sigma2_t) * z_t  # Calculate return at t
+                R[i, t] = np.sqrt(sigma2_t) * z_t  # Calculate expected return at t
                 sigma2_t = self.update_conditional_variance(R[i, t])
         return R
+
+    def calculate_var_es(self, T: int = 3, iterations: int = 1000, confidence_level: float = 0.01) -> Tuple[float, float]:
+        """
+        Calculer la Value at Risk (VaR) et l'Expected Shortfall (ES) à un niveau de confiance spécifié sur une période donnée.
+        
+        Args:
+            T (int): Nombre de jours pour le calcul de la VaR (ex: 3 jours).
+            iterations (int): Nombre de chemins de simulation.
+            confidence_level (float): Niveau de confiance pour la VaR et l'ES (ex: 0.01 pour 1%).
+        
+        Returns:
+            Tuple[float, float]: VaR et ES aux niveaux de confiance spécifiés.
+        """
+        # Simuler les rendements sur T jours avec le nombre d'itérations
+        simulated_returns = self.simulate_returns(T=T, iterations=iterations)
+        
+        # Calculer le rendement cumulé sur T jours pour chaque simulation
+        R_sum = np.sum(simulated_returns, axis=1)
+        
+        # Calculer la VaR à confidence_level (%)
+        VaR = np.percentile(R_sum, confidence_level * 100)
+        
+        # Calculer l'ES à confidence_level %
+        ES = R_sum[R_sum <= VaR].mean()
+        
+        return VaR, ES
