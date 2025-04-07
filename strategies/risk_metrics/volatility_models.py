@@ -213,6 +213,10 @@ class GARCHModel():
         # Calculer le rendement cumulé sur T jours pour chaque simulation
         R_sum = np.sum(simulated_returns, axis=1)
         
+        # Calculer l'écart type de R_sum
+        std_R_sum = np.std(R_sum)
+        print(f"Standard deviation of cumulative returns (R_sum): {std_R_sum:.6f}")
+        
         # Calculer la VaR à confidence_level (%)
         VaR = np.percentile(R_sum, confidence_level * 100)
         
