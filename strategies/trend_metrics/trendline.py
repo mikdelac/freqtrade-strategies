@@ -338,18 +338,13 @@ def rank_trendlines(trends, price_field="Data", threshold=0.01, touch_weight=2.0
                         recency_factor = recency_weights[min(idx, len(recency_weights)-1)]
                         pivot_bonus_score += pivot_bonus * proximity_factor * recency_factor
                         
-                        # Debugging output for minlines
-                        if is_max_line:
-                            print(f"dist_pct: {dist_pct} and threshold: {threshold} and pivot_value: {pivot_value} and trendline_value: {trendline_value}")
-                            print(f"pivot_bonus_score: {pivot_bonus_score} and proximity_factor: {proximity_factor} and recency_factor: {recency_factor}")
-
             
             # --- Calculate total score and store results ---
             # total_score = base_score + pivot_bonus_score
             total_score = pivot_bonus_score
 
             # Debugging output
-            print(f"Total score for {col}: {total_score} and base score: {base_score} and low pivot bonus: {pivot_bonus_score}")
+            # print(f"Total score for {col}: {total_score} and base score: {base_score} and low pivot bonus: {pivot_bonus_score}")
             
             # Store the score
             scores[col] = total_score

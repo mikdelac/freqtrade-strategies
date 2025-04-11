@@ -1,4 +1,4 @@
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Callable
 import numpy as np
 from enum import Enum
 import pandas as pd
@@ -175,52 +175,78 @@ class GARCHModel():
         # Return volatility as square root of variance (standard deviation)
         return np.sqrt(self.variance)
 
-    def simulate_returns(self, T: int, iterations: int) -> np.ndarray:
+    def monte_carlo_simulation(self, 
+                      T: int, 
+                      iterations: Optional[int] = 1000,
+                      calculate_variance_fn: Optional[Callable[[float, float], float]] = None,
+                      random_generator_fn: Optional[Callable[[float], float]] = None,
+                      initial_variance: Optional[float] = None) -> np.ndarray:
         """
-        Simulate returns using the GARCH(1,1) model.
+        Perform a Monte Carlo simulation for financial returns.
 
         Args:
-            T: Number of time steps to simulate.
-            iterations: Number of simulation paths.
+            T: Number of time steps (days) to simulate.
+            iterations: Optional number of simulation paths, defaults to 1000.
+            calculate_variance_fn: Optional callback function to calculate variance with signature (sigma2_t, R_t) -> new_sigma2_t.
+                                 If None, uses this model's update_conditional_variance method.
+            random_generator_fn: Optional callback function to generate random returns with signature (sigma) -> return.
+                               If None, uses normal distribution (sigma * N(0,1)).
+            initial_variance: Optional initial variance value to use. If None, uses the model's long-term variance.
 
         Returns:
-            np.ndarray: Simulated returns.
+            np.ndarray: Simulated returns with shape (iterations, T).
         """
+        # If iterations is None, use default value of 1000
+        if iterations is None:
+            iterations = 1000
+            
+        # If calculate_variance_fn is None, use the model's own method
+        if calculate_variance_fn is None:
+            calculate_variance_fn = lambda sigma2_t, R_t: self.update_conditional_variance(R_t)
+        
+        # If random_generator_fn is None, use normal distribution
+        if random_generator_fn is None:
+            random_generator_fn = lambda sigma: sigma * np.random.normal()
+            
+        # Initialize variance with long-term variance if not provided
+        if initial_variance is None:
+            initial_variance = self.omega / (1 - self.alpha - self.beta)
+            
+        # Initialize array to store simulated returns
         R = np.zeros((iterations, T))
+        
+        # Perform Monte Carlo simulation
         for i in range(iterations):
-            sigma2_t = self.variance  # Start with current variance
+            sigma2_t = initial_variance  # Start with initial variance
             for t in range(T):
-                z_t = np.random.normal()  # Random shock
-                R[i, t] = np.sqrt(sigma2_t) * z_t  # Calculate expected return at t
-                sigma2_t = self.update_conditional_variance(R[i, t])
+                # Generate return using the provided random generator function
+                sigma_t = np.sqrt(sigma2_t)
+                R[i, t] = random_generator_fn(sigma_t)
+                
+                # Update variance for next step
+                sigma2_t = calculate_variance_fn(sigma2_t, R[i, t])
+        
         return R
+        
+    def simulate_returns(self, 
+                      T: int, 
+                      iterations: Optional[int] = 1000,
+                      calculate_variance_fn: Optional[Callable[[float, float], float]] = None) -> np.ndarray:
+        """
+        Simulate returns using the GARCH(1,1) model. This is a wrapper around monte_carlo_simulation.
 
-    def calculate_var_es(self, T: int = 3, iterations: int = 1000, confidence_level: float = 0.01) -> Tuple[float, float]:
-        """
-        Calculer la Value at Risk (VaR) et l'Expected Shortfall (ES) à un niveau de confiance spécifié sur une période donnée.
-        
         Args:
-            T (int): Nombre de jours pour le calcul de la VaR (ex: 3 jours).
-            iterations (int): Nombre de chemins de simulation.
-            confidence_level (float): Niveau de confiance pour la VaR et l'ES (ex: 0.01 pour 1%).
-        
+            T: Number of time steps (days) to simulate.
+            iterations: Optional number of simulation paths, defaults to 1000.
+            calculate_variance_fn: Optional callback function to calculate variance with signature (sigma2_t, R_t) -> new_sigma2_t.
+                                 If None, uses this model's update_conditional_variance method.
+
         Returns:
-            Tuple[float, float]: VaR et ES aux niveaux de confiance spécifiés.
+            np.ndarray: Simulated returns with shape (iterations, T).
         """
-        # Simuler les rendements sur T jours avec le nombre d'itérations
-        simulated_returns = self.simulate_returns(T=T, iterations=iterations)
-        
-        # Calculer le rendement cumulé sur T jours pour chaque simulation
-        R_sum = np.sum(simulated_returns, axis=1)
-        
-        # Calculer l'écart type de R_sum
-        std_R_sum = np.std(R_sum)
-        print(f"Standard deviation of cumulative returns (R_sum): {std_R_sum:.6f}")
-        
-        # Calculer la VaR à confidence_level (%)
-        VaR = np.percentile(R_sum, confidence_level * 100)
-        
-        # Calculer l'ES à confidence_level %
-        ES = R_sum[R_sum <= VaR].mean()
-        
-        return VaR, ES
+        # Use monte_carlo_simulation with default random generator (normal distribution)
+        return self.monte_carlo_simulation(
+            T=T,
+            iterations=iterations,
+            calculate_variance_fn=calculate_variance_fn
+        )

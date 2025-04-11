@@ -33,7 +33,8 @@ from freqtrade.strategy import (
 
 # --------------------------------
 # Add your lib to import here
-from risk_metrics.volatility_models import VolatilityModel, VolatilityRegime
+from risk_metrics.volatility_models import VolatilityModel, VolatilityRegime, GARCHModel
+from risk_metrics.risk_indicators import RiskIndicators
 from trend_metrics.trend_analysis import TrendAnalysis
 from trend_metrics.trendline import gentrends, segtrends, rank_trendlines
 from technical.util import resample_to_interval, resampled_merge
@@ -315,42 +316,6 @@ class RiskMetrics(IStrategy):
         # This is done at runtime in populate_indicators
         return []
 
-    @informative('1d')
-    def populate_indicators_1d(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        """
-        Populate indicators for the 1-day timeframe
-        This is called automatically via the @informative decorator
-        """
-        # Add daily realized volatility
-        dataframe['returns_1d'] = dataframe['close'].pct_change()
-        dataframe['rv_1d'] = self._calculate_realized_volatility(dataframe['returns_1d'], 22)  # 22 days = about 1 month
-        
-        return dataframe
-        
-    @informative('1w')
-    def populate_indicators_1w(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        """
-        Populate indicators for the 1-week timeframe
-        This is called automatically via the @informative decorator
-        """
-        # Add weekly realized volatility
-        dataframe['returns_1w'] = dataframe['close'].pct_change()
-        dataframe['rv_1w'] = self._calculate_realized_volatility(dataframe['returns_1w'], 4)  # 4 weeks = about 1 month
-        
-        return dataframe
-        
-    @informative('1M')
-    def populate_indicators_1M(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        """
-        Populate indicators for the 1-month timeframe
-        This is called automatically via the @informative decorator
-        """
-        # Add monthly realized volatility
-        dataframe['returns_1M'] = dataframe['close'].pct_change()
-        dataframe['rv_1M'] = self._calculate_realized_volatility(dataframe['returns_1M'], 12)  # 12 months = 1 year
-        
-        return dataframe
-
     def _group_by_day(self, timestamps: pd.Series) -> pd.Series:
         """
         Group timestamps by trading day
@@ -369,26 +334,6 @@ class RiskMetrics(IStrategy):
         'weekly': WEEKS_PER_YEAR,
         'monthly': MONTHS_PER_YEAR
     }
-
-    def _calculate_realized_volatility(self, returns: pd.Series, window: int) -> pd.Series:
-        """
-        Calculate realized volatility using sum of squared returns.
-        
-        Args:
-            returns: Series of returns
-            window: Rolling window size
-            
-        Returns:
-            Realized volatility series (non-annualized)
-        """
-        # Calculate squared returns
-        squared_returns = returns ** 2
-        
-        # Sum over the window to get realized variance
-        realized_var = squared_returns.rolling(window=window).sum()
-        
-        # Take square root to get realized volatility
-        return np.sqrt(realized_var)
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
@@ -622,6 +567,39 @@ class RiskMetrics(IStrategy):
             # Fail gracefully if ranking fails
             print(f"Error in ranking trendlines: {e}")
 
+        # Exemple d'utilisation
+        garch_model = GARCHModel()
+        risk_indicators = RiskIndicators()
+
+#        simulated_returns = garch_model.monte_carlo_simulation(T=35, iterations=1)
+        simulated_returns = [[0.07, 0.06, 0.05, 0.09]]
+
+        # Example 1: Basic GARCH(1,1) with default parameters
+        VaR_1_percent, ES_1_percent = risk_indicators.calculate_var_es(
+            simulated_returns=simulated_returns,
+            confidence_level=0.01,
+            variance_update_callback=garch_model.update_conditional_variance
+        )
+
+        print(f"VaR à 1% sur 35 jours (simulation GARCH avec Monte Carlo): {VaR_1_percent:.4f} ({VaR_1_percent * 100:.2f}%)")
+        print(f"ES à 1% sur 35 jours (simulation GARCH avec Monte Carlo): {ES_1_percent:.4f} ({ES_1_percent * 100:.2f}%)")
+
+        # Example 3: Monte Carlo with custom random return generator (Student-t distribution)
+        def student_t_generator(sigma):
+            # Generate returns from Student's t-distribution with 5 degrees of freedom
+            # This produces fatter tails than normal distribution
+            import scipy.stats as stats
+            degrees_of_freedom = 5
+            return sigma * stats.t.rvs(df=degrees_of_freedom)
+        VaR_1_percent, ES_1_percent = risk_indicators.calculate_var_es(
+            simulated_returns=simulated_returns,
+            confidence_level=0.01,
+            variance_update_callback=garch_model.update_conditional_variance
+
+        )
+        #print(f"VaR à 1% sur 35 jours (simulation Student-t avec Monte Carlo): {VaR_1_percent:.4f} ({VaR_1_percent * 100:.2f}%)")
+        #print(f"ES à 1% sur 35 jours (simulation Student-t avec Monte Carlo): {ES_1_percent:.4f} ({ES_1_percent * 100:.2f}%)")
+            
         return dataframe
 
     def adjust_trade_position(self, trade: Trade, current_time: datetime,
