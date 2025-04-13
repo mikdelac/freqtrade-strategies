@@ -78,28 +78,27 @@ class RiskIndicators:
         
         # Apply conditional variance update using the provided callback
         latest_variance = garch.variance  # Start with initial variance from GARCH model
-        for R_t in simulated_returns[0]:
+        for R_t in simulated_returns:
             latest_variance = variance_update_callback(R_t)
         
         # Calculate VaR using the latest conditional standard deviation
         latest_std = np.sqrt(latest_variance)
+        print(f"latest_std: {latest_std}")
         # Z-score for confidence level multiplied by the latest standard deviation
-        VaR = norm.ppf(1 - confidence_level) * latest_std
-        print(f"VaR with normal distribution z-score: {VaR}")
+        VaR_N = norm.ppf(1 - confidence_level) * latest_std
+        print(f"VaR with normal distribution z-score: {VaR_N}")
         df = 5  # Can be adjusted based on empirical data
-        VaR = t.ppf(1 - confidence_level, df) * latest_std
-        print(f"VaR with Student-t distribution (df={df}): {VaR}")
-
-        # Calculate cumulative returns over T days for each simulation
-        #R_sum = np.sum(simulated_returns[0]) #Evaluation of the first simulation path only
-        #print(f"R_sum: {R_sum}")
-        # Calculate standard deviation of R_sum
-        #std_R_sum = np.std(R_sum)
-        #print(f"Standard deviation of cumulative returns (R_sum): {std_R_sum:.6f}")
+        VaR_Z = t.ppf(1 - confidence_level, df) * latest_std
+        print(f"VaR with Student-t distribution (df={df}): {VaR_Z}")
+        VaR = VaR_N
         
         # Calculate ES at confidence_level %
-        #ES = simulated_returns[0][simulated_returns[0] <= VaR].mean()
-        ES = 0
-        print(f"ES: {ES}")
+        # Use the mask to filter the array and get only values <= -VaR
+        filtered_returns = [x for x in simulated_returns if x <= -VaR]
+        #print(f"filtered_returns: {filtered_returns}")
+        # Calculate ES as the mean of filtered returns
+        ES = np.mean(filtered_returns) if len(filtered_returns) > 0 else VaR
         
+        print(f"ES: {ES}")
+ 
         return VaR, ES 

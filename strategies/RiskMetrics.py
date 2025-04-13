@@ -567,12 +567,16 @@ class RiskMetrics(IStrategy):
             # Fail gracefully if ranking fails
             print(f"Error in ranking trendlines: {e}")
 
+        print("--------------------------------")
+        print("--------------------------------")
+        print("Begin Default GARCH")        
+        print("---")
+
         # Exemple d'utilisation
         garch_model = GARCHModel()
         risk_indicators = RiskIndicators()
 
-#        simulated_returns = garch_model.monte_carlo_simulation(T=35, iterations=1)
-        simulated_returns = [[0.07, 0.06, 0.05, 0.09]]
+        simulated_returns = [0.07, 0.06, 0.05, 0.09]
 
         # Example 1: Basic GARCH(1,1) with default parameters
         VaR_1_percent, ES_1_percent = risk_indicators.calculate_var_es(
@@ -581,24 +585,22 @@ class RiskMetrics(IStrategy):
             variance_update_callback=garch_model.update_conditional_variance
         )
 
-        print(f"VaR à 1% sur 35 jours (simulation GARCH avec Monte Carlo): {VaR_1_percent:.4f} ({VaR_1_percent * 100:.2f}%)")
-        print(f"ES à 1% sur 35 jours (simulation GARCH avec Monte Carlo): {ES_1_percent:.4f} ({ES_1_percent * 100:.2f}%)")
+        print(f"VaR à 1% sur 35 jours (simulation GARCH sans Monte Carlo): {VaR_1_percent:.4f} ({VaR_1_percent * 100:.2f}%)")
+        print(f"ES à 1% sur 35 jours (simulation GARCH sans Monte Carlo): {ES_1_percent:.4f} ({ES_1_percent * 100:.2f}%)")
 
-        # Example 3: Monte Carlo with custom random return generator (Student-t distribution)
-        def student_t_generator(sigma):
-            # Generate returns from Student's t-distribution with 5 degrees of freedom
-            # This produces fatter tails than normal distribution
-            import scipy.stats as stats
-            degrees_of_freedom = 5
-            return sigma * stats.t.rvs(df=degrees_of_freedom)
+        print("--------------------------------")
+        print("Begin Monte Carlo with GARCH")        
+        print("---")
+
+        # Example 2: Basic GARCH(1,1) with Monte Carlo
+        simulated_returns = garch_model.monte_carlo_simulation(T=3, iterations=1000)
         VaR_1_percent, ES_1_percent = risk_indicators.calculate_var_es(
             simulated_returns=simulated_returns,
             confidence_level=0.01,
             variance_update_callback=garch_model.update_conditional_variance
-
         )
-        #print(f"VaR à 1% sur 35 jours (simulation Student-t avec Monte Carlo): {VaR_1_percent:.4f} ({VaR_1_percent * 100:.2f}%)")
-        #print(f"ES à 1% sur 35 jours (simulation Student-t avec Monte Carlo): {ES_1_percent:.4f} ({ES_1_percent * 100:.2f}%)")
+        print(f"VaR à 1% sur 3 jours avec 1000 simulations (GARCH avec Monte Carlo): {VaR_1_percent:.4f} ({VaR_1_percent * 100:.2f}%)")
+        print(f"ES à 1% sur 3 jours avec 1000 simulations (GARCH avec Monte Carlo): {ES_1_percent:.4f} ({ES_1_percent * 100:.2f}%)")
             
         return dataframe
 

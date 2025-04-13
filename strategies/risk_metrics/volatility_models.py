@@ -226,7 +226,11 @@ class GARCHModel():
                 # Update variance for next step
                 sigma2_t = calculate_variance_fn(sigma2_t, R[i, t])
         
-        return R
+        # Calculate the sum of returns for each simulation path
+        R_sum = np.zeros(iterations)
+        for i in range(iterations):
+            R_sum[i] = np.sum(R[i])
+        return R_sum
         
     def simulate_returns(self, 
                       T: int, 
