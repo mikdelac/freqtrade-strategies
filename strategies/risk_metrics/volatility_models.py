@@ -112,20 +112,22 @@ class GARCHModel():
                  omega: float = 0.000005,
                  alpha: float = 0.1,
                  beta: float = 0.85,
+                 theta: float = 0.0,
                  risk_multipliers: Optional[dict] = None):
         """
-        Initialize GARCHModel with specific parameters for GARCH(1,1).
+        Initialize GARCHModel with specific parameters for GARCH(1,1) and NGARCH.
 
         Args:
             omega: Constant term in the GARCH equation.
             alpha: Coefficient for the squared return.
             beta: Coefficient for the lagged variance.
-            atr_period: Period for ATR calculation.
+            theta: Leverage effect parameter for NGARCH.
             risk_multipliers: Dict mapping regimes to risk multipliers.
         """
         self.omega = omega
         self.alpha = alpha
         self.beta = beta
+        self.theta = theta
 
         # Validate parameters to ensure stationarity
         if self.alpha + self.beta >= 1:
@@ -133,10 +135,25 @@ class GARCHModel():
 
         # Initialize variance with long-term variance
         self.variance = self.omega / (1 - self.alpha - self.beta)
+        
+    def reset_variance(self):
+        """
+        Reset the model's variance to its long-term value.
+        
+        This function resets the conditional variance of the GARCH model to its 
+        unconditional (long-term) variance, which is calculated as:
+        σ²_unconditional = ω / (1 - α - β)
+        
+        Returns:
+            float: The reset variance value
+        """
+        self.variance = self.omega / (1 - self.alpha - self.beta)
+        return self.variance
 
     def update_conditional_variance(self, R_t: float) -> float:
         """
         Update the conditional variance using the GARCH(1,1) model.
+        σ²(t+1) = ω + α(R_t)² + βσ²_t
 
         Args:
             R_t: Return at time t.
@@ -146,7 +163,22 @@ class GARCHModel():
         """
         self.variance = self.omega + self.alpha * (R_t ** 2) + self.beta * self.variance
         return self.variance
-        
+
+    def update_conditional_variance_ngarch(self, R_t: float) -> float:
+        """
+        Update the conditional variance using the NGARCH model.
+        σ²(t+1) = ω + α(R_t - θσ_t)² + βσ²_t
+
+        Args:
+            R_t: Return at time t.
+
+        Returns:
+            float: Updated variance at time t+1.
+        """
+        sigma_t = np.sqrt(self.variance)
+        self.variance = self.omega + self.alpha * (R_t - self.theta * sigma_t)**2 + self.beta * self.variance
+        return self.variance
+
     def calculate_volatility(self, prices: np.ndarray) -> float:
         """
         Calculate volatility using GARCH(1,1) model.
@@ -159,17 +191,12 @@ class GARCHModel():
         Returns:
             float: Estimated volatility (standard deviation) from GARCH model.
         """
-        # Calculate log returns
-        returns = np.log(prices[1:] / prices[:-1])
         
-        if len(returns) == 0:
+        if len(prices) == 0:
             return float('nan')
-        
-        # Initialize variance with long-term variance
-        self.variance = self.omega / (1 - self.alpha - self.beta)
-        
+                
         # Iteratively update variances using GARCH(1,1) formula
-        for R_t in returns:
+        for R_t in prices:
             self.update_conditional_variance(R_t)
         
         # Return volatility as square root of variance (standard deviation)

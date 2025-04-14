@@ -8,6 +8,12 @@ from datetime import datetime, timedelta, timezone
 from pandas import DataFrame
 from typing import Dict, Optional, Union, Tuple
 from functools import reduce
+from scipy.stats import norm, t
+
+
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from freqtrade.strategy import (
     IStrategy,
@@ -576,15 +582,24 @@ class RiskMetrics(IStrategy):
         garch_model = GARCHModel()
         risk_indicators = RiskIndicators()
 
-        simulated_returns = [0.07, 0.06, 0.05, 0.09]
-
         # Example 1: Basic GARCH(1,1) with default parameters
-        VaR_1_percent, ES_1_percent = risk_indicators.calculate_var_es(
-            simulated_returns=simulated_returns,
-            confidence_level=0.01,
-            variance_update_callback=garch_model.update_conditional_variance
-        )
 
+        simulated_returns = [0.07, 0.06, 0.05, 0.09]
+        np_array = np.array(simulated_returns)
+        # Calculate log returns on arithmetics returns
+        log_returns = np.log(1 + np_array)
+        # Calculate log returns based on price levels
+        #log_returns = np.log(prices[1:] / prices[:-1])
+
+        #df = 5  # Can be adjusted based on empirical data
+        #VaR_Z = t.ppf(1 - confidence_level, df) * std
+        confidence_level = 0.01
+        VaR_1_percent, ES_1_percent = risk_indicators.calculate_var_es(
+            simulated_returns=log_returns,
+            z_score=norm.ppf(1 - confidence_level),
+            std=garch_model.calculate_volatility(log_returns)
+        )
+        garch_model.reset_variance()
         print(f"VaR à 1% sur 35 jours (simulation GARCH sans Monte Carlo): {VaR_1_percent:.4f} ({VaR_1_percent * 100:.2f}%)")
         print(f"ES à 1% sur 35 jours (simulation GARCH sans Monte Carlo): {ES_1_percent:.4f} ({ES_1_percent * 100:.2f}%)")
 
@@ -594,10 +609,11 @@ class RiskMetrics(IStrategy):
 
         # Example 2: Basic GARCH(1,1) with Monte Carlo
         simulated_returns = garch_model.monte_carlo_simulation(T=3, iterations=1000)
+        confidence_level = 0.01
         VaR_1_percent, ES_1_percent = risk_indicators.calculate_var_es(
             simulated_returns=simulated_returns,
-            confidence_level=0.01,
-            variance_update_callback=garch_model.update_conditional_variance
+            z_score=norm.ppf(1 - confidence_level),
+            std=garch_model.calculate_volatility(simulated_returns)
         )
         print(f"VaR à 1% sur 3 jours avec 1000 simulations (GARCH avec Monte Carlo): {VaR_1_percent:.4f} ({VaR_1_percent * 100:.2f}%)")
         print(f"ES à 1% sur 3 jours avec 1000 simulations (GARCH avec Monte Carlo): {ES_1_percent:.4f} ({ES_1_percent * 100:.2f}%)")
