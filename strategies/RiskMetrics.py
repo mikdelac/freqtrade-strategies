@@ -9,6 +9,7 @@ from pandas import DataFrame
 from typing import Dict, Optional, Union, Tuple
 from functools import reduce
 from scipy.stats import norm, t
+import random
 
 
 import sys
@@ -41,6 +42,7 @@ from freqtrade.strategy import (
 # Add your lib to import here
 from risk_metrics.volatility_models import VolatilityModel, VolatilityRegime, GARCHModel
 from risk_metrics.risk_indicators import RiskIndicators
+from risk_metrics.monte_carlo import MonteCarloSimulator
 from trend_metrics.trend_analysis import TrendAnalysis
 from trend_metrics.trendline import gentrends, segtrends, rank_trendlines
 from technical.util import resample_to_interval, resampled_merge
@@ -55,6 +57,7 @@ class RiskMetrics(IStrategy):
     - Risk-adjusted position sizing based on volatility regime
     - Trendline analysis with support and resistance identification
     - Trendline ranking based on price proximity and touch frequency
+    - Monte Carlo optimization for optimal trendline periods
     - Linear regression trendlines using TA-Lib's LINEARREG functions
       * Provides straight-line trendlines using the least squares method
       * Visualizes slope, angle, and projected forecasts
@@ -83,6 +86,11 @@ class RiskMetrics(IStrategy):
     WEEKLY_CANDLES = CANDLES_PER_DAY * TRADING_DAYS_PER_WEEK  # Target: 1440 candles
     MONTHLY_CANDLES = CANDLES_PER_DAY * TRADING_DAYS_PER_MONTH  # Target: 6336 candles
     ONE_HOUR_CANDLES = 12  # 12 candles = 60 minutes
+    
+    # Monte Carlo period optimization settings
+    MC_ITERATIONS = 1000
+    MIN_LOOKBACK_PERIOD = 50
+    MAX_LOOKBACK_PERIOD = 500
     
     # Timeframe thresholds for resampling
     # Minimum number of candles needed for each timeframe
@@ -119,6 +127,9 @@ class RiskMetrics(IStrategy):
     # Linear Regression parameters
     linearreg_timeperiod = IntParameter(10, 500, default=200, space="buy", optimize=True)
     linearreg_price_field = CategoricalParameter(['close', 'open', 'high', 'low'], default='close', space="buy", optimize=False)
+
+    # Monte Carlo optimization parameters
+    enable_mc_optimization = BooleanParameter(default=True, space="buy", optimize=False)
 
     # Minimal ROI designed for the strategy.
     minimal_roi = {
@@ -161,23 +172,30 @@ class RiskMetrics(IStrategy):
             "main_plot": {
                 "all_highs": {"color": "red", "type": "scatter", "symbol": "triangle-down", "size": 12, "fillcolor": "red"},
                 "all_lows": {"color": "green", "type": "scatter", "symbol": "triangle-up", "size": 12, "fillcolor": "green"},
-                "Max Line": {"color": "red", "width": 2.0},
-                "Min Line": {"color": "green", "width": 2.0},
+                "Resistance Line": {"color": "red", "width": 2.0},
+                "Support Line": {"color": "green", "width": 2.0},
                 "Highest_Scored_Line": {"color": "purple", "width": 3.0},
-                "linear_reg_line": {"color": "blue", "width": 3.0}
+                "linear_reg_line": {"color": "blue", "width": 3.0},
+                "MC_Optimal_Resistance": {"color": "darkred", "width": 4.0, "dash": "dot"},
+                "MC_Optimal_Support": {"color": "darkgreen", "width": 4.0, "dash": "dot"}
             },
             "subplots": {
                 "ATR": {
                     "atr": {"color": "blue"}
                 },
                 "Mean Scores": {
-                    "Max_Mean_Score": {"color": "red", "type": "line", "width": 2.0},
-                    "Min_Mean_Score": {"color": "green", "type": "line", "width": 2.0},
+                    "Resistance_Mean_Score": {"color": "red", "type": "line", "width": 2.0},
+                    "Support_Mean_Score": {"color": "green", "type": "line", "width": 2.0},
                     "Highest_Line_Score": {"color": "purple", "type": "line", "width": 2.5}
                 },
                 "Total Line Scores": {
-                    "Max_Line_Score": {"color": "red", "type": "line", "width": 2.0},
-                    "Min_Line_Score": {"color": "green", "type": "line", "width": 2.0}
+                    "Resistance_Line_Score": {"color": "red", "type": "line", "width": 2.0},
+                    "Support_Line_Score": {"color": "green", "type": "line", "width": 2.0}
+                },
+                "Monte Carlo Optimization": {
+                    "MC_Resistance_Score": {"color": "darkred", "type": "line", "width": 2.0},
+                    "MC_Support_Score": {"color": "darkgreen", "type": "line", "width": 2.0},
+                    "MC_Optimal_Period": {"color": "orange", "type": "line", "width": 1.5}
                 },
                 "Timeframes": {
                     "highest_timeframe_indicator": {"color": "blue", "type": "line", "width": 2.0}
@@ -341,6 +359,153 @@ class RiskMetrics(IStrategy):
         'monthly': MONTHS_PER_YEAR
     }
 
+    def monte_carlo_period_optimization(self, dataframe: DataFrame) -> Dict[str, any]:
+        """
+        Use Monte Carlo simulation to test different lookback periods and find
+        the ones that produce the highest scoring resistance and support lines.
+        
+        Args:
+            dataframe: DataFrame with OHLCV data
+            
+        Returns:
+            Dict containing optimal periods and their scores
+        """
+        if len(dataframe) < self.MAX_LOOKBACK_PERIOD:
+            print(f"Not enough data for Monte Carlo optimization. Need at least {self.MAX_LOOKBACK_PERIOD} candles.")
+            return {
+                'optimal_resistance_period': self.MIN_LOOKBACK_PERIOD,
+                'optimal_support_period': self.MIN_LOOKBACK_PERIOD,
+                'resistance_score': 0.0,
+                'support_score': 0.0,
+                'resistance_line': np.full(len(dataframe), np.nan),
+                'support_line': np.full(len(dataframe), np.nan)
+            }
+        
+        print(f"Starting Monte Carlo period optimization with {self.MC_ITERATIONS} iterations...")
+        
+        best_resistance_score = 0.0
+        best_support_score = 0.0
+        best_resistance_period = self.MIN_LOOKBACK_PERIOD
+        best_support_period = self.MIN_LOOKBACK_PERIOD
+        best_resistance_line = np.full(len(dataframe), np.nan)
+        best_support_line = np.full(len(dataframe), np.nan)
+        
+        # Store all tested periods and scores for analysis
+        tested_periods = []
+        resistance_scores = []
+        support_scores = []
+        
+        for iteration in range(self.MC_ITERATIONS):
+            # Generate random lookback period
+            random_period = random.randint(self.MIN_LOOKBACK_PERIOD, self.MAX_LOOKBACK_PERIOD)
+            
+            try:
+                # Test this period
+                recent_data = dataframe.tail(random_period).copy()
+                
+                # Find swing points for this period
+                high_swing_points = self.trend_analyzer._find_swing_points(
+                    prices=recent_data['high'].values,
+                    price_type='high',
+                    min_points=max(3, random_period // 50),  # Adaptive min_points
+                    distance=max(5, random_period // 100)    # Adaptive distance
+                )
+                
+                low_swing_points = self.trend_analyzer._find_swing_points(
+                    prices=recent_data['low'].values,
+                    price_type='low',
+                    min_points=max(3, random_period // 50),
+                    distance=max(5, random_period // 100)
+                )
+                
+                # Initialize swing point columns
+                recent_data['all_highs'] = np.nan
+                recent_data['all_lows'] = np.nan
+                
+                # Map swing points
+                for idx, price in high_swing_points:
+                    if idx < len(recent_data):
+                        recent_data.iloc[idx, recent_data.columns.get_loc('all_highs')] = price
+                
+                for idx, price in low_swing_points:
+                    if idx < len(recent_data):
+                        recent_data.iloc[idx, recent_data.columns.get_loc('all_lows')] = price
+                
+                # Generate trends for this period
+                trends = gentrends(recent_data, field='close', window=1/3.0)
+                
+                # Calculate scores for the main lines
+                main_lines_score = rank_trendlines(
+                    trends,
+                    price_field="Data", 
+                    threshold=self.trendline_proximity_threshold.value,
+                    touch_weight=self.trendline_touch_weight.value,
+                    all_highs=recent_data['all_highs'],
+                    all_lows=recent_data['all_lows'],
+                    pivot_bonus=10.0  # Higher bonus for MC optimization
+                )
+                
+                current_resistance_score = main_lines_score["ranked_maxlines"].get("Max Line", 0)
+                current_support_score = main_lines_score["ranked_minlines"].get("Min Line", 0)
+                
+                # Store results
+                tested_periods.append(random_period)
+                resistance_scores.append(current_resistance_score)
+                support_scores.append(current_support_score)
+                
+                # Check if this is the best resistance line so far
+                if current_resistance_score > best_resistance_score:
+                    best_resistance_score = current_resistance_score
+                    best_resistance_period = random_period
+                    
+                    # Store the resistance line
+                    resistance_line = np.full(len(dataframe), np.nan)
+                    last_idx = len(dataframe) - len(recent_data)
+                    for i in range(len(trends)):
+                        current_idx = last_idx + i
+                        if current_idx < len(dataframe):
+                            resistance_line[current_idx] = trends['Max Line'].iloc[i]
+                    best_resistance_line = resistance_line
+                
+                # Check if this is the best support line so far
+                if current_support_score > best_support_score:
+                    best_support_score = current_support_score
+                    best_support_period = random_period
+                    
+                    # Store the support line
+                    support_line = np.full(len(dataframe), np.nan)
+                    last_idx = len(dataframe) - len(recent_data)
+                    for i in range(len(trends)):
+                        current_idx = last_idx + i
+                        if current_idx < len(dataframe):
+                            support_line[current_idx] = trends['Min Line'].iloc[i]
+                    best_support_line = support_line
+                
+                # Progress reporting
+                if (iteration + 1) % 100 == 0:
+                    print(f"Monte Carlo progress: {iteration + 1}/{self.MC_ITERATIONS} iterations completed")
+                    print(f"Current best - Resistance: {best_resistance_score:.4f} (period {best_resistance_period}), Support: {best_support_score:.4f} (period {best_support_period})")
+                
+            except Exception as e:
+                print(f"Error in Monte Carlo iteration {iteration}: {e}")
+                continue
+        
+        print(f"Monte Carlo optimization completed!")
+        print(f"Optimal resistance period: {best_resistance_period} (score: {best_resistance_score:.4f})")
+        print(f"Optimal support period: {best_support_period} (score: {best_support_score:.4f})")
+        
+        return {
+            'optimal_resistance_period': best_resistance_period,
+            'optimal_support_period': best_support_period,
+            'resistance_score': best_resistance_score,
+            'support_score': best_support_score,
+            'resistance_line': best_resistance_line,
+            'support_line': best_support_line,
+            'tested_periods': tested_periods,
+            'all_resistance_scores': resistance_scores,
+            'all_support_scores': support_scores
+        }
+
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
         Adds several different TA indicators to the given DataFrame, including ATR.
@@ -367,8 +532,15 @@ class RiskMetrics(IStrategy):
         dataframe['all_lows'] = np.nan
         
         # Initialize columns for main trend lines
-        dataframe['Max Line'] = np.nan
-        dataframe['Min Line'] = np.nan
+        dataframe['Resistance Line'] = np.nan
+        dataframe['Support Line'] = np.nan
+        
+        # Initialize Monte Carlo optimal lines
+        dataframe['MC_Optimal_Resistance'] = np.nan
+        dataframe['MC_Optimal_Support'] = np.nan
+        dataframe['MC_Resistance_Score'] = 0.0
+        dataframe['MC_Support_Score'] = 0.0
+        dataframe['MC_Optimal_Period'] = 0.0
         
         # Initialize new columns for highest scored line
         dataframe['Highest_Scored_Line'] = np.nan
@@ -384,7 +556,24 @@ class RiskMetrics(IStrategy):
         for i in range(max_segments):
             dataframe[f'Max_Line_{i}'] = np.nan
             dataframe[f'Min_Line_{i}'] = np.nan
-        
+
+        # Monte Carlo Period Optimization
+        if self.enable_mc_optimization.value and len(dataframe) >= self.MAX_LOOKBACK_PERIOD:
+            print("=== Monte Carlo Period Optimization ===")
+            mc_results = self.monte_carlo_period_optimization(dataframe)
+            
+            # Store the optimal lines
+            dataframe['MC_Optimal_Resistance'] = mc_results['resistance_line']
+            dataframe['MC_Optimal_Support'] = mc_results['support_line']
+            dataframe['MC_Resistance_Score'] = mc_results['resistance_score']
+            dataframe['MC_Support_Score'] = mc_results['support_score']
+            dataframe['MC_Optimal_Period'] = max(mc_results['optimal_resistance_period'], 
+                                                mc_results['optimal_support_period'])
+            
+            print(f"Monte Carlo results stored in dataframe")
+        else:
+            print("Monte Carlo optimization skipped (disabled or insufficient data)")
+
         # Calculate trendlines using local maxima/minima
         lookback = 200  # Use last 200 candles for trendline calculation
 
@@ -474,8 +663,8 @@ class RiskMetrics(IStrategy):
             for i in range(len(trends)):
                 current_idx = last_idx + i
                 if current_idx < len(dataframe):
-                    dataframe.loc[current_idx, 'Max Line'] = trends['Max Line'].iloc[i]
-                    dataframe.loc[current_idx, 'Min Line'] = trends['Min Line'].iloc[i]
+                    dataframe.loc[current_idx, 'Resistance Line'] = trends['Max Line'].iloc[i]
+                    dataframe.loc[current_idx, 'Support Line'] = trends['Min Line'].iloc[i]
         except Exception as e:
             # Fail gracefully if gentrends fails
             print(f"Error in gentrends: {e}")
@@ -529,19 +718,19 @@ class RiskMetrics(IStrategy):
             scores_result = self.trend_analyzer.calculate_trendline_set_scores(ranked_maxlines, ranked_minlines)
             
             # Store mean scores in the dataframe
-            max_mean_score = scores_result["max_mean_score"]
-            min_mean_score = scores_result["min_mean_score"]
+            resistance_mean_score = scores_result["max_mean_score"]
+            support_mean_score = scores_result["min_mean_score"]
             highest_set = scores_result["highest_set"]
             highest_line_name = scores_result["highest_line_name"]
             highest_line_score = scores_result["highest_line_score"]
             
             # Add indicators for visualization
-            dataframe['Max_Mean_Score'] = max_mean_score
-            dataframe['Min_Mean_Score'] = min_mean_score
+            dataframe['Resistance_Mean_Score'] = resistance_mean_score
+            dataframe['Support_Mean_Score'] = support_mean_score
             
             # Calculate and store scores for the main Max Line and Min Line
             main_lines_score = rank_trendlines(
-                trends,  # Use the gentrends output that has Max Line and Min Line
+                trends,  # Use the gentrends output that has Resistance Line and Support Line
                 price_field="Data", 
                 threshold=self.trendline_proximity_threshold.value,
                 touch_weight=self.trendline_touch_weight.value,
@@ -550,13 +739,13 @@ class RiskMetrics(IStrategy):
                 pivot_bonus=9.0  # Increased pivot bonus to emphasize swing points
             )
             
-            # Extract the scores for Max Line and Min Line
-            max_line_score = main_lines_score["ranked_maxlines"].get("Max Line", 0)
-            min_line_score = main_lines_score["ranked_minlines"].get("Min Line", 0)
+            # Extract the scores for Resistance Line and Support Line
+            resistance_line_score = main_lines_score["ranked_maxlines"].get("Max Line", 0)
+            support_line_score = main_lines_score["ranked_minlines"].get("Min Line", 0)
             
             # Store the scores in the dataframe
-            dataframe['Max_Line_Score'] = max_line_score
-            dataframe['Min_Line_Score'] = min_line_score
+            dataframe['Resistance_Line_Score'] = resistance_line_score
+            dataframe['Support_Line_Score'] = support_line_score
                         
             # Copy the highest scored line to the Highest_Scored_Line column
             if highest_line_name is not None:
@@ -565,7 +754,7 @@ class RiskMetrics(IStrategy):
                     current_idx = last_idx + i
                     if current_idx < len(dataframe):
                         dataframe.loc[current_idx, 'Highest_Scored_Line'] = seg_trends[highest_line_name].iloc[i]
-                        dataframe.loc[current_idx, 'Highest_Set_Mean'] = max_mean_score if highest_set == "max" else min_mean_score
+                        dataframe.loc[current_idx, 'Highest_Set_Mean'] = resistance_mean_score if highest_set == "max" else support_mean_score
                         dataframe.loc[current_idx, 'Highest_Line_Score'] = highest_line_score
                         dataframe.loc[current_idx, 'Highest_Line_Type'] = "Resistance" if highest_set == "max" else "Support"
                         
@@ -607,8 +796,9 @@ class RiskMetrics(IStrategy):
         print("Begin Monte Carlo with GARCH")        
         print("---")
 
-        # Example 2: Basic GARCH(1,1) with Monte Carlo
-        simulated_returns = garch_model.monte_carlo_simulation(T=3, iterations=1000)
+        # Example 2: Monte Carlo simulation with GARCH using the new MonteCarloSimulator
+        monte_carlo = MonteCarloSimulator(garch_model)
+        simulated_returns = monte_carlo.simulate_with_garch(T=3, iterations=1000)
         confidence_level = 0.01
         VaR_1_percent, ES_1_percent = risk_indicators.calculate_var_es(
             simulated_returns=simulated_returns,
@@ -617,6 +807,25 @@ class RiskMetrics(IStrategy):
         )
         print(f"VaR à 1% sur 3 jours avec 1000 simulations (GARCH avec Monte Carlo): {VaR_1_percent:.4f} ({VaR_1_percent * 100:.2f}%)")
         print(f"ES à 1% sur 3 jours avec 1000 simulations (GARCH avec Monte Carlo): {ES_1_percent:.4f} ({ES_1_percent * 100:.2f}%)")
+        
+        # Example 3: Monte Carlo with custom distribution (Student's t)
+        print("--------------------------------")
+        print("Begin Monte Carlo with Student's t-distribution")        
+        print("---")
+        
+        simulated_returns_t = monte_carlo.simulate_with_custom_distribution(T=3, iterations=1000)
+        VaR_1_percent_t, ES_1_percent_t = risk_indicators.calculate_var_es(
+            simulated_returns=simulated_returns_t,
+            z_score=norm.ppf(1 - confidence_level),
+            std=garch_model.calculate_volatility(simulated_returns_t)
+        )
+        print(f"VaR à 1% sur 3 jours avec distribution t de Student: {VaR_1_percent_t:.4f} ({VaR_1_percent_t * 100:.2f}%)")
+        print(f"ES à 1% sur 3 jours avec distribution t de Student: {ES_1_percent_t:.4f} ({ES_1_percent_t * 100:.2f}%)")
+        
+        # Display simulation statistics
+        stats = monte_carlo.get_simulation_statistics(simulated_returns)
+        print(f"Statistiques de simulation - Moyenne: {stats['mean']:.4f}, Écart-type: {stats['std']:.4f}")
+        print(f"Skewness: {stats['skewness']:.4f}, Kurtosis: {stats['kurtosis']:.4f}")
             
         return dataframe
 
