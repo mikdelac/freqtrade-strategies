@@ -78,3 +78,4 @@ freqaimodels/*
 !strategies/sample_strategy.py
 Kraken_full_history/*
 .env
+!strategies/*
