@@ -90,7 +90,7 @@ class RiskMetrics(IStrategy):
     # Monte Carlo period optimization settings
     MC_ITERATIONS = 1000
     MIN_LOOKBACK_PERIOD = 50
-    MAX_LOOKBACK_PERIOD = 500
+    # MAX_LOOKBACK_PERIOD will be set dynamically based on available data
     
     # Timeframe thresholds for resampling
     # Minimum number of candles needed for each timeframe
@@ -193,8 +193,8 @@ class RiskMetrics(IStrategy):
                     "Support_Line_Score": {"color": "green", "type": "line", "width": 2.0}
                 },
                 "Monte Carlo Optimization": {
-                    "MC_Resistance_Score": {"color": "darkred", "type": "line", "width": 2.0},
-                    "MC_Support_Score": {"color": "darkgreen", "type": "line", "width": 2.0},
+                    "MC_Resistance_Score": {"color": "darkred", "type": "line", "width": 3.0},
+                    "MC_Support_Score": {"color": "darkgreen", "type": "line", "width": 3.0},
                     "MC_Optimal_Period": {"color": "orange", "type": "line", "width": 1.5}
                 },
                 "Timeframes": {
@@ -370,8 +370,12 @@ class RiskMetrics(IStrategy):
         Returns:
             Dict containing optimal periods and their scores
         """
-        if len(dataframe) < self.MAX_LOOKBACK_PERIOD:
-            print(f"Not enough data for Monte Carlo optimization. Need at least {self.MAX_LOOKBACK_PERIOD} candles.")
+        # Set MAX_LOOKBACK_PERIOD dynamically based on available data
+        total_candles = len(dataframe)
+        max_lookback_period = total_candles
+        
+        if total_candles < self.MIN_LOOKBACK_PERIOD:
+            print(f"Not enough data for Monte Carlo optimization. Need at least {self.MIN_LOOKBACK_PERIOD} candles, got {total_candles}.")
             return {
                 'optimal_resistance_period': self.MIN_LOOKBACK_PERIOD,
                 'optimal_support_period': self.MIN_LOOKBACK_PERIOD,
@@ -381,7 +385,18 @@ class RiskMetrics(IStrategy):
                 'support_line': np.full(len(dataframe), np.nan)
             }
         
+        # Seed random number generator for reproducible results with some variability
+        import time
+        random.seed(int(time.time() * 1000) % 10000)  # Use current time for seed
+        
+        # Test random number generation
+        print("Testing random number generation...")
+        test_periods = [random.randint(self.MIN_LOOKBACK_PERIOD, max_lookback_period) for _ in range(20)]
+        print(f"Sample of 20 random periods: {test_periods}")
+        print(f"Min: {min(test_periods)}, Max: {max(test_periods)}, Range: {max(test_periods) - min(test_periods)}")
+        
         print(f"Starting Monte Carlo period optimization with {self.MC_ITERATIONS} iterations...")
+        print(f"Testing periods from {self.MIN_LOOKBACK_PERIOD} to {max_lookback_period} candles (total: {total_candles})")
         
         best_resistance_score = 0.0
         best_support_score = 0.0
@@ -395,9 +410,16 @@ class RiskMetrics(IStrategy):
         resistance_scores = []
         support_scores = []
         
+        # Track period distribution for debugging
+        period_counts = {}
+        
         for iteration in range(self.MC_ITERATIONS):
-            # Generate random lookback period
-            random_period = random.randint(self.MIN_LOOKBACK_PERIOD, self.MAX_LOOKBACK_PERIOD)
+            # Generate random lookback period using the dynamic max
+            random_period = random.randint(self.MIN_LOOKBACK_PERIOD, max_lookback_period)
+            
+            # Track period distribution
+            period_range = (random_period // 100) * 100  # Group by hundreds
+            period_counts[period_range] = period_counts.get(period_range, 0) + 1
             
             try:
                 # Test this period
@@ -466,6 +488,8 @@ class RiskMetrics(IStrategy):
                         if current_idx < len(dataframe):
                             resistance_line[current_idx] = trends['Max Line'].iloc[i]
                     best_resistance_line = resistance_line
+                    
+                    print(f"New best resistance found at iteration {iteration + 1}: period {random_period}, score {current_resistance_score:.4f}")
                 
                 # Check if this is the best support line so far
                 if current_support_score > best_support_score:
@@ -480,11 +504,14 @@ class RiskMetrics(IStrategy):
                         if current_idx < len(dataframe):
                             support_line[current_idx] = trends['Min Line'].iloc[i]
                     best_support_line = support_line
+                    
+                    print(f"New best support found at iteration {iteration + 1}: period {random_period}, score {current_support_score:.4f}")
                 
-                # Progress reporting
+                # Progress reporting with more details
                 if (iteration + 1) % 100 == 0:
                     print(f"Monte Carlo progress: {iteration + 1}/{self.MC_ITERATIONS} iterations completed")
                     print(f"Current best - Resistance: {best_resistance_score:.4f} (period {best_resistance_period}), Support: {best_support_score:.4f} (period {best_support_period})")
+                    print(f"Last 5 tested periods: {tested_periods[-5:] if len(tested_periods) >= 5 else tested_periods}")
                 
             except Exception as e:
                 print(f"Error in Monte Carlo iteration {iteration}: {e}")
@@ -493,6 +520,17 @@ class RiskMetrics(IStrategy):
         print(f"Monte Carlo optimization completed!")
         print(f"Optimal resistance period: {best_resistance_period} (score: {best_resistance_score:.4f})")
         print(f"Optimal support period: {best_support_period} (score: {best_support_score:.4f})")
+        print(f"Tested periods range: {self.MIN_LOOKBACK_PERIOD} to {max_lookback_period} candles")
+        
+        # Print period distribution for debugging
+        print("Period distribution (grouped by hundreds):")
+        for period_range in sorted(period_counts.keys()):
+            print(f"  {period_range}-{period_range+99}: {period_counts[period_range]} times")
+        
+        # Print some statistics about the tested periods
+        if tested_periods:
+            print(f"Period statistics - Min: {min(tested_periods)}, Max: {max(tested_periods)}, Mean: {np.mean(tested_periods):.1f}")
+            print(f"Unique periods tested: {len(set(tested_periods))} out of {len(tested_periods)} total")
         
         return {
             'optimal_resistance_period': best_resistance_period,
@@ -503,7 +541,9 @@ class RiskMetrics(IStrategy):
             'support_line': best_support_line,
             'tested_periods': tested_periods,
             'all_resistance_scores': resistance_scores,
-            'all_support_scores': support_scores
+            'all_support_scores': support_scores,
+            'max_lookback_period': max_lookback_period,
+            'period_distribution': period_counts
         }
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
@@ -558,21 +598,40 @@ class RiskMetrics(IStrategy):
             dataframe[f'Min_Line_{i}'] = np.nan
 
         # Monte Carlo Period Optimization
-        if self.enable_mc_optimization.value and len(dataframe) >= self.MAX_LOOKBACK_PERIOD:
+        if self.enable_mc_optimization.value and len(dataframe) >= self.MIN_LOOKBACK_PERIOD:
             print("=== Monte Carlo Period Optimization ===")
             mc_results = self.monte_carlo_period_optimization(dataframe)
             
             # Store the optimal lines
             dataframe['MC_Optimal_Resistance'] = mc_results['resistance_line']
             dataframe['MC_Optimal_Support'] = mc_results['support_line']
-            dataframe['MC_Resistance_Score'] = mc_results['resistance_score']
-            dataframe['MC_Support_Score'] = mc_results['support_score']
+            
+            # Get the raw scores
+            raw_resistance_score = mc_results['resistance_score']
+            raw_support_score = mc_results['support_score']
+                                    
+            # Store the raw scores so they show up on the graph
+            dataframe['MC_Resistance_Score'] = raw_resistance_score
+            dataframe['MC_Support_Score'] = raw_support_score
             dataframe['MC_Optimal_Period'] = max(mc_results['optimal_resistance_period'], 
                                                 mc_results['optimal_support_period'])
             
             print(f"Monte Carlo results stored in dataframe")
+            print(f"Max lookback period used: {mc_results.get('max_lookback_period', 'N/A')} candles")
+            print(f"MC Resistance Score: {raw_resistance_score:.6f} (raw)")
+            print(f"MC Support Score: {raw_support_score:.6f} (raw)")
+            
+            # Additional debug info about the dataframe columns
+            print(f"Dataframe shape: {dataframe.shape}")
+            print(f"MC_Resistance_Score column stats: min={dataframe['MC_Resistance_Score'].min()}, max={dataframe['MC_Resistance_Score'].max()}")
+            print(f"MC_Support_Score column stats: min={dataframe['MC_Support_Score'].min()}, max={dataframe['MC_Support_Score'].max()}")
         else:
             print("Monte Carlo optimization skipped (disabled or insufficient data)")
+            print(f"Available candles: {len(dataframe)}, minimum required: {self.MIN_LOOKBACK_PERIOD}")
+            
+            # Initialize with zeros when optimization is skipped
+            dataframe['MC_Resistance_Score'] = 0.0
+            dataframe['MC_Support_Score'] = 0.0
 
         # Calculate trendlines using local maxima/minima
         lookback = 200  # Use last 200 candles for trendline calculation
