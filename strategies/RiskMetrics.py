@@ -901,16 +901,100 @@ class RiskMetrics(IStrategy):
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
-        Entry signal is always 0 since we're just visualizing points
+        Bounce Trading Strategy Implementation using Price Extrema:
+        - Long entry: Price creates a LOW extrema near support, then moves up (bounce off support)
+        - Short entry: Price creates a HIGH extrema near resistance, then moves down (bounce off resistance)
+        
+        Following bounce trading methodology from RebelsFunding
         """
+        # Initialize entry signals
         dataframe.loc[:, 'enter_long'] = 0
+        dataframe.loc[:, 'enter_short'] = 0
+        
+        # Long entry: Bounce off support using swing low extrema
+        # Look for a swing low near support followed by upward movement
+        if 'MC_Optimal_Support' in dataframe.columns:
+            # Check if previous candle made a swing low near support
+            # and current price is moving up from that low
+            dataframe.loc[
+                # Current close is above support
+                (dataframe['close'] > dataframe['MC_Optimal_Support']) &
+                # Previous low was at or near support (within small tolerance)
+                (abs(dataframe['low'].shift(1) - dataframe['MC_Optimal_Support'].shift(1)) <= 
+                 dataframe['MC_Optimal_Support'].shift(1) * 0.002) &  # 0.2% tolerance
+                # Previous low was lower than the low 2 candles ago (swing low pattern)
+                (dataframe['low'].shift(1) <= dataframe['low'].shift(2)) &
+                # Previous low was lower than current low (confirming bounce)
+                (dataframe['low'].shift(1) < dataframe['low']) &
+                # Current close is higher than previous close (upward movement)
+                (dataframe['close'] > dataframe['close'].shift(1)) &
+                # Support data is valid
+                (~dataframe['MC_Optimal_Support'].isna()) &
+                (~dataframe['MC_Optimal_Support'].shift(1).isna()),
+                'enter_long'
+            ] = 1
+        
+        # Short entry: Bounce off resistance using swing high extrema
+        # Look for a swing high near resistance followed by downward movement
+        if 'MC_Optimal_Resistance' in dataframe.columns:
+            # Check if previous candle made a swing high near resistance
+            # and current price is moving down from that high
+            dataframe.loc[
+                # Current close is below resistance
+                (dataframe['close'] < dataframe['MC_Optimal_Resistance']) &
+                # Previous high was at or near resistance (within small tolerance)
+                (abs(dataframe['high'].shift(1) - dataframe['MC_Optimal_Resistance'].shift(1)) <= 
+                 dataframe['MC_Optimal_Resistance'].shift(1) * 0.002) &  # 0.2% tolerance
+                # Previous high was higher than the high 2 candles ago (swing high pattern)
+                (dataframe['high'].shift(1) >= dataframe['high'].shift(2)) &
+                # Previous high was higher than current high (confirming bounce)
+                (dataframe['high'].shift(1) > dataframe['high']) &
+                # Current close is lower than previous close (downward movement)
+                (dataframe['close'] < dataframe['close'].shift(1)) &
+                # Resistance data is valid
+                (~dataframe['MC_Optimal_Resistance'].isna()) &
+                (~dataframe['MC_Optimal_Resistance'].shift(1).isna()),
+                'enter_short'
+            ] = 1
+        
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
-        Exit signal is always 0 since we're just visualizing points
+        Exit signals for bounce trading:
+        - Exit long when support is broken with conviction (close below support)
+        - Exit short when resistance is broken with conviction (close above resistance)
         """
+        # Initialize exit signals
         dataframe.loc[:, 'exit_long'] = 0
+        dataframe.loc[:, 'exit_short'] = 0
+        
+        # Exit long when support is definitively broken
+        # Price closes below support with conviction
+        if 'MC_Optimal_Support' in dataframe.columns:
+            dataframe.loc[
+                (dataframe['close'] < dataframe['MC_Optimal_Support']) &
+                (dataframe['close'].shift(1) >= dataframe['MC_Optimal_Support'].shift(1)) &
+                # Add conviction: close is significantly below support
+                (dataframe['close'] < dataframe['MC_Optimal_Support'] * 0.998) &  # 0.2% below
+                (~dataframe['MC_Optimal_Support'].isna()) &
+                (~dataframe['MC_Optimal_Support'].shift(1).isna()),
+                'exit_long'
+            ] = 1
+        
+        # Exit short when resistance is definitively broken
+        # Price closes above resistance with conviction
+        if 'MC_Optimal_Resistance' in dataframe.columns:
+            dataframe.loc[
+                (dataframe['close'] > dataframe['MC_Optimal_Resistance']) &
+                (dataframe['close'].shift(1) <= dataframe['MC_Optimal_Resistance'].shift(1)) &
+                # Add conviction: close is significantly above resistance
+                (dataframe['close'] > dataframe['MC_Optimal_Resistance'] * 1.002) &  # 0.2% above
+                (~dataframe['MC_Optimal_Resistance'].isna()) &
+                (~dataframe['MC_Optimal_Resistance'].shift(1).isna()),
+                'exit_short'
+            ] = 1
+        
         return dataframe
 
     def get_market_condition_description(self, dataframe: DataFrame) -> Dict[str, str]:
