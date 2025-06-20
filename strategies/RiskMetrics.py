@@ -47,17 +47,317 @@ from trend_metrics.trend_analysis import TrendAnalysis
 from trend_metrics.trendline import gentrends, segtrends, rank_trendlines
 from technical.util import resample_to_interval, resampled_merge
 
+class SignalGenerator:
+    """
+    Signal generation logic for bounce trading with convergence detection.
+    Handles entry and exit signal generation with proper separation of concerns.
+    """
+    
+    def __init__(self, strategy_instance):
+        """
+        Initialize SignalGenerator with reference to strategy instance.
+        
+        Args:
+            strategy_instance: Reference to the main RiskMetrics strategy
+        """
+        self.strategy = strategy_instance
+        
+    def generate_bounce_conditions(self, dataframe: DataFrame, level_column: str, 
+                                 price_column: str, direction: str) -> pd.Series:
+        """
+        Generate bounce conditions for support or resistance levels.
+        
+        Args:
+            dataframe: DataFrame with OHLCV data
+            level_column: Column name for support/resistance level
+            price_column: Column name for price comparison ('high' or 'low')
+            direction: Either 'long' for support bounce or 'short' for resistance bounce
+            
+        Returns:
+            pandas.Series: Boolean series indicating bounce conditions
+        """
+        if level_column not in dataframe.columns:
+            return pd.Series([False] * len(dataframe), index=dataframe.index)
+        
+        tolerance = 0.002  # 0.2% tolerance for level proximity
+        
+        if direction == 'long':
+            # Long entry: Bounce off support using swing low extrema
+            bounce_conditions = (
+                # Current close is above support
+                (dataframe['close'] > dataframe[level_column]) &
+                # Previous low was at or near support (within tolerance)
+                (abs(dataframe[price_column].shift(1) - dataframe[level_column].shift(1)) <= 
+                 dataframe[level_column].shift(1) * tolerance) &
+                # Previous low was lower than the low 2 candles ago (swing low pattern)
+                (dataframe[price_column].shift(1) <= dataframe[price_column].shift(2)) &
+                # Previous low was lower than current low (confirming bounce)
+                (dataframe[price_column].shift(1) < dataframe[price_column]) &
+                # Current close is higher than previous close (upward movement)
+                (dataframe['close'] > dataframe['close'].shift(1)) &
+                # Level data is valid
+                (~dataframe[level_column].isna()) &
+                (~dataframe[level_column].shift(1).isna())
+            )
+        elif direction == 'short':
+            # Short entry: Bounce off resistance using swing high extrema
+            bounce_conditions = (
+                # Current close is below resistance
+                (dataframe['close'] < dataframe[level_column]) &
+                # Previous high was at or near resistance (within tolerance)
+                (abs(dataframe[price_column].shift(1) - dataframe[level_column].shift(1)) <= 
+                 dataframe[level_column].shift(1) * tolerance) &
+                # Previous high was higher than the high 2 candles ago (swing high pattern)
+                (dataframe[price_column].shift(1) >= dataframe[price_column].shift(2)) &
+                # Previous high was higher than current high (confirming bounce)
+                (dataframe[price_column].shift(1) > dataframe[price_column]) &
+                # Current close is lower than previous close (downward movement)
+                (dataframe['close'] < dataframe['close'].shift(1)) &
+                # Level data is valid
+                (~dataframe[level_column].isna()) &
+                (~dataframe[level_column].shift(1).isna())
+            )
+        else:
+            return pd.Series([False] * len(dataframe), index=dataframe.index)
+            
+        return bounce_conditions
+    
+    def apply_convergence_filter(self, dataframe: DataFrame, conditions: pd.Series, 
+                               enable_convergence: bool, threshold: float) -> pd.Series:
+        """
+        Apply convergence filter to trading conditions.
+        
+        Args:
+            dataframe: DataFrame with MC scores
+            conditions: Boolean series of trading conditions
+            enable_convergence: Whether convergence detection is enabled
+            threshold: Convergence threshold for filtering
+            
+        Returns:
+            pandas.Series: Filtered conditions with convergence applied
+        """
+        if not enable_convergence:
+            return conditions
+            
+        # Calculate convergence ratios for each row
+        convergence_ratios = dataframe.apply(
+            lambda row: self.strategy.calculate_score_convergence_ratio(
+                row.get('MC_Support_Score', 0), 
+                row.get('MC_Resistance_Score', 0)
+            ), axis=1
+        )
+        
+        # Apply convergence filter
+        convergence_filter = convergence_ratios < threshold
+        return conditions & convergence_filter
+    
+    def generate_entry_signals(self, dataframe: DataFrame) -> DataFrame:
+        """
+        Generate entry signals for both long and short positions.
+        
+        Args:
+            dataframe: DataFrame with OHLCV data and indicators
+            
+        Returns:
+            DataFrame: Updated dataframe with entry signals
+        """
+        # Initialize entry signals
+        dataframe.loc[:, 'enter_long'] = 0
+        dataframe.loc[:, 'enter_short'] = 0
+        
+        # Check if required columns exist
+        required_columns = ['MC_Optimal_Support', 'MC_Optimal_Resistance', 
+                          'MC_Support_Score', 'MC_Resistance_Score']
+        if not all(col in dataframe.columns for col in required_columns):
+            print("Missing required columns for signal generation")
+            return dataframe
+        
+        # Generate long entry conditions (bounce off support)
+        long_bounce_conditions = self.generate_bounce_conditions(
+            dataframe, 'MC_Optimal_Support', 'low', 'long'
+        )
+        
+        # Apply convergence filter for long entries
+        long_conditions_filtered = self.apply_convergence_filter(
+            dataframe, long_bounce_conditions, 
+            self.strategy.enable_convergence_detection.value,
+            self.strategy.score_convergence_high_threshold.value
+        )
+        
+        # Generate short entry conditions (bounce off resistance)
+        short_bounce_conditions = self.generate_bounce_conditions(
+            dataframe, 'MC_Optimal_Resistance', 'high', 'short'
+        )
+        
+        # Apply convergence filter for short entries
+        short_conditions_filtered = self.apply_convergence_filter(
+            dataframe, short_bounce_conditions,
+            self.strategy.enable_convergence_detection.value,
+            self.strategy.score_convergence_high_threshold.value
+        )
+        
+        # Set entry signals
+        dataframe.loc[long_conditions_filtered, 'enter_long'] = 1
+        dataframe.loc[short_conditions_filtered, 'enter_short'] = 1
+        
+        # Log entry signal summary
+        long_signals = dataframe['enter_long'].sum()
+        short_signals = dataframe['enter_short'].sum()
+        print(f"Entry signals generated: {long_signals} long, {short_signals} short")
+        
+        # Log convergence analysis for the most recent candle
+        if self.strategy.enable_convergence_detection.value and len(dataframe) > 0:
+            current_candle = dataframe.iloc[-1]
+            support_score = current_candle.get('MC_Support_Score', 0)
+            resistance_score = current_candle.get('MC_Resistance_Score', 0)
+            
+            should_enter, reason = self.strategy.should_enter_trade_with_convergence(
+                support_score, resistance_score
+            )
+            print(f"Current convergence status: {reason}")
+            print(f"Entry allowed: {should_enter}")
+        
+        return dataframe
+    
+    def generate_break_exit_conditions(self, dataframe: DataFrame, level_column: str, 
+                                     direction: str) -> pd.Series:
+        """
+        Generate exit conditions based on support/resistance breaks.
+        
+        Args:
+            dataframe: DataFrame with OHLCV data
+            level_column: Column name for support/resistance level
+            direction: Either 'long' for support break or 'short' for resistance break
+            
+        Returns:
+            pandas.Series: Boolean series indicating break exit conditions
+        """
+        if level_column not in dataframe.columns:
+            return pd.Series([False] * len(dataframe), index=dataframe.index)
+        
+        conviction_threshold = 0.002  # 0.2% conviction threshold
+        
+        if direction == 'long':
+            # Exit long when support is definitively broken
+            break_conditions = (
+                (dataframe['close'] < dataframe[level_column]) &
+                (dataframe['close'].shift(1) >= dataframe[level_column].shift(1)) &
+                # Add conviction: close is significantly below support
+                (dataframe['close'] < dataframe[level_column] * (1 - conviction_threshold)) &
+                (~dataframe[level_column].isna()) &
+                (~dataframe[level_column].shift(1).isna())
+            )
+        elif direction == 'short':
+            # Exit short when resistance is definitively broken
+            break_conditions = (
+                (dataframe['close'] > dataframe[level_column]) &
+                (dataframe['close'].shift(1) <= dataframe[level_column].shift(1)) &
+                # Add conviction: close is significantly above resistance
+                (dataframe['close'] > dataframe[level_column] * (1 + conviction_threshold)) &
+                (~dataframe[level_column].isna()) &
+                (~dataframe[level_column].shift(1).isna())
+            )
+        else:
+            return pd.Series([False] * len(dataframe), index=dataframe.index)
+            
+        return break_conditions
+    
+    def generate_cross_signal_exits(self, dataframe: DataFrame) -> Tuple[pd.Series, pd.Series]:
+        """
+        Generate cross-signal exits (exit long on short conditions, exit short on long conditions).
+        
+        Args:
+            dataframe: DataFrame with OHLCV data and indicators
+            
+        Returns:
+            Tuple[pd.Series, pd.Series]: (exit_long_conditions, exit_short_conditions)
+        """
+        # Generate short entry conditions for long exits
+        short_entry_conditions = self.generate_bounce_conditions(
+            dataframe, 'MC_Optimal_Resistance', 'high', 'short'
+        )
+        
+        # Generate long entry conditions for short exits
+        long_entry_conditions = self.generate_bounce_conditions(
+            dataframe, 'MC_Optimal_Support', 'low', 'long'
+        )
+        
+        # Apply convergence filter if enabled
+        if self.strategy.enable_convergence_detection.value:
+            short_entry_filtered = self.apply_convergence_filter(
+                dataframe, short_entry_conditions,
+                True, self.strategy.score_convergence_high_threshold.value
+            )
+            long_entry_filtered = self.apply_convergence_filter(
+                dataframe, long_entry_conditions,
+                True, self.strategy.score_convergence_high_threshold.value
+            )
+        else:
+            short_entry_filtered = short_entry_conditions
+            long_entry_filtered = long_entry_conditions
+        
+        return short_entry_filtered, long_entry_filtered
+    
+    def generate_exit_signals(self, dataframe: DataFrame) -> DataFrame:
+        """
+        Generate exit signals for both long and short positions.
+        
+        Args:
+            dataframe: DataFrame with OHLCV data and indicators
+            
+        Returns:
+            DataFrame: Updated dataframe with exit signals
+        """
+        # Initialize exit signals
+        dataframe.loc[:, 'exit_long'] = 0
+        dataframe.loc[:, 'exit_short'] = 0
+        
+        # === Traditional Support/Resistance Break Exits ===
+        
+        # Exit long when support is broken
+        if 'MC_Optimal_Support' in dataframe.columns:
+            support_break_exit = self.generate_break_exit_conditions(
+                dataframe, 'MC_Optimal_Support', 'long'
+            )
+            dataframe.loc[support_break_exit, 'exit_long'] = 1
+        
+        # Exit short when resistance is broken
+        if 'MC_Optimal_Resistance' in dataframe.columns:
+            resistance_break_exit = self.generate_break_exit_conditions(
+                dataframe, 'MC_Optimal_Resistance', 'short'
+            )
+            dataframe.loc[resistance_break_exit, 'exit_short'] = 1
+        
+        # === Cross-Signal Exits ===
+        
+        # Check if required columns exist for cross-signal exits
+        required_columns = ['MC_Optimal_Support', 'MC_Optimal_Resistance', 
+                          'MC_Support_Score', 'MC_Resistance_Score']
+        if all(col in dataframe.columns for col in required_columns):
+            exit_long_cross, exit_short_cross = self.generate_cross_signal_exits(dataframe)
+            
+            # Apply cross-signal exits
+            dataframe.loc[exit_long_cross, 'exit_long'] = 1
+            dataframe.loc[exit_short_cross, 'exit_short'] = 1
+        
+        # Log exit signal summary
+        long_exits = dataframe['exit_long'].sum()
+        short_exits = dataframe['exit_short'].sum()
+        print(f"Exit signals generated: {long_exits} long exits, {short_exits} short exits")
+        
+        return dataframe
+
 class RiskMetrics(IStrategy):
     """
-    RiskMetrics strategy using HAR-RV (Heterogeneous Autoregression Realized Volatility) model
-    for volatility forecasting and risk management.
+    RiskMetrics strategy using proper GARCH implementation for volatility forecasting and risk management.
     
     Features:
-    - Volatility forecasting using HAR-RV model
+    - GARCH model for volatility forecasting and risk management (properly separated from technical analysis)
     - Risk-adjusted position sizing based on volatility regime
+    - Fixed lookback periods for Monte Carlo optimization (not volatility-based)
     - Trendline analysis with support and resistance identification
     - Trendline ranking based on price proximity and touch frequency
-    - Monte Carlo optimization for optimal trendline periods
+    - Monte Carlo optimization for optimal trendline periods using fixed sampling
     - Linear regression trendlines using TA-Lib's LINEARREG functions
       * Provides straight-line trendlines using the least squares method
       * Visualizes slope, angle, and projected forecasts
@@ -69,6 +369,11 @@ class RiskMetrics(IStrategy):
       * Detects when support and resistance scores are similar
       * Implements adaptive position sizing during convergence periods
       * Switches between bounce trading and breakout modes
+    
+    GARCH Usage:
+    - Estimates current market volatility for risk management
+    - Provides volatility regime classification (low/medium/high)
+    - Used for position sizing and risk multipliers
     """
     INTERFACE_VERSION = 3
 
@@ -136,25 +441,12 @@ class RiskMetrics(IStrategy):
     enable_mc_optimization = BooleanParameter(default=True, space="buy", optimize=False)
 
     # GARCH Volatility-based period sampling parameters
-    garch_min_candles = IntParameter(100, 300, default=100, space="buy", optimize=True)
-    garch_max_candles = IntParameter(500, 1000, default=1000, space="buy", optimize=True)
+    # These parameters were incorrectly mixing GARCH volatility estimation with lookback period selection
+    # GARCH is now properly used only for risk management and volatility forecasting
+    garch_min_candles = IntParameter(100, 300, default=100, space="buy", optimize=False)  # Kept for compatibility
+    garch_max_candles = IntParameter(500, 1000, default=1000, space="buy", optimize=False)  # Kept for compatibility
     
-    # Volatility regime sampling distribution parameters (Beta distribution)
-    # Low volatility regime: favor longer lookback periods (small alpha, large beta pushes toward end of range)
-    low_vol_beta_a = DecimalParameter(1.0, 2.0, default=1.0, space="buy", optimize=True)
-    low_vol_beta_b = DecimalParameter(2.0, 4.0, default=3.0, space="buy", optimize=True)
     
-    # Medium volatility regime: balanced distribution
-    medium_vol_beta_a = DecimalParameter(0.8, 1.2, default=1.0, space="buy", optimize=True)
-    medium_vol_beta_b = DecimalParameter(0.8, 1.2, default=1.0, space="buy", optimize=True)
-    
-    # High volatility regime: favor shorter lookback periods (large alpha, small beta pushes toward start of range)
-    high_vol_beta_a = DecimalParameter(2.0, 4.0, default=3.0, space="buy", optimize=True)
-    high_vol_beta_b = DecimalParameter(1.0, 2.0, default=1.5, space="buy", optimize=True)
-    
-    # Enable volatility-based period sampling
-    enable_volatility_sampling = BooleanParameter(default=True, space="buy", optimize=False)
-
     # Monte Carlo Score Convergence Parameters
     score_convergence_high_threshold = DecimalParameter(0.85, 0.95, default=0.90, space="buy", optimize=True)
     score_convergence_medium_threshold = DecimalParameter(0.70, 0.85, default=0.80, space="buy", optimize=True)
@@ -181,7 +473,7 @@ class RiskMetrics(IStrategy):
     # Disable stoploss since we're using ROI-based exits only
     stoploss = -0.1  # Effectively disabled
     trailing_stop = False
-    use_exit_signal = False  # Disable exit signals since we're using ROI
+    use_exit_signal = True  # Disable exit signals since we're using ROI
     exit_profit_only = False  # Only exit in profit
     ignore_roi_if_entry_signal = False  # Don't ignore ROI even if we have a new entry signal
 
@@ -217,14 +509,6 @@ class RiskMetrics(IStrategy):
                 "MC_Optimal_Support": {"color": "darkgreen", "width": 4.0, "dash": "dot"}
             },
             "subplots": {
-                "ATR": {
-                    "atr": {"color": "blue"}
-                },
-                "Mean Scores": {
-                    "Resistance_Mean_Score": {"color": "red", "type": "line", "width": 2.0},
-                    "Support_Mean_Score": {"color": "green", "type": "line", "width": 2.0},
-                    "Highest_Line_Score": {"color": "purple", "type": "line", "width": 2.5}
-                },
                 "Total Line Scores": {
                     "Resistance_Line_Score": {"color": "red", "type": "line", "width": 2.0},
                     "Support_Line_Score": {"color": "green", "type": "line", "width": 2.0}
@@ -240,22 +524,15 @@ class RiskMetrics(IStrategy):
                 },
                 "Trading Mode": {
                     "trading_mode_indicator": {"color": "blue", "type": "line", "width": 2.0}
-                },
-                "Timeframes": {
-                    "highest_timeframe_indicator": {"color": "blue", "type": "line", "width": 2.0}
-                },
-                "Risk Metrics": {
-                    "risk_multiplier": {"color": "orange", "type": "line", "width": 2.0}
                 }
             }
         }
         
-        # Add volatility regime subplot if enabled
-        if hasattr(self, 'enable_volatility_sampling') and self.enable_volatility_sampling.value:
-            plot_config["subplots"]["Volatility Analysis"] = {
-                "volatility": {"color": "purple", "type": "line", "width": 2.0},
-                "risk_multiplier": {"color": "orange", "type": "line", "width": 2.0}
-            }
+        # Add volatility regime subplot (always enabled for proper GARCH risk management)
+        plot_config["subplots"]["Volatility Analysis"] = {
+            "volatility": {"color": "purple", "type": "line", "width": 2.0},
+            "risk_multiplier": {"color": "orange", "type": "line", "width": 2.0}
+        }
         
         # Dynamically add higher timeframe plots based on available timeframes
         # These won't be added until determine_highest_timeframe is called
@@ -306,17 +583,20 @@ class RiskMetrics(IStrategy):
         self.highest_timeframe = None
         self.available_timeframes = []
         
-        # Initialize GARCH model for volatility-based period optimization
+        # Initialize GARCH model for risk management
         self.garch_model = GARCHModel()
         
-        print(f"RiskMetrics strategy initialized with volatility-based period sampling:")
-        print(f"  GARCH candles range: {self.garch_min_candles.value} to {self.garch_max_candles.value}")
-        print(f"  Volatility sampling enabled: {self.enable_volatility_sampling.value}")
-        print(f"  Low vol Beta params: ({self.low_vol_beta_a.value:.2f}, {self.low_vol_beta_b.value:.2f})")
-        print(f"  Medium vol Beta params: ({self.medium_vol_beta_a.value:.2f}, {self.medium_vol_beta_b.value:.2f})")
-        print(f"  High vol Beta params: ({self.high_vol_beta_a.value:.2f}, {self.high_vol_beta_b.value:.2f})")
+        # Initialize signal generator
+        self.signal_generator = SignalGenerator(self)
+        
+        print(f"RiskMetrics strategy initialized with separated GARCH implementation:")
+        print(f"  GARCH model: Used for risk management and volatility estimation only")
+        print(f"  Lookback periods: Fixed periods for Monte Carlo optimization")
+        print(f"  Monte Carlo iterations: {self.MC_ITERATIONS}")
         print(f"  Score convergence detection enabled: {self.enable_convergence_detection.value}")
         print(f"  Convergence thresholds: High={self.score_convergence_high_threshold.value:.2f}, Medium={self.score_convergence_medium_threshold.value:.2f}, Low={self.score_convergence_low_threshold.value:.2f}")
+        print(f"  Proper GARCH usage: Volatility forecasting separate from technical analysis optimization")
+        print(f"  Signal generator: Initialized for modular signal generation")
 
     def calculate_score_convergence_ratio(self, support_score: float, resistance_score: float) -> float:
         """
@@ -568,39 +848,86 @@ class RiskMetrics(IStrategy):
         'monthly': MONTHS_PER_YEAR
     }
 
-    def generate_volatility_based_lookback_periods(self, dataframe: DataFrame) -> List[int]:
+    def generate_fixed_lookback_periods(self, dataframe: DataFrame) -> List[int]:
         """
-        Generate lookback periods based on current volatility regime using GARCH model
-        and Beta distribution sampling.
+        Generate fixed lookback periods for Monte Carlo optimization.
+        This replaces the volatility-based period generation to properly separate 
+        GARCH volatility estimation from lookback period selection.
         
         Args:
             dataframe: DataFrame with OHLCV data
             
         Returns:
-            List[int]: List of lookback periods optimized for current volatility regime
+            List[int]: List of fixed lookback periods for testing
         """
-        if not self.enable_volatility_sampling.value:
-            # Fall back to uniform random sampling if volatility sampling is disabled
-            total_candles = len(dataframe)
-            max_lookback_period = min(total_candles, self.garch_max_candles.value)
-            return [random.randint(self.MIN_LOOKBACK_PERIOD, max_lookback_period) 
-                   for _ in range(self.MC_ITERATIONS)]
+        total_candles = len(dataframe)
+        max_lookback_period = min(total_candles, 1000)  # Use fixed max instead of garch_max_candles
+        min_lookback_period = max(self.MIN_LOOKBACK_PERIOD, 50)  # Use fixed min
         
+        # Define core fixed periods that cover different time horizons
+        core_periods = [50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 800, 900, 1000]
+        
+        # Filter periods based on available data
+        valid_core_periods = [p for p in core_periods if min_lookback_period <= p <= max_lookback_period]
+        
+        # Generate additional random periods to reach MC_ITERATIONS
+        remaining_iterations = self.MC_ITERATIONS - len(valid_core_periods)
+        random_periods = []
+        
+        if remaining_iterations > 0:
+            # Generate random periods to fill the remaining iterations
+            import random
+            for _ in range(remaining_iterations):
+                random_period = random.randint(min_lookback_period, max_lookback_period)
+                random_periods.append(random_period)
+        
+        # Combine core periods with random periods
+        all_periods = valid_core_periods + random_periods
+        
+        # Ensure we have exactly MC_ITERATIONS periods
+        if len(all_periods) > self.MC_ITERATIONS:
+            all_periods = all_periods[:self.MC_ITERATIONS]
+        elif len(all_periods) < self.MC_ITERATIONS:
+            # Pad with repeated core periods if needed
+            while len(all_periods) < self.MC_ITERATIONS:
+                all_periods.extend(valid_core_periods[:self.MC_ITERATIONS - len(all_periods)])
+        
+        # Shuffle to randomize the order
+        random.shuffle(all_periods)
+        
+        print(f"Generated {len(all_periods)} fixed lookback periods:")
+        print(f"  Range: {min(all_periods)} to {max(all_periods)} candles")
+        print(f"  Mean: {np.mean(all_periods):.1f}, Std: {np.std(all_periods):.1f}")
+        print(f"  Core periods included: {valid_core_periods}")
+        
+        return all_periods
+
+    def estimate_current_volatility_regime(self, dataframe: DataFrame) -> Tuple[str, float, float]:
+        """
+        Estimate current volatility regime using GARCH model for risk management purposes.
+        This is separated from lookback period generation to ensure proper use of GARCH.
+        
+        Args:
+            dataframe: DataFrame with OHLCV data
+            
+        Returns:
+            Tuple[str, float, float]: (regime, volatility, risk_multiplier)
+        """
         # Calculate log returns for GARCH volatility estimation
         log_returns = np.log(dataframe['close'].pct_change() + 1).dropna().values
         
-        # Determine number of candles for volatility calculation based on regime
-        volatility_candles = min(len(log_returns), self.garch_max_candles.value)
-        volatility_candles = max(volatility_candles, self.garch_min_candles.value)
+        # Use a reasonable window for volatility estimation
+        volatility_window = min(len(log_returns), 500)  # Fixed window for volatility estimation
+        volatility_window = max(volatility_window, 100)   # Minimum window for reliable estimation
         
         # Calculate current volatility using GARCH model
-        recent_returns = log_returns[-volatility_candles:]
+        recent_returns = log_returns[-volatility_window:]
         
         # Clean data and calculate volatility
         if len(recent_returns) > 0 and not np.isnan(recent_returns).all() and not np.isinf(recent_returns).any():
             # Use VolatilityModel's calculate_volatility method with GARCHModel
             current_volatility = self.volatility_model.calculate_volatility(recent_returns, self.garch_model)
-            print(f"  GARCH volatility result: {current_volatility}")
+            print(f"  GARCH volatility result: {current_volatility:.6f}")
         else:
             print(f"  Invalid data for GARCH calculation, using fallback")
             # Fallback to simple standard deviation using VolatilityModel
@@ -610,56 +937,14 @@ class RiskMetrics(IStrategy):
         
         print(f"Current volatility regime: {regime} (volatility: {current_volatility:.6f}, risk multiplier: {risk_multiplier:.2f})")
         
-        # Set Beta distribution parameters based on volatility regime
-        if regime == 'low':
-            a, b = self.low_vol_beta_a.value, self.low_vol_beta_b.value
-            print(f"Using low volatility sampling: Beta({a:.2f}, {b:.2f}) - favors longer periods")
-        elif regime == 'medium':
-            a, b = self.medium_vol_beta_a.value, self.medium_vol_beta_b.value
-            print(f"Using medium volatility sampling: Beta({a:.2f}, {b:.2f}) - balanced distribution")
-        else:  # high volatility
-            a, b = self.high_vol_beta_a.value, self.high_vol_beta_b.value
-            print(f"Using high volatility sampling: Beta({a:.2f}, {b:.2f}) - favors shorter periods")
-        
-        # Generate Beta-distributed samples
-        samples = np.random.beta(a, b, self.MC_ITERATIONS)
-        
-        # Scale samples to lookback period range
-        total_candles = len(dataframe)
-        max_lookback_period = min(total_candles, self.garch_max_candles.value)
-        min_lookback_period = max(self.MIN_LOOKBACK_PERIOD, self.garch_min_candles.value)
-        
-        scaled_samples = samples * (max_lookback_period - min_lookback_period) + min_lookback_period
-        lookback_periods = np.round(scaled_samples).astype(int).tolist()
-        
-        # Ensure all periods are within valid range
-        lookback_periods = [max(min_lookback_period, min(p, max_lookback_period)) for p in lookback_periods]
-        
-        # Add some fixed key periods for comprehensive coverage
-        fixed_periods = [50, 100, 200, 300, 500]
-        fixed_periods = [p for p in fixed_periods if min_lookback_period <= p <= max_lookback_period]
-        
-        # Replace some random periods with fixed periods (up to 20% of total iterations)
-        num_fixed = min(len(fixed_periods), self.MC_ITERATIONS // 5)
-        if num_fixed > 0:
-            # Replace the first num_fixed periods with fixed periods
-            lookback_periods[:num_fixed] = fixed_periods[:num_fixed]
-        
-        # Shuffle to randomize the order
-        random.shuffle(lookback_periods)
-        
-        print(f"Generated {len(lookback_periods)} lookback periods:")
-        print(f"  Range: {min(lookback_periods)} to {max(lookback_periods)} candles")
-        print(f"  Mean: {np.mean(lookback_periods):.1f}, Std: {np.std(lookback_periods):.1f}")
-        print(f"  Fixed periods included: {fixed_periods[:num_fixed] if num_fixed > 0 else 'None'}")
-        
-        return lookback_periods
+        return regime, current_volatility, risk_multiplier
+
 
     def monte_carlo_period_optimization(self, dataframe: DataFrame) -> Dict[str, any]:
         """
         Use Monte Carlo simulation to test different lookback periods and find
         the ones that produce the highest scoring resistance and support lines.
-        Now uses volatility-based period sampling for improved optimization.
+        Now uses fixed lookback periods
         
         Args:
             dataframe: DataFrame with OHLCV data
@@ -667,9 +952,9 @@ class RiskMetrics(IStrategy):
         Returns:
             Dict containing optimal periods and their scores
         """
-        # Set MAX_LOOKBACK_PERIOD dynamically based on available data and GARCH parameters
+        # Set MAX_LOOKBACK_PERIOD dynamically based on available data
         total_candles = len(dataframe)
-        max_lookback_period = min(total_candles, self.garch_max_candles.value)
+        max_lookback_period = min(total_candles, 1000)  # Fixed max instead of garch_max_candles
         
         if total_candles < self.MIN_LOOKBACK_PERIOD:
             print(f"Not enough data for Monte Carlo optimization. Need at least {self.MIN_LOOKBACK_PERIOD} candles, got {total_candles}.")
@@ -686,12 +971,16 @@ class RiskMetrics(IStrategy):
         import time
         random.seed(int(time.time() * 1000) % 10000)  # Use current time for seed
         
-        # Generate volatility-based lookback periods
-        print("=== Volatility-Based Monte Carlo Period Optimization ===")
-        lookback_periods = self.generate_volatility_based_lookback_periods(dataframe)
+        # Generate fixed lookback periods
+        print("=== Monte Carlo Period Optimization with Fixed Periods ===")
+        lookback_periods = self.generate_fixed_lookback_periods(dataframe)
+        
+        # Separately estimate volatility regime for risk management
+        regime, current_volatility, risk_multiplier = self.estimate_current_volatility_regime(dataframe)
         
         print(f"Starting Monte Carlo period optimization with {len(lookback_periods)} iterations...")
         print(f"Testing periods from {min(lookback_periods)} to {max(lookback_periods)} candles (total data: {total_candles})")
+        print(f"Volatility regime for risk management: {regime} (volatility: {current_volatility:.6f})")
         
         best_resistance_score = 0.0
         best_support_score = 0.0
@@ -717,50 +1006,12 @@ class RiskMetrics(IStrategy):
                 # Test this period
                 recent_data = dataframe.tail(random_period).copy()
                 
-                # Find swing points for this period
-                high_swing_points = self.trend_analyzer._find_swing_points(
-                    prices=recent_data['high'].values,
-                    price_type='high',
-                    min_points=max(3, random_period // 50),  # Adaptive min_points
-                    distance=max(5, random_period // 100)    # Adaptive distance
-                )
+                # Use the new helper method to generate trendlines and scores
+                trendline_results = self._generate_trendlines_for_period(recent_data, random_period)
                 
-                low_swing_points = self.trend_analyzer._find_swing_points(
-                    prices=recent_data['low'].values,
-                    price_type='low',
-                    min_points=max(3, random_period // 50),
-                    distance=max(5, random_period // 100)
-                )
-                
-                # Initialize swing point columns
-                recent_data['all_highs'] = np.nan
-                recent_data['all_lows'] = np.nan
-                
-                # Map swing points
-                for idx, price in high_swing_points:
-                    if idx < len(recent_data):
-                        recent_data.iloc[idx, recent_data.columns.get_loc('all_highs')] = price
-                
-                for idx, price in low_swing_points:
-                    if idx < len(recent_data):
-                        recent_data.iloc[idx, recent_data.columns.get_loc('all_lows')] = price
-                
-                # Generate trends for this period
-                trends = gentrends(recent_data, field='close', window=1/3.0)
-                
-                # Calculate scores for the main lines
-                main_lines_score = rank_trendlines(
-                    trends,
-                    price_field="Data", 
-                    threshold=self.trendline_proximity_threshold.value,
-                    touch_weight=self.trendline_touch_weight.value,
-                    all_highs=recent_data['all_highs'],
-                    all_lows=recent_data['all_lows'],
-                    pivot_bonus=10.0  # Higher bonus for MC optimization
-                )
-                
-                current_resistance_score = main_lines_score["ranked_maxlines"].get("Max Line", 0)
-                current_support_score = main_lines_score["ranked_minlines"].get("Min Line", 0)
+                current_resistance_score = trendline_results['resistance_score']
+                current_support_score = trendline_results['support_score']
+                trends = trendline_results['trends']
                 
                 # Store results
                 tested_periods.append(random_period)
@@ -809,7 +1060,7 @@ class RiskMetrics(IStrategy):
                 print(f"Error in Monte Carlo iteration {iteration}: {e}")
                 continue
         
-        print(f"Volatility-based Monte Carlo optimization completed!")
+        print(f"Fixed-period Monte Carlo optimization completed!")
         print(f"Optimal resistance period: {best_resistance_period} (score: {best_resistance_score:.4f})")
         print(f"Optimal support period: {best_support_period} (score: {best_support_score:.4f})")
         print(f"Tested periods range: {min(tested_periods) if tested_periods else 'N/A'} to {max(tested_periods) if tested_periods else 'N/A'} candles")
@@ -836,12 +1087,9 @@ class RiskMetrics(IStrategy):
             'all_support_scores': support_scores,
             'max_lookback_period': max_lookback_period,
             'period_distribution': period_counts,
-            'volatility_regime': self.volatility_model.get_regime_and_multiplier(
-                self.volatility_model.calculate_volatility(
-                    np.log(dataframe['close'].pct_change() + 1).dropna().values[-self.garch_max_candles.value:],
-                    self.garch_model
-                ) if len(dataframe) > self.garch_min_candles.value else np.nan
-            )[0] if len(dataframe) > self.garch_min_candles.value else 'insufficient_data'
+            'volatility_regime': regime,
+            'current_volatility': current_volatility,
+            'risk_multiplier': risk_multiplier
         }
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
@@ -865,82 +1113,25 @@ class RiskMetrics(IStrategy):
         # Calculate ATR and store it for visualization
         dataframe['atr'] = self.volatility_model.calculate_atr(dataframe)
 
-        # Calculate and store volatility regime information
-        if len(dataframe) >= self.garch_min_candles.value:
-            # Calculate log returns for volatility estimation
-            log_returns = np.log(dataframe['close'].pct_change() + 1).dropna().values
-            
-            # Use appropriate number of candles for volatility calculation
-            volatility_candles = min(len(log_returns), self.garch_max_candles.value)
-            volatility_candles = max(volatility_candles, self.garch_min_candles.value)
-            
-            # Calculate current volatility and regime
-            recent_returns = log_returns[-volatility_candles:]
-            
-            # Debug information
-            print(f"Volatility calculation debug:")
-            print(f"  Total log returns: {len(log_returns)}")
-            print(f"  Volatility candles used: {volatility_candles}")
-            print(f"  Recent returns shape: {recent_returns.shape}")
-            print(f"  Recent returns stats: mean={np.mean(recent_returns):.6f}, std={np.std(recent_returns):.6f}")
-            print(f"  Recent returns has NaN: {np.isnan(recent_returns).any()}")
-            print(f"  Recent returns has Inf: {np.isinf(recent_returns).any()}")
-            
-            # Clean data and calculate volatility
-            if len(recent_returns) > 0 and not np.isnan(recent_returns).all() and not np.isinf(recent_returns).any():
-                # Use VolatilityModel's calculate_volatility method with GARCHModel
-                current_volatility = self.volatility_model.calculate_volatility(recent_returns, self.garch_model)
-                print(f"  GARCH volatility result: {current_volatility}")
-            else:
-                print(f"  Invalid data for GARCH calculation, using fallback")
-                # Fallback to simple standard deviation using VolatilityModel
-                current_volatility = self.volatility_model.calculate_volatility(recent_returns)
-            
-            # Get regime and multiplier
-            regime, risk_multiplier = self.volatility_model.get_regime_and_multiplier(current_volatility)
+        # Calculate and store volatility regime information using separated GARCH estimation
+        if len(dataframe) >= 100:  # Use fixed minimum threshold for volatility estimation
+            print("=== GARCH Volatility Estimation for Risk Management ===")
+            regime, current_volatility, risk_multiplier = self.estimate_current_volatility_regime(dataframe)
             
             # Store volatility information in dataframe
             dataframe['volatility'] = current_volatility
             dataframe['volatility_regime'] = regime
             dataframe['risk_multiplier'] = risk_multiplier
             
-            print(f"Current volatility regime: {regime} (volatility: {current_volatility:.6f}, risk multiplier: {risk_multiplier:.2f})")
         else:
             # Insufficient data for volatility calculation
             dataframe['volatility'] = np.nan
             dataframe['volatility_regime'] = 'insufficient_data'
             dataframe['risk_multiplier'] = 1.0
-            print(f"Insufficient data for volatility calculation. Need at least {self.garch_min_candles.value} candles, got {len(dataframe)}")
+            print(f"Insufficient data for volatility calculation. Need at least 100 candles, got {len(dataframe)}")
 
-        # Initialize marker columns for support and resistance points
-        dataframe['all_highs'] = np.nan
-        dataframe['all_lows'] = np.nan
-        
-        # Initialize columns for main trend lines
-        dataframe['Resistance Line'] = np.nan
-        dataframe['Support Line'] = np.nan
-        
-        # Initialize Monte Carlo optimal lines
-        dataframe['MC_Optimal_Resistance'] = np.nan
-        dataframe['MC_Optimal_Support'] = np.nan
-        dataframe['MC_Resistance_Score'] = 0.0
-        dataframe['MC_Support_Score'] = 0.0
-        dataframe['MC_Optimal_Period'] = 0.0
-        
-        # Initialize new columns for highest scored line
-        dataframe['Highest_Scored_Line'] = np.nan
-        dataframe['Highest_Set_Mean'] = np.nan
-        dataframe['Highest_Line_Score'] = np.nan
-        dataframe['Highest_Line_Type'] = ""  # Will be "Resistance" or "Support"
-        dataframe['Highest_Line_Text'] = ""  # For displaying text on the chart
-        
-        # Define the maximum number of segments we'll use
-        max_segments = 10
-        
-        # Initialize columns for all individual segment trend lines
-        for i in range(max_segments):
-            dataframe[f'Max_Line_{i}'] = np.nan
-            dataframe[f'Min_Line_{i}'] = np.nan
+        # Initialize all required dataframe columns
+        self._initialize_dataframe_columns(dataframe)
 
         # Monte Carlo Period Optimization
         if self.enable_mc_optimization.value and len(dataframe) >= self.MIN_LOOKBACK_PERIOD:
@@ -971,41 +1162,8 @@ class RiskMetrics(IStrategy):
             print(f"MC_Resistance_Score column stats: min={dataframe['MC_Resistance_Score'].min()}, max={dataframe['MC_Resistance_Score'].max()}")
             print(f"MC_Support_Score column stats: min={dataframe['MC_Support_Score'].min()}, max={dataframe['MC_Support_Score'].max()}")
             
-            # === Monte Carlo Score Convergence Analysis ===
-            print("=== Monte Carlo Score Convergence Analysis ===")
-            
-            # Calculate convergence ratio between MC scores
-            convergence_ratio = self.calculate_score_convergence_ratio(raw_support_score, raw_resistance_score)
-            convergence_multiplier = self.get_convergence_multiplier(convergence_ratio)
-            trading_mode = self.get_trading_mode(convergence_ratio)
-            
-            # Convert trading mode to numeric indicator for plotting
-            trading_mode_mapping = {
-                "NORMAL_BOUNCE": 1.0,
-                "LOW_CONVERGENCE": 2.0,
-                "MEDIUM_CONVERGENCE": 3.0,
-                "HIGH_CONVERGENCE": 4.0
-            }
-            trading_mode_indicator = trading_mode_mapping.get(trading_mode, 0.0)
-            
-            # Store convergence metrics in dataframe
-            dataframe['score_convergence_ratio'] = convergence_ratio
-            dataframe['convergence_multiplier'] = convergence_multiplier
-            dataframe['trading_mode_indicator'] = trading_mode_indicator
-            dataframe['trading_mode'] = trading_mode
-            
-            # Log convergence analysis results
-            print(f"Score Convergence Analysis Results:")
-            print(f"  Support Score: {raw_support_score:.6f}")
-            print(f"  Resistance Score: {raw_resistance_score:.6f}")
-            print(f"  Convergence Ratio: {convergence_ratio:.3f}")
-            print(f"  Convergence Multiplier: {convergence_multiplier:.3f}")
-            print(f"  Trading Mode: {trading_mode}")
-            print(f"  Trading Mode Indicator: {trading_mode_indicator}")
-            
-            # Get detailed breakout scenario analysis
-            breakout_analysis = self.detect_breakout_scenario(dataframe)
-            print(f"  Breakout Analysis: {breakout_analysis['recommendation']}")
+            # Process volatility and convergence analysis
+            self._process_convergence_analysis(dataframe, raw_resistance_score, raw_support_score)
             
         else:
             print("Monte Carlo optimization skipped (disabled or insufficient data)")
@@ -1031,7 +1189,6 @@ class RiskMetrics(IStrategy):
         recent_data = dataframe.tail(lookback).copy()
         
         # Calculate linear regression trendlines using TA-Lib
-        # These will provide straight line trendlines using the least squares method
         try:
             # Get appropriate timeperiod for linear regression
             timeperiod = self.linearreg_timeperiod.value
@@ -1060,41 +1217,8 @@ class RiskMetrics(IStrategy):
 
         # Mark high and low points for visualization
         try:
-            # Use the TrendAnalysis._find_swing_points function to find significant swing points
-            # This provides better identification of true support and resistance levels
-            high_swing_points = self.trend_analyzer._find_swing_points(
-                prices=recent_data['high'].values,
-                price_type='high',
-                min_points=5,
-                distance=10
-            )
-            
-            low_swing_points = self.trend_analyzer._find_swing_points(
-                prices=recent_data['low'].values,
-                price_type='low',
-                min_points=5,
-                distance=10
-            )
-            
-            # Initialize all_highs and all_lows in recent_data with NaN values
-            recent_data['all_highs'] = np.nan
-            recent_data['all_lows'] = np.nan
-            
-            # Map swing high points to the dataframe
-            for idx, price in high_swing_points:
-                if idx < len(recent_data):
-                    actual_idx = len(dataframe) - len(recent_data) + idx
-                    if 0 <= actual_idx < len(dataframe):
-                        dataframe.loc[actual_idx, 'all_highs'] = price
-                        recent_data.iloc[idx, recent_data.columns.get_loc('all_highs')] = price
-            
-            # Map swing low points to the dataframe
-            for idx, price in low_swing_points:
-                if idx < len(recent_data):
-                    actual_idx = len(dataframe) - len(recent_data) + idx
-                    if 0 <= actual_idx < len(dataframe):
-                        dataframe.loc[actual_idx, 'all_lows'] = price
-                        recent_data.iloc[idx, recent_data.columns.get_loc('all_lows')] = price
+            # Find and map swing points to both dataframes
+            high_swing_points, low_swing_points = self._find_and_map_swing_points(dataframe, recent_data)
             
         except Exception as e:
             print(f"Error finding swing points: {e}")
@@ -1117,9 +1241,9 @@ class RiskMetrics(IStrategy):
             print(f"Error in gentrends: {e}")
         
         # Use segtrends with different segment counts to find multiple resistance and support lines
-        # Try with max_segments + 1 segments to get max_segments maxlines and minlines
         try:
             # Generate segmented trends
+            max_segments = 10
             seg_trends = segtrends(recent_data, field='close', segments=max_segments + 1)
             
             # Map all the individual max and min lines to the dataframe
@@ -1141,74 +1265,18 @@ class RiskMetrics(IStrategy):
             # Fail gracefully if segtrends fails
             print(f"Error in segtrends: {e}")
         
-        # Rank trendlines based on proximity to price
-        try:
-            # Use the rank_trendlines function to score and rank the trendlines
-            trendline_rankings = rank_trendlines(
-                seg_trends, 
-                price_field="Data", 
-                threshold=self.trendline_proximity_threshold.value,
-                touch_weight=self.trendline_touch_weight.value,
-                max_prefix="Max_Line_", 
-                min_prefix="Min_Line_",
-                all_highs=recent_data['all_highs'],
-                all_lows=recent_data['all_lows'],
-                pivot_bonus=8.0  # Increased pivot bonus to emphasize swing points
-            )
-            
-            # Store the top ranked maxlines and minlines in the dataframe
-            # Add columns for the rankings
-            ranked_maxlines = trendline_rankings["ranked_maxlines"]
-            ranked_minlines = trendline_rankings["ranked_minlines"]
-            
-            # Calculate mean scores for each set and select the highest scored line
-            scores_result = self.trend_analyzer.calculate_trendline_set_scores(ranked_maxlines, ranked_minlines)
-            
-            # Store mean scores in the dataframe
-            resistance_mean_score = scores_result["max_mean_score"]
-            support_mean_score = scores_result["min_mean_score"]
-            highest_set = scores_result["highest_set"]
-            highest_line_name = scores_result["highest_line_name"]
-            highest_line_score = scores_result["highest_line_score"]
-            
-            # Add indicators for visualization
-            dataframe['Resistance_Mean_Score'] = resistance_mean_score
-            dataframe['Support_Mean_Score'] = support_mean_score
-            
-            # Calculate and store scores for the main Max Line and Min Line
-            main_lines_score = rank_trendlines(
-                trends,  # Use the gentrends output that has Resistance Line and Support Line
-                price_field="Data", 
-                threshold=self.trendline_proximity_threshold.value,
-                touch_weight=self.trendline_touch_weight.value,
-                all_highs=recent_data['all_highs'],
-                all_lows=recent_data['all_lows'],
-                pivot_bonus=9.0  # Increased pivot bonus to emphasize swing points
-            )
-            
-            # Extract the scores for Resistance Line and Support Line
-            resistance_line_score = main_lines_score["ranked_maxlines"].get("Max Line", 0)
-            support_line_score = main_lines_score["ranked_minlines"].get("Min Line", 0)
-            
-            # Store the scores in the dataframe
-            dataframe['Resistance_Line_Score'] = resistance_line_score
-            dataframe['Support_Line_Score'] = support_line_score
-                        
-            # Copy the highest scored line to the Highest_Scored_Line column
-            if highest_line_name is not None:
-                last_idx = len(dataframe) - len(recent_data)
-                for i in range(len(seg_trends)):
-                    current_idx = last_idx + i
-                    if current_idx < len(dataframe):
-                        dataframe.loc[current_idx, 'Highest_Scored_Line'] = seg_trends[highest_line_name].iloc[i]
-                        dataframe.loc[current_idx, 'Highest_Set_Mean'] = resistance_mean_score if highest_set == "max" else support_mean_score
-                        dataframe.loc[current_idx, 'Highest_Line_Score'] = highest_line_score
-                        dataframe.loc[current_idx, 'Highest_Line_Type'] = "Resistance" if highest_set == "max" else "Support"
-                        
-        except Exception as e:
-            # Fail gracefully if ranking fails
-            print(f"Error in ranking trendlines: {e}")
+        # Calculate and store trendline scores
+        self._calculate_and_store_trendline_scores(dataframe, recent_data, trends, seg_trends)
 
+        # GARCH Examples and Risk Calculations
+        self._run_garch_examples()
+            
+        return dataframe
+
+    def _run_garch_examples(self) -> None:
+        """
+        Run GARCH examples and risk calculations for demonstration purposes.
+        """
         print("--------------------------------")
         print("--------------------------------")
         print("Begin Default GARCH")        
@@ -1219,7 +1287,6 @@ class RiskMetrics(IStrategy):
         risk_indicators = RiskIndicators()
 
         # Example 1: Basic GARCH(1,1) with default parameters
-
         simulated_returns = [0.07, 0.06, 0.05, 0.09]
         np_array = np.array(simulated_returns)
         # Calculate log returns on arithmetics returns
@@ -1273,209 +1340,288 @@ class RiskMetrics(IStrategy):
         stats = monte_carlo.get_simulation_statistics(simulated_returns)
         print(f"Statistiques de simulation - Moyenne: {stats['mean']:.4f}, Écart-type: {stats['std']:.4f}")
         print(f"Skewness: {stats['skewness']:.4f}, Kurtosis: {stats['kurtosis']:.4f}")
-            
-        return dataframe
 
-    def adjust_trade_position(self, trade: Trade, current_time: datetime,
-                          current_rate: float, current_profit: float,
-                          min_stake: Optional[float], max_stake: float,
-                          current_entry_rate: float, current_exit_rate: float,
-                          current_entry_profit: float, current_exit_profit: float,
-                          **kwargs) -> Optional[float]:
+    def _find_and_map_swing_points(self, dataframe: DataFrame, recent_data: DataFrame) -> Tuple[List, List]:
         """
-        Adjust position size based on volatility regime and score convergence analysis.
+        Find swing points and map them to both dataframes.
         
-        Position sizing factors:
-        1. Volatility-based risk multiplier
-        2. Score convergence multiplier (reduces size when scores are similar)
+        Args:
+            dataframe: Full dataframe to map swing points to
+            recent_data: Recent data subset for swing point detection
+            
+        Returns:
+            Tuple[List, List]: (high_swing_points, low_swing_points)
         """
-        dataframe, _ = self.dp.get_analyzed_dataframe(trade.pair, self.timeframe)
-        if len(dataframe) > 0:
-            current_candle = dataframe.iloc[-1].squeeze()
+        # Find swing points using TrendAnalysis
+        high_swing_points = self.trend_analyzer._find_swing_points(
+            prices=recent_data['high'].values,
+            price_type='high',
+            min_points=5,
+            distance=10
+        )
+        
+        low_swing_points = self.trend_analyzer._find_swing_points(
+            prices=recent_data['low'].values,
+            price_type='low',
+            min_points=5,
+            distance=10
+        )
+        
+        # Initialize swing point columns in recent_data
+        recent_data['all_highs'] = np.nan
+        recent_data['all_lows'] = np.nan
+        
+        # Map swing points to both dataframes
+        for idx, price in high_swing_points:
+            if idx < len(recent_data):
+                actual_idx = len(dataframe) - len(recent_data) + idx
+                if 0 <= actual_idx < len(dataframe):
+                    dataframe.loc[actual_idx, 'all_highs'] = price
+                    recent_data.iloc[idx, recent_data.columns.get_loc('all_highs')] = price
+        
+        for idx, price in low_swing_points:
+            if idx < len(recent_data):
+                actual_idx = len(dataframe) - len(recent_data) + idx
+                if 0 <= actual_idx < len(dataframe):
+                    dataframe.loc[actual_idx, 'all_lows'] = price
+                    recent_data.iloc[idx, recent_data.columns.get_loc('all_lows')] = price
+        
+        return high_swing_points, low_swing_points
+
+    def _generate_trendlines_for_period(self, recent_data: DataFrame, random_period: int) -> Dict[str, any]:
+        """
+        Generate trendlines and calculate scores for a specific lookback period.
+        
+        Args:
+            recent_data: DataFrame with recent OHLCV data
+            random_period: Lookback period to test
             
-            # Get base risk multiplier from volatility regime
-            base_risk_multiplier = current_candle.get('risk_multiplier', 1.0)
+        Returns:
+            Dict containing trendlines and scores
+        """
+        # Find swing points for this period with adaptive parameters
+        high_swing_points = self.trend_analyzer._find_swing_points(
+            prices=recent_data['high'].values,
+            price_type='high',
+            min_points=max(3, random_period // 50),  # Adaptive min_points
+            distance=max(5, random_period // 100)    # Adaptive distance
+        )
+        
+        low_swing_points = self.trend_analyzer._find_swing_points(
+            prices=recent_data['low'].values,
+            price_type='low',
+            min_points=max(3, random_period // 50),
+            distance=max(5, random_period // 100)
+        )
+        
+        # Initialize swing point columns
+        recent_data['all_highs'] = np.nan
+        recent_data['all_lows'] = np.nan
+        
+        # Map swing points
+        for idx, price in high_swing_points:
+            if idx < len(recent_data):
+                recent_data.iloc[idx, recent_data.columns.get_loc('all_highs')] = price
+        
+        for idx, price in low_swing_points:
+            if idx < len(recent_data):
+                recent_data.iloc[idx, recent_data.columns.get_loc('all_lows')] = price
+        
+        # Generate trends for this period
+        trends = gentrends(recent_data, field='close', window=1/3.0)
+        
+        # Calculate scores for the main lines
+        main_lines_score = rank_trendlines(
+            trends,
+            price_field="Data", 
+            threshold=self.trendline_proximity_threshold.value,
+            touch_weight=self.trendline_touch_weight.value,
+            all_highs=recent_data['all_highs'],
+            all_lows=recent_data['all_lows'],
+            pivot_bonus=10.0  # Higher bonus for MC optimization
+        )
+        
+        resistance_score = main_lines_score["ranked_maxlines"].get("Max Line", 0)
+        support_score = main_lines_score["ranked_minlines"].get("Min Line", 0)
+        
+        return {
+            'trends': trends,
+            'resistance_score': resistance_score,
+            'support_score': support_score,
+            'high_swing_points': high_swing_points,
+            'low_swing_points': low_swing_points
+        }
+
+    def _calculate_and_store_trendline_scores(self, dataframe: DataFrame, recent_data: DataFrame, 
+                                           trends: DataFrame, seg_trends: DataFrame) -> None:
+        """
+        Calculate trendline scores and store them in the dataframe.
+        
+        Args:
+            dataframe: Full dataframe to store scores in
+            recent_data: Recent data with swing points
+            trends: Main trendlines from gentrends
+            seg_trends: Segmented trendlines from segtrends
+        """
+        try:
+            # Rank trendlines based on proximity to price
+            trendline_rankings = rank_trendlines(
+                seg_trends, 
+                price_field="Data", 
+                threshold=self.trendline_proximity_threshold.value,
+                touch_weight=self.trendline_touch_weight.value,
+                max_prefix="Max_Line_", 
+                min_prefix="Min_Line_",
+                all_highs=recent_data['all_highs'],
+                all_lows=recent_data['all_lows'],
+                pivot_bonus=8.0  # Increased pivot bonus to emphasize swing points
+            )
             
-            # Get convergence multiplier
-            convergence_multiplier = current_candle.get('convergence_multiplier', 1.0)
+            # Store the top ranked maxlines and minlines
+            ranked_maxlines = trendline_rankings["ranked_maxlines"]
+            ranked_minlines = trendline_rankings["ranked_minlines"]
             
-            # Combine both multipliers
-            combined_multiplier = base_risk_multiplier * convergence_multiplier
+            # Calculate mean scores for each set and select the highest scored line
+            scores_result = self.trend_analyzer.calculate_trendline_set_scores(ranked_maxlines, ranked_minlines)
             
-            # Apply combined multiplier to position size
-            adjusted_stake = max_stake * combined_multiplier
+            # Store mean scores in the dataframe
+            resistance_mean_score = scores_result["max_mean_score"]
+            support_mean_score = scores_result["min_mean_score"]
+            highest_set = scores_result["highest_set"]
+            highest_line_name = scores_result["highest_line_name"]
+            highest_line_score = scores_result["highest_line_score"]
             
-            # Log position sizing decision
-            support_score = current_candle.get('MC_Support_Score', 0)
-            resistance_score = current_candle.get('MC_Resistance_Score', 0)
-            convergence_ratio = current_candle.get('score_convergence_ratio', 0)
-            trading_mode = current_candle.get('trading_mode', 'UNKNOWN')
+            # Add indicators for visualization
+            dataframe['Resistance_Mean_Score'] = resistance_mean_score
+            dataframe['Support_Mean_Score'] = support_mean_score
             
-            print(f"Position Sizing for {trade.pair}:")
-            print(f"  Base Risk Multiplier (volatility): {base_risk_multiplier:.3f}")
-            print(f"  Convergence Multiplier: {convergence_multiplier:.3f}")
-            print(f"  Combined Multiplier: {combined_multiplier:.3f}")
-            print(f"  Trading Mode: {trading_mode}")
-            print(f"  Convergence Ratio: {convergence_ratio:.3f}")
-            print(f"  Support Score: {support_score:.6f}")
-            print(f"  Resistance Score: {resistance_score:.6f}")
-            print(f"  Max Stake: {max_stake:.2f}")
-            print(f"  Adjusted Stake: {adjusted_stake:.2f}")
+            # Calculate and store scores for the main Max Line and Min Line
+            main_lines_score = rank_trendlines(
+                trends,  # Use the gentrends output that has Resistance Line and Support Line
+                price_field="Data", 
+                threshold=self.trendline_proximity_threshold.value,
+                touch_weight=self.trendline_touch_weight.value,
+                all_highs=recent_data['all_highs'],
+                all_lows=recent_data['all_lows'],
+                pivot_bonus=9.0  # Increased pivot bonus to emphasize swing points
+            )
             
-            return adjusted_stake
+            # Extract the scores for Resistance Line and Support Line
+            resistance_line_score = main_lines_score["ranked_maxlines"].get("Max Line", 0)
+            support_line_score = main_lines_score["ranked_minlines"].get("Min Line", 0)
             
-        return max_stake
+            # Store the scores in the dataframe
+            dataframe['Resistance_Line_Score'] = resistance_line_score
+            dataframe['Support_Line_Score'] = support_line_score
+            
+            # Copy the highest scored line to the Highest_Scored_Line column
+            if highest_line_name is not None:
+                last_idx = len(dataframe) - len(recent_data)
+                for i in range(len(seg_trends)):
+                    current_idx = last_idx + i
+                    if current_idx < len(dataframe):
+                        dataframe.loc[current_idx, 'Highest_Scored_Line'] = seg_trends[highest_line_name].iloc[i]
+                        dataframe.loc[current_idx, 'Highest_Set_Mean'] = resistance_mean_score if highest_set == "max" else support_mean_score
+                        dataframe.loc[current_idx, 'Highest_Line_Score'] = highest_line_score
+                        dataframe.loc[current_idx, 'Highest_Line_Type'] = "Resistance" if highest_set == "max" else "Support"
+                        
+        except Exception as e:
+            print(f"Error in calculating trendline scores: {e}")
+
+    def _initialize_dataframe_columns(self, dataframe: DataFrame) -> None:
+        """
+        Initialize all required columns in the dataframe with default values.
+        
+        Args:
+            dataframe: DataFrame to initialize columns in
+        """
+        # Initialize marker columns for support and resistance points
+        dataframe['all_highs'] = np.nan
+        dataframe['all_lows'] = np.nan
+        
+        # Initialize columns for main trend lines
+        dataframe['Resistance Line'] = np.nan
+        dataframe['Support Line'] = np.nan
+        
+        # Initialize Monte Carlo optimal lines
+        dataframe['MC_Optimal_Resistance'] = np.nan
+        dataframe['MC_Optimal_Support'] = np.nan
+        dataframe['MC_Resistance_Score'] = 0.0
+        dataframe['MC_Support_Score'] = 0.0
+        dataframe['MC_Optimal_Period'] = 0.0
+        
+        # Initialize columns for highest scored line
+        dataframe['Highest_Scored_Line'] = np.nan
+        dataframe['Highest_Set_Mean'] = np.nan
+        dataframe['Highest_Line_Score'] = np.nan
+        dataframe['Highest_Line_Type'] = ""  # Will be "Resistance" or "Support"
+        dataframe['Highest_Line_Text'] = ""  # For displaying text on the chart
+        
+        # Initialize columns for individual segment trend lines
+        max_segments = 10
+        for i in range(max_segments):
+            dataframe[f'Max_Line_{i}'] = np.nan
+            dataframe[f'Min_Line_{i}'] = np.nan
+
+    def _process_convergence_analysis(self, dataframe: DataFrame, 
+                                                   raw_resistance_score: float, 
+                                                   raw_support_score: float) -> None:
+        """
+        Process volatility regime and convergence analysis, storing results in dataframe.
+        
+        Args:
+            dataframe: DataFrame to store analysis results
+            raw_resistance_score: Raw resistance score from Monte Carlo
+            raw_support_score: Raw support score from Monte Carlo
+        """
+        print("=== Monte Carlo Score Convergence Analysis ===")
+        
+        # Calculate convergence ratio between MC scores
+        convergence_ratio = self.calculate_score_convergence_ratio(raw_support_score, raw_resistance_score)
+        convergence_multiplier = self.get_convergence_multiplier(convergence_ratio)
+        trading_mode = self.get_trading_mode(convergence_ratio)
+        
+        # Convert trading mode to numeric indicator for plotting
+        trading_mode_mapping = {
+            "NORMAL_BOUNCE": 1.0,
+            "LOW_CONVERGENCE": 2.0,
+            "MEDIUM_CONVERGENCE": 3.0,
+            "HIGH_CONVERGENCE": 4.0
+        }
+        trading_mode_indicator = trading_mode_mapping.get(trading_mode, 0.0)
+        
+        # Store convergence metrics in dataframe
+        dataframe['score_convergence_ratio'] = convergence_ratio
+        dataframe['convergence_multiplier'] = convergence_multiplier
+        dataframe['trading_mode_indicator'] = trading_mode_indicator
+        dataframe['trading_mode'] = trading_mode
+        
+        # Log convergence analysis results
+        print(f"Score Convergence Analysis Results:")
+        print(f"  Support Score: {raw_support_score:.6f}")
+        print(f"  Resistance Score: {raw_resistance_score:.6f}")
+        print(f"  Convergence Ratio: {convergence_ratio:.3f}")
+        print(f"  Convergence Multiplier: {convergence_multiplier:.3f}")
+        print(f"  Trading Mode: {trading_mode}")
+        print(f"  Trading Mode Indicator: {trading_mode_indicator}")
+        
+        # Get detailed breakout scenario analysis
+        breakout_analysis = self.detect_breakout_scenario(dataframe)
+        print(f"  Breakout Analysis: {breakout_analysis['recommendation']}")
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
-        Bounce Trading Strategy Implementation using Price Extrema with Convergence Detection:
-        - Long entry: Price creates a LOW extrema near support, then moves up (bounce off support)
-        - Short entry: Price creates a HIGH extrema near resistance, then moves down (bounce off resistance)
-        - Enhanced with Monte Carlo Score Convergence Detection for risk management
-        
-        Following bounce trading methodology from RebelsFunding with convergence risk management
+        Generate entry signals using the modular SignalGenerator.
+        Bounce Trading Strategy Implementation using Price Extrema with Convergence Detection.
         """
-        # Initialize entry signals
-        dataframe.loc[:, 'enter_long'] = 0
-        dataframe.loc[:, 'enter_short'] = 0
-        
-        # Long entry: Bounce off support using swing low extrema with convergence check
-        if 'MC_Optimal_Support' in dataframe.columns and 'MC_Support_Score' in dataframe.columns and 'MC_Resistance_Score' in dataframe.columns:
-            # Basic bounce conditions
-            bounce_long_conditions = (
-                # Current close is above support
-                (dataframe['close'] > dataframe['MC_Optimal_Support']) &
-                # Previous low was at or near support (within small tolerance)
-                (abs(dataframe['low'].shift(1) - dataframe['MC_Optimal_Support'].shift(1)) <= 
-                 dataframe['MC_Optimal_Support'].shift(1) * 0.002) &  # 0.2% tolerance
-                # Previous low was lower than the low 2 candles ago (swing low pattern)
-                (dataframe['low'].shift(1) <= dataframe['low'].shift(2)) &
-                # Previous low was lower than current low (confirming bounce)
-                (dataframe['low'].shift(1) < dataframe['low']) &
-                # Current close is higher than previous close (upward movement)
-                (dataframe['close'] > dataframe['close'].shift(1)) &
-                # Support data is valid
-                (~dataframe['MC_Optimal_Support'].isna()) &
-                (~dataframe['MC_Optimal_Support'].shift(1).isna())
-            )
-            
-            # Add convergence filter for long entries
-            if self.enable_convergence_detection.value:
-                # Calculate convergence ratios for each row
-                convergence_ratios = dataframe.apply(
-                    lambda row: self.calculate_score_convergence_ratio(
-                        row.get('MC_Support_Score', 0), 
-                        row.get('MC_Resistance_Score', 0)
-                    ), axis=1
-                )
-                
-                # Allow entry only if convergence ratio is below high threshold
-                convergence_filter = convergence_ratios < self.score_convergence_high_threshold.value
-                
-                # Apply convergence filter to long conditions
-                dataframe.loc[bounce_long_conditions & convergence_filter, 'enter_long'] = 1
-                
-                print(f"Long entries with convergence filter applied")
-            else:
-                # Apply basic bounce conditions without convergence filter
-                dataframe.loc[bounce_long_conditions, 'enter_long'] = 1
-        
-        # Short entry: Bounce off resistance using swing high extrema with convergence check
-        if 'MC_Optimal_Resistance' in dataframe.columns and 'MC_Support_Score' in dataframe.columns and 'MC_Resistance_Score' in dataframe.columns:
-            # Basic bounce conditions
-            bounce_short_conditions = (
-                # Current close is below resistance
-                (dataframe['close'] < dataframe['MC_Optimal_Resistance']) &
-                # Previous high was at or near resistance (within small tolerance)
-                (abs(dataframe['high'].shift(1) - dataframe['MC_Optimal_Resistance'].shift(1)) <= 
-                 dataframe['MC_Optimal_Resistance'].shift(1) * 0.002) &  # 0.2% tolerance
-                # Previous high was higher than the high 2 candles ago (swing high pattern)
-                (dataframe['high'].shift(1) >= dataframe['high'].shift(2)) &
-                # Previous high was higher than current high (confirming bounce)
-                (dataframe['high'].shift(1) > dataframe['high']) &
-                # Current close is lower than previous close (downward movement)
-                (dataframe['close'] < dataframe['close'].shift(1)) &
-                # Resistance data is valid
-                (~dataframe['MC_Optimal_Resistance'].isna()) &
-                (~dataframe['MC_Optimal_Resistance'].shift(1).isna())
-            )
-            
-            # Add convergence filter for short entries
-            if self.enable_convergence_detection.value:
-                # Calculate convergence ratios for each row (reuse from long entry if available)
-                if 'convergence_ratios' not in locals():
-                    convergence_ratios = dataframe.apply(
-                        lambda row: self.calculate_score_convergence_ratio(
-                            row.get('MC_Support_Score', 0), 
-                            row.get('MC_Resistance_Score', 0)
-                        ), axis=1
-                    )
-                
-                # Allow entry only if convergence ratio is below high threshold
-                convergence_filter = convergence_ratios < self.score_convergence_high_threshold.value
-                
-                # Apply convergence filter to short conditions
-                dataframe.loc[bounce_short_conditions & convergence_filter, 'enter_short'] = 1
-                
-                print(f"Short entries with convergence filter applied")
-            else:
-                # Apply basic bounce conditions without convergence filter
-                dataframe.loc[bounce_short_conditions, 'enter_short'] = 1
-        
-        # Log entry signal summary
-        long_signals = dataframe['enter_long'].sum()
-        short_signals = dataframe['enter_short'].sum()
-        print(f"Entry signals generated: {long_signals} long, {short_signals} short")
-        
-        if self.enable_convergence_detection.value and len(dataframe) > 0:
-            # Log convergence analysis for the most recent candle
-            current_candle = dataframe.iloc[-1]
-            support_score = current_candle.get('MC_Support_Score', 0)
-            resistance_score = current_candle.get('MC_Resistance_Score', 0)
-            
-            should_enter, reason = self.should_enter_trade_with_convergence(support_score, resistance_score)
-            print(f"Current convergence status: {reason}")
-            print(f"Entry allowed: {should_enter}")
-        
-        return dataframe
+        return self.signal_generator.generate_entry_signals(dataframe)
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
-        Exit signals for bounce trading:
-        - Exit long when support is broken with conviction (close below support)
-        - Exit short when resistance is broken with conviction (close above resistance)
+        Generate exit signals using the modular SignalGenerator.
+        Enhanced exit signals for bounce trading with cross-signal exits.
         """
-        # Initialize exit signals
-        dataframe.loc[:, 'exit_long'] = 0
-        dataframe.loc[:, 'exit_short'] = 0
-        
-        # Exit long when support is definitively broken
-        # Price closes below support with conviction
-        if 'MC_Optimal_Support' in dataframe.columns:
-            dataframe.loc[
-                (dataframe['close'] < dataframe['MC_Optimal_Support']) &
-                (dataframe['close'].shift(1) >= dataframe['MC_Optimal_Support'].shift(1)) &
-                # Add conviction: close is significantly below support
-                (dataframe['close'] < dataframe['MC_Optimal_Support'] * 0.998) &  # 0.2% below
-                (~dataframe['MC_Optimal_Support'].isna()) &
-                (~dataframe['MC_Optimal_Support'].shift(1).isna()),
-                'exit_long'
-            ] = 1
-        
-        # Exit short when resistance is definitively broken
-        # Price closes above resistance with conviction
-        if 'MC_Optimal_Resistance' in dataframe.columns:
-            dataframe.loc[
-                (dataframe['close'] > dataframe['MC_Optimal_Resistance']) &
-                (dataframe['close'].shift(1) <= dataframe['MC_Optimal_Resistance'].shift(1)) &
-                # Add conviction: close is significantly above resistance
-                (dataframe['close'] > dataframe['MC_Optimal_Resistance'] * 1.002) &  # 0.2% above
-                (~dataframe['MC_Optimal_Resistance'].isna()) &
-                (~dataframe['MC_Optimal_Resistance'].shift(1).isna()),
-                'exit_short'
-            ] = 1
-        
-        return dataframe
+        return self.signal_generator.generate_exit_signals(dataframe)
 
     def get_market_condition_description(self, dataframe: DataFrame) -> Dict[str, str]:
         """
