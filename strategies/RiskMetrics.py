@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from pandas import DataFrame
-from typing import Dict, Optional, Union, Tuple
+from typing import Dict, Optional, Union, Tuple, List
 from functools import reduce
 from scipy.stats import norm, t
 import random
@@ -65,6 +65,10 @@ class RiskMetrics(IStrategy):
     - Dynamic timeframe selection based on available data
       * Automatically selects the highest appropriate timeframe
       * Adapts analysis based on available historical data length
+    - Monte Carlo Score Convergence Detection and Risk Management
+      * Detects when support and resistance scores are similar
+      * Implements adaptive position sizing during convergence periods
+      * Switches between bounce trading and breakout modes
     """
     INTERFACE_VERSION = 3
 
@@ -130,6 +134,39 @@ class RiskMetrics(IStrategy):
 
     # Monte Carlo optimization parameters
     enable_mc_optimization = BooleanParameter(default=True, space="buy", optimize=False)
+
+    # GARCH Volatility-based period sampling parameters
+    garch_min_candles = IntParameter(100, 300, default=100, space="buy", optimize=True)
+    garch_max_candles = IntParameter(500, 1000, default=1000, space="buy", optimize=True)
+    
+    # Volatility regime sampling distribution parameters (Beta distribution)
+    # Low volatility regime: favor longer lookback periods (small alpha, large beta pushes toward end of range)
+    low_vol_beta_a = DecimalParameter(1.0, 2.0, default=1.0, space="buy", optimize=True)
+    low_vol_beta_b = DecimalParameter(2.0, 4.0, default=3.0, space="buy", optimize=True)
+    
+    # Medium volatility regime: balanced distribution
+    medium_vol_beta_a = DecimalParameter(0.8, 1.2, default=1.0, space="buy", optimize=True)
+    medium_vol_beta_b = DecimalParameter(0.8, 1.2, default=1.0, space="buy", optimize=True)
+    
+    # High volatility regime: favor shorter lookback periods (large alpha, small beta pushes toward start of range)
+    high_vol_beta_a = DecimalParameter(2.0, 4.0, default=3.0, space="buy", optimize=True)
+    high_vol_beta_b = DecimalParameter(1.0, 2.0, default=1.5, space="buy", optimize=True)
+    
+    # Enable volatility-based period sampling
+    enable_volatility_sampling = BooleanParameter(default=True, space="buy", optimize=False)
+
+    # Monte Carlo Score Convergence Parameters
+    score_convergence_high_threshold = DecimalParameter(0.85, 0.95, default=0.90, space="buy", optimize=True)
+    score_convergence_medium_threshold = DecimalParameter(0.70, 0.85, default=0.80, space="buy", optimize=True)
+    score_convergence_low_threshold = DecimalParameter(0.50, 0.70, default=0.60, space="buy", optimize=True)
+    
+    # Convergence risk multipliers
+    convergence_high_penalty = DecimalParameter(0.1, 0.3, default=0.2, space="buy", optimize=True)
+    convergence_medium_penalty = DecimalParameter(0.4, 0.6, default=0.5, space="buy", optimize=True)
+    convergence_low_penalty = DecimalParameter(0.7, 0.9, default=0.8, space="buy", optimize=True)
+    
+    # Enable convergence detection
+    enable_convergence_detection = BooleanParameter(default=True, space="buy", optimize=False)
 
     # Minimal ROI designed for the strategy.
     minimal_roi = {
@@ -197,6 +234,13 @@ class RiskMetrics(IStrategy):
                     "MC_Support_Score": {"color": "darkgreen", "type": "line", "width": 3.0},
                     "MC_Optimal_Period": {"color": "orange", "type": "line", "width": 1.5}
                 },
+                "Score Convergence Analysis": {
+                    "score_convergence_ratio": {"color": "purple", "type": "line", "width": 2.0},
+                    "convergence_multiplier": {"color": "orange", "type": "line", "width": 2.0}
+                },
+                "Trading Mode": {
+                    "trading_mode_indicator": {"color": "blue", "type": "line", "width": 2.0}
+                },
                 "Timeframes": {
                     "highest_timeframe_indicator": {"color": "blue", "type": "line", "width": 2.0}
                 },
@@ -205,6 +249,13 @@ class RiskMetrics(IStrategy):
                 }
             }
         }
+        
+        # Add volatility regime subplot if enabled
+        if hasattr(self, 'enable_volatility_sampling') and self.enable_volatility_sampling.value:
+            plot_config["subplots"]["Volatility Analysis"] = {
+                "volatility": {"color": "purple", "type": "line", "width": 2.0},
+                "risk_multiplier": {"color": "orange", "type": "line", "width": 2.0}
+            }
         
         # Dynamically add higher timeframe plots based on available timeframes
         # These won't be added until determine_highest_timeframe is called
@@ -254,6 +305,164 @@ class RiskMetrics(IStrategy):
         # Initialize highest timeframe as None - will be determined dynamically
         self.highest_timeframe = None
         self.available_timeframes = []
+        
+        # Initialize GARCH model for volatility-based period optimization
+        self.garch_model = GARCHModel()
+        
+        print(f"RiskMetrics strategy initialized with volatility-based period sampling:")
+        print(f"  GARCH candles range: {self.garch_min_candles.value} to {self.garch_max_candles.value}")
+        print(f"  Volatility sampling enabled: {self.enable_volatility_sampling.value}")
+        print(f"  Low vol Beta params: ({self.low_vol_beta_a.value:.2f}, {self.low_vol_beta_b.value:.2f})")
+        print(f"  Medium vol Beta params: ({self.medium_vol_beta_a.value:.2f}, {self.medium_vol_beta_b.value:.2f})")
+        print(f"  High vol Beta params: ({self.high_vol_beta_a.value:.2f}, {self.high_vol_beta_b.value:.2f})")
+        print(f"  Score convergence detection enabled: {self.enable_convergence_detection.value}")
+        print(f"  Convergence thresholds: High={self.score_convergence_high_threshold.value:.2f}, Medium={self.score_convergence_medium_threshold.value:.2f}, Low={self.score_convergence_low_threshold.value:.2f}")
+
+    def calculate_score_convergence_ratio(self, support_score: float, resistance_score: float) -> float:
+        """
+        Calculate the convergence ratio between MC support and resistance scores.
+        Returns the ratio of the smaller score to the larger score (0.0 to 1.0).
+        
+        Args:
+            support_score: MC_Support_Score value
+            resistance_score: MC_Resistance_Score value
+            
+        Returns:
+            float: Convergence ratio (0.0 = completely different, 1.0 = identical)
+        """
+        if support_score <= 0 or resistance_score <= 0:
+            return 0.0
+        
+        # Calculate the ratio of smaller to larger score
+        min_score = min(support_score, resistance_score)
+        max_score = max(support_score, resistance_score)
+        
+        return min_score / max_score
+
+    def get_convergence_multiplier(self, convergence_ratio: float) -> float:
+        """
+        Calculate position size multiplier based on score convergence ratio.
+        Higher convergence = lower position size due to increased uncertainty.
+        
+        Args:
+            convergence_ratio: Score convergence ratio (0.0 to 1.0)
+            
+        Returns:
+            float: Position size multiplier (0.0 to 1.0)
+        """
+        if not self.enable_convergence_detection.value:
+            return 1.0
+        
+        if convergence_ratio >= self.score_convergence_high_threshold.value:
+            # High convergence - significant risk reduction
+            return self.convergence_high_penalty.value
+        elif convergence_ratio >= self.score_convergence_medium_threshold.value:
+            # Medium convergence - moderate risk reduction
+            return self.convergence_medium_penalty.value
+        elif convergence_ratio >= self.score_convergence_low_threshold.value:
+            # Low convergence - slight risk reduction
+            return self.convergence_low_penalty.value
+        
+        # No significant convergence - no penalty
+        return 1.0
+
+    def get_trading_mode(self, convergence_ratio: float) -> str:
+        """
+        Determine current trading mode based on score convergence ratio.
+        
+        Args:
+            convergence_ratio: Score convergence ratio (0.0 to 1.0)
+            
+        Returns:
+            str: Trading mode identifier
+        """
+        if not self.enable_convergence_detection.value:
+            return "NORMAL_BOUNCE"
+        
+        if convergence_ratio >= self.score_convergence_high_threshold.value:
+            return "HIGH_CONVERGENCE"    # Avoid trading or prepare for breakout
+        elif convergence_ratio >= self.score_convergence_medium_threshold.value:
+            return "MEDIUM_CONVERGENCE"  # Reduced size + breakout watch
+        elif convergence_ratio >= self.score_convergence_low_threshold.value:
+            return "LOW_CONVERGENCE"     # Slight caution
+        
+        return "NORMAL_BOUNCE"  # Standard bounce trading
+
+    def should_enter_trade_with_convergence(self, support_score: float, resistance_score: float) -> Tuple[bool, str]:
+        """
+        Enhanced entry logic considering score convergence.
+        
+        Args:
+            support_score: MC_Support_Score value
+            resistance_score: MC_Resistance_Score value
+            
+        Returns:
+            Tuple[bool, str]: (should_enter, reason)
+        """
+        if not self.enable_convergence_detection.value:
+            return True, "CONVERGENCE_DISABLED"
+        
+        convergence_ratio = self.calculate_score_convergence_ratio(support_score, resistance_score)
+        trading_mode = self.get_trading_mode(convergence_ratio)
+        
+        if trading_mode == "HIGH_CONVERGENCE":
+            return False, f"HIGH_CONVERGENCE_DETECTED ({convergence_ratio:.3f})"
+        elif trading_mode == "MEDIUM_CONVERGENCE":
+            return True, f"MEDIUM_CONVERGENCE_CAUTION ({convergence_ratio:.3f})"
+        elif trading_mode == "LOW_CONVERGENCE":
+            return True, f"LOW_CONVERGENCE_SLIGHT_CAUTION ({convergence_ratio:.3f})"
+        
+        return True, f"NORMAL_BOUNCE_MODE ({convergence_ratio:.3f})"
+
+    def detect_breakout_scenario(self, dataframe: DataFrame) -> Dict[str, any]:
+        """
+        Detect when market is in breakout mode due to score convergence.
+        
+        Args:
+            dataframe: DataFrame with MC scores
+            
+        Returns:
+            Dict containing breakout analysis
+        """
+        if len(dataframe) == 0:
+            return {"mode": "INSUFFICIENT_DATA", "ratio": 0.0, "multiplier": 1.0}
+        
+        current_candle = dataframe.iloc[-1]
+        support_score = current_candle.get('MC_Support_Score', 0)
+        resistance_score = current_candle.get('MC_Resistance_Score', 0)
+        
+        convergence_ratio = self.calculate_score_convergence_ratio(support_score, resistance_score)
+        convergence_multiplier = self.get_convergence_multiplier(convergence_ratio)
+        trading_mode = self.get_trading_mode(convergence_ratio)
+        
+        return {
+            "mode": trading_mode,
+            "ratio": convergence_ratio,
+            "multiplier": convergence_multiplier,
+            "support_score": support_score,
+            "resistance_score": resistance_score,
+            "recommendation": self._get_trading_recommendation(trading_mode, convergence_ratio)
+        }
+
+    def _get_trading_recommendation(self, trading_mode: str, convergence_ratio: float) -> str:
+        """
+        Get trading recommendation based on convergence analysis.
+        
+        Args:
+            trading_mode: Current trading mode
+            convergence_ratio: Score convergence ratio
+            
+        Returns:
+            str: Trading recommendation
+        """
+        recommendations = {
+            "HIGH_CONVERGENCE": f"AVOID bounce trades. Scores too similar ({convergence_ratio:.3f}). Wait for breakout or clear divergence.",
+            "MEDIUM_CONVERGENCE": f"CAUTION: Reduced position size. Monitor for breakout signals. Convergence ratio: {convergence_ratio:.3f}",
+            "LOW_CONVERGENCE": f"SLIGHT CAUTION: Minor convergence detected ({convergence_ratio:.3f}). Normal trading with reduced risk.",
+            "NORMAL_BOUNCE": f"NORMAL bounce trading conditions. Clear score differentiation ({convergence_ratio:.3f})."
+        }
+        
+        return recommendations.get(trading_mode, f"Unknown mode: {trading_mode}")
 
     def determine_highest_timeframe(self, dataframe: DataFrame) -> str:
         """
@@ -359,10 +568,98 @@ class RiskMetrics(IStrategy):
         'monthly': MONTHS_PER_YEAR
     }
 
+    def generate_volatility_based_lookback_periods(self, dataframe: DataFrame) -> List[int]:
+        """
+        Generate lookback periods based on current volatility regime using GARCH model
+        and Beta distribution sampling.
+        
+        Args:
+            dataframe: DataFrame with OHLCV data
+            
+        Returns:
+            List[int]: List of lookback periods optimized for current volatility regime
+        """
+        if not self.enable_volatility_sampling.value:
+            # Fall back to uniform random sampling if volatility sampling is disabled
+            total_candles = len(dataframe)
+            max_lookback_period = min(total_candles, self.garch_max_candles.value)
+            return [random.randint(self.MIN_LOOKBACK_PERIOD, max_lookback_period) 
+                   for _ in range(self.MC_ITERATIONS)]
+        
+        # Calculate log returns for GARCH volatility estimation
+        log_returns = np.log(dataframe['close'].pct_change() + 1).dropna().values
+        
+        # Determine number of candles for volatility calculation based on regime
+        volatility_candles = min(len(log_returns), self.garch_max_candles.value)
+        volatility_candles = max(volatility_candles, self.garch_min_candles.value)
+        
+        # Calculate current volatility using GARCH model
+        recent_returns = log_returns[-volatility_candles:]
+        
+        # Clean data and calculate volatility
+        if len(recent_returns) > 0 and not np.isnan(recent_returns).all() and not np.isinf(recent_returns).any():
+            # Use VolatilityModel's calculate_volatility method with GARCHModel
+            current_volatility = self.volatility_model.calculate_volatility(recent_returns, self.garch_model)
+            print(f"  GARCH volatility result: {current_volatility}")
+        else:
+            print(f"  Invalid data for GARCH calculation, using fallback")
+            # Fallback to simple standard deviation using VolatilityModel
+            current_volatility = self.volatility_model.calculate_volatility(recent_returns)
+            
+        regime, risk_multiplier = self.volatility_model.get_regime_and_multiplier(current_volatility)
+        
+        print(f"Current volatility regime: {regime} (volatility: {current_volatility:.6f}, risk multiplier: {risk_multiplier:.2f})")
+        
+        # Set Beta distribution parameters based on volatility regime
+        if regime == 'low':
+            a, b = self.low_vol_beta_a.value, self.low_vol_beta_b.value
+            print(f"Using low volatility sampling: Beta({a:.2f}, {b:.2f}) - favors longer periods")
+        elif regime == 'medium':
+            a, b = self.medium_vol_beta_a.value, self.medium_vol_beta_b.value
+            print(f"Using medium volatility sampling: Beta({a:.2f}, {b:.2f}) - balanced distribution")
+        else:  # high volatility
+            a, b = self.high_vol_beta_a.value, self.high_vol_beta_b.value
+            print(f"Using high volatility sampling: Beta({a:.2f}, {b:.2f}) - favors shorter periods")
+        
+        # Generate Beta-distributed samples
+        samples = np.random.beta(a, b, self.MC_ITERATIONS)
+        
+        # Scale samples to lookback period range
+        total_candles = len(dataframe)
+        max_lookback_period = min(total_candles, self.garch_max_candles.value)
+        min_lookback_period = max(self.MIN_LOOKBACK_PERIOD, self.garch_min_candles.value)
+        
+        scaled_samples = samples * (max_lookback_period - min_lookback_period) + min_lookback_period
+        lookback_periods = np.round(scaled_samples).astype(int).tolist()
+        
+        # Ensure all periods are within valid range
+        lookback_periods = [max(min_lookback_period, min(p, max_lookback_period)) for p in lookback_periods]
+        
+        # Add some fixed key periods for comprehensive coverage
+        fixed_periods = [50, 100, 200, 300, 500]
+        fixed_periods = [p for p in fixed_periods if min_lookback_period <= p <= max_lookback_period]
+        
+        # Replace some random periods with fixed periods (up to 20% of total iterations)
+        num_fixed = min(len(fixed_periods), self.MC_ITERATIONS // 5)
+        if num_fixed > 0:
+            # Replace the first num_fixed periods with fixed periods
+            lookback_periods[:num_fixed] = fixed_periods[:num_fixed]
+        
+        # Shuffle to randomize the order
+        random.shuffle(lookback_periods)
+        
+        print(f"Generated {len(lookback_periods)} lookback periods:")
+        print(f"  Range: {min(lookback_periods)} to {max(lookback_periods)} candles")
+        print(f"  Mean: {np.mean(lookback_periods):.1f}, Std: {np.std(lookback_periods):.1f}")
+        print(f"  Fixed periods included: {fixed_periods[:num_fixed] if num_fixed > 0 else 'None'}")
+        
+        return lookback_periods
+
     def monte_carlo_period_optimization(self, dataframe: DataFrame) -> Dict[str, any]:
         """
         Use Monte Carlo simulation to test different lookback periods and find
         the ones that produce the highest scoring resistance and support lines.
+        Now uses volatility-based period sampling for improved optimization.
         
         Args:
             dataframe: DataFrame with OHLCV data
@@ -370,9 +667,9 @@ class RiskMetrics(IStrategy):
         Returns:
             Dict containing optimal periods and their scores
         """
-        # Set MAX_LOOKBACK_PERIOD dynamically based on available data
+        # Set MAX_LOOKBACK_PERIOD dynamically based on available data and GARCH parameters
         total_candles = len(dataframe)
-        max_lookback_period = total_candles
+        max_lookback_period = min(total_candles, self.garch_max_candles.value)
         
         if total_candles < self.MIN_LOOKBACK_PERIOD:
             print(f"Not enough data for Monte Carlo optimization. Need at least {self.MIN_LOOKBACK_PERIOD} candles, got {total_candles}.")
@@ -389,14 +686,12 @@ class RiskMetrics(IStrategy):
         import time
         random.seed(int(time.time() * 1000) % 10000)  # Use current time for seed
         
-        # Test random number generation
-        print("Testing random number generation...")
-        test_periods = [random.randint(self.MIN_LOOKBACK_PERIOD, max_lookback_period) for _ in range(20)]
-        print(f"Sample of 20 random periods: {test_periods}")
-        print(f"Min: {min(test_periods)}, Max: {max(test_periods)}, Range: {max(test_periods) - min(test_periods)}")
+        # Generate volatility-based lookback periods
+        print("=== Volatility-Based Monte Carlo Period Optimization ===")
+        lookback_periods = self.generate_volatility_based_lookback_periods(dataframe)
         
-        print(f"Starting Monte Carlo period optimization with {self.MC_ITERATIONS} iterations...")
-        print(f"Testing periods from {self.MIN_LOOKBACK_PERIOD} to {max_lookback_period} candles (total: {total_candles})")
+        print(f"Starting Monte Carlo period optimization with {len(lookback_periods)} iterations...")
+        print(f"Testing periods from {min(lookback_periods)} to {max(lookback_periods)} candles (total data: {total_candles})")
         
         best_resistance_score = 0.0
         best_support_score = 0.0
@@ -413,10 +708,7 @@ class RiskMetrics(IStrategy):
         # Track period distribution for debugging
         period_counts = {}
         
-        for iteration in range(self.MC_ITERATIONS):
-            # Generate random lookback period using the dynamic max
-            random_period = random.randint(self.MIN_LOOKBACK_PERIOD, max_lookback_period)
-            
+        for iteration, random_period in enumerate(lookback_periods):
             # Track period distribution
             period_range = (random_period // 100) * 100  # Group by hundreds
             period_counts[period_range] = period_counts.get(period_range, 0) + 1
@@ -509,7 +801,7 @@ class RiskMetrics(IStrategy):
                 
                 # Progress reporting with more details
                 if (iteration + 1) % 100 == 0:
-                    print(f"Monte Carlo progress: {iteration + 1}/{self.MC_ITERATIONS} iterations completed")
+                    print(f"Monte Carlo progress: {iteration + 1}/{len(lookback_periods)} iterations completed")
                     print(f"Current best - Resistance: {best_resistance_score:.4f} (period {best_resistance_period}), Support: {best_support_score:.4f} (period {best_support_period})")
                     print(f"Last 5 tested periods: {tested_periods[-5:] if len(tested_periods) >= 5 else tested_periods}")
                 
@@ -517,10 +809,10 @@ class RiskMetrics(IStrategy):
                 print(f"Error in Monte Carlo iteration {iteration}: {e}")
                 continue
         
-        print(f"Monte Carlo optimization completed!")
+        print(f"Volatility-based Monte Carlo optimization completed!")
         print(f"Optimal resistance period: {best_resistance_period} (score: {best_resistance_score:.4f})")
         print(f"Optimal support period: {best_support_period} (score: {best_support_score:.4f})")
-        print(f"Tested periods range: {self.MIN_LOOKBACK_PERIOD} to {max_lookback_period} candles")
+        print(f"Tested periods range: {min(tested_periods) if tested_periods else 'N/A'} to {max(tested_periods) if tested_periods else 'N/A'} candles")
         
         # Print period distribution for debugging
         print("Period distribution (grouped by hundreds):")
@@ -543,7 +835,13 @@ class RiskMetrics(IStrategy):
             'all_resistance_scores': resistance_scores,
             'all_support_scores': support_scores,
             'max_lookback_period': max_lookback_period,
-            'period_distribution': period_counts
+            'period_distribution': period_counts,
+            'volatility_regime': self.volatility_model.get_regime_and_multiplier(
+                self.volatility_model.calculate_volatility(
+                    np.log(dataframe['close'].pct_change() + 1).dropna().values[-self.garch_max_candles.value:],
+                    self.garch_model
+                ) if len(dataframe) > self.garch_min_candles.value else np.nan
+            )[0] if len(dataframe) > self.garch_min_candles.value else 'insufficient_data'
         }
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
@@ -566,6 +864,53 @@ class RiskMetrics(IStrategy):
 
         # Calculate ATR and store it for visualization
         dataframe['atr'] = self.volatility_model.calculate_atr(dataframe)
+
+        # Calculate and store volatility regime information
+        if len(dataframe) >= self.garch_min_candles.value:
+            # Calculate log returns for volatility estimation
+            log_returns = np.log(dataframe['close'].pct_change() + 1).dropna().values
+            
+            # Use appropriate number of candles for volatility calculation
+            volatility_candles = min(len(log_returns), self.garch_max_candles.value)
+            volatility_candles = max(volatility_candles, self.garch_min_candles.value)
+            
+            # Calculate current volatility and regime
+            recent_returns = log_returns[-volatility_candles:]
+            
+            # Debug information
+            print(f"Volatility calculation debug:")
+            print(f"  Total log returns: {len(log_returns)}")
+            print(f"  Volatility candles used: {volatility_candles}")
+            print(f"  Recent returns shape: {recent_returns.shape}")
+            print(f"  Recent returns stats: mean={np.mean(recent_returns):.6f}, std={np.std(recent_returns):.6f}")
+            print(f"  Recent returns has NaN: {np.isnan(recent_returns).any()}")
+            print(f"  Recent returns has Inf: {np.isinf(recent_returns).any()}")
+            
+            # Clean data and calculate volatility
+            if len(recent_returns) > 0 and not np.isnan(recent_returns).all() and not np.isinf(recent_returns).any():
+                # Use VolatilityModel's calculate_volatility method with GARCHModel
+                current_volatility = self.volatility_model.calculate_volatility(recent_returns, self.garch_model)
+                print(f"  GARCH volatility result: {current_volatility}")
+            else:
+                print(f"  Invalid data for GARCH calculation, using fallback")
+                # Fallback to simple standard deviation using VolatilityModel
+                current_volatility = self.volatility_model.calculate_volatility(recent_returns)
+            
+            # Get regime and multiplier
+            regime, risk_multiplier = self.volatility_model.get_regime_and_multiplier(current_volatility)
+            
+            # Store volatility information in dataframe
+            dataframe['volatility'] = current_volatility
+            dataframe['volatility_regime'] = regime
+            dataframe['risk_multiplier'] = risk_multiplier
+            
+            print(f"Current volatility regime: {regime} (volatility: {current_volatility:.6f}, risk multiplier: {risk_multiplier:.2f})")
+        else:
+            # Insufficient data for volatility calculation
+            dataframe['volatility'] = np.nan
+            dataframe['volatility_regime'] = 'insufficient_data'
+            dataframe['risk_multiplier'] = 1.0
+            print(f"Insufficient data for volatility calculation. Need at least {self.garch_min_candles.value} candles, got {len(dataframe)}")
 
         # Initialize marker columns for support and resistance points
         dataframe['all_highs'] = np.nan
@@ -625,6 +970,43 @@ class RiskMetrics(IStrategy):
             print(f"Dataframe shape: {dataframe.shape}")
             print(f"MC_Resistance_Score column stats: min={dataframe['MC_Resistance_Score'].min()}, max={dataframe['MC_Resistance_Score'].max()}")
             print(f"MC_Support_Score column stats: min={dataframe['MC_Support_Score'].min()}, max={dataframe['MC_Support_Score'].max()}")
+            
+            # === Monte Carlo Score Convergence Analysis ===
+            print("=== Monte Carlo Score Convergence Analysis ===")
+            
+            # Calculate convergence ratio between MC scores
+            convergence_ratio = self.calculate_score_convergence_ratio(raw_support_score, raw_resistance_score)
+            convergence_multiplier = self.get_convergence_multiplier(convergence_ratio)
+            trading_mode = self.get_trading_mode(convergence_ratio)
+            
+            # Convert trading mode to numeric indicator for plotting
+            trading_mode_mapping = {
+                "NORMAL_BOUNCE": 1.0,
+                "LOW_CONVERGENCE": 2.0,
+                "MEDIUM_CONVERGENCE": 3.0,
+                "HIGH_CONVERGENCE": 4.0
+            }
+            trading_mode_indicator = trading_mode_mapping.get(trading_mode, 0.0)
+            
+            # Store convergence metrics in dataframe
+            dataframe['score_convergence_ratio'] = convergence_ratio
+            dataframe['convergence_multiplier'] = convergence_multiplier
+            dataframe['trading_mode_indicator'] = trading_mode_indicator
+            dataframe['trading_mode'] = trading_mode
+            
+            # Log convergence analysis results
+            print(f"Score Convergence Analysis Results:")
+            print(f"  Support Score: {raw_support_score:.6f}")
+            print(f"  Resistance Score: {raw_resistance_score:.6f}")
+            print(f"  Convergence Ratio: {convergence_ratio:.3f}")
+            print(f"  Convergence Multiplier: {convergence_multiplier:.3f}")
+            print(f"  Trading Mode: {trading_mode}")
+            print(f"  Trading Mode Indicator: {trading_mode_indicator}")
+            
+            # Get detailed breakout scenario analysis
+            breakout_analysis = self.detect_breakout_scenario(dataframe)
+            print(f"  Breakout Analysis: {breakout_analysis['recommendation']}")
+            
         else:
             print("Monte Carlo optimization skipped (disabled or insufficient data)")
             print(f"Available candles: {len(dataframe)}, minimum required: {self.MIN_LOOKBACK_PERIOD}")
@@ -632,6 +1014,12 @@ class RiskMetrics(IStrategy):
             # Initialize with zeros when optimization is skipped
             dataframe['MC_Resistance_Score'] = 0.0
             dataframe['MC_Support_Score'] = 0.0
+            
+            # Initialize convergence metrics with default values
+            dataframe['score_convergence_ratio'] = 0.0
+            dataframe['convergence_multiplier'] = 1.0
+            dataframe['trading_mode_indicator'] = 0.0
+            dataframe['trading_mode'] = "INSUFFICIENT_DATA"
 
         # Calculate trendlines using local maxima/minima
         lookback = 200  # Use last 200 candles for trendline calculation
@@ -894,29 +1282,67 @@ class RiskMetrics(IStrategy):
                           current_entry_rate: float, current_exit_rate: float,
                           current_entry_profit: float, current_exit_profit: float,
                           **kwargs) -> Optional[float]:
-        """Adjust position size based on volatility regime"""
+        """
+        Adjust position size based on volatility regime and score convergence analysis.
+        
+        Position sizing factors:
+        1. Volatility-based risk multiplier
+        2. Score convergence multiplier (reduces size when scores are similar)
+        """
         dataframe, _ = self.dp.get_analyzed_dataframe(trade.pair, self.timeframe)
-        current_candle = dataframe.iloc[-1].squeeze()
-        return max_stake * current_candle['risk_multiplier']
+        if len(dataframe) > 0:
+            current_candle = dataframe.iloc[-1].squeeze()
+            
+            # Get base risk multiplier from volatility regime
+            base_risk_multiplier = current_candle.get('risk_multiplier', 1.0)
+            
+            # Get convergence multiplier
+            convergence_multiplier = current_candle.get('convergence_multiplier', 1.0)
+            
+            # Combine both multipliers
+            combined_multiplier = base_risk_multiplier * convergence_multiplier
+            
+            # Apply combined multiplier to position size
+            adjusted_stake = max_stake * combined_multiplier
+            
+            # Log position sizing decision
+            support_score = current_candle.get('MC_Support_Score', 0)
+            resistance_score = current_candle.get('MC_Resistance_Score', 0)
+            convergence_ratio = current_candle.get('score_convergence_ratio', 0)
+            trading_mode = current_candle.get('trading_mode', 'UNKNOWN')
+            
+            print(f"Position Sizing for {trade.pair}:")
+            print(f"  Base Risk Multiplier (volatility): {base_risk_multiplier:.3f}")
+            print(f"  Convergence Multiplier: {convergence_multiplier:.3f}")
+            print(f"  Combined Multiplier: {combined_multiplier:.3f}")
+            print(f"  Trading Mode: {trading_mode}")
+            print(f"  Convergence Ratio: {convergence_ratio:.3f}")
+            print(f"  Support Score: {support_score:.6f}")
+            print(f"  Resistance Score: {resistance_score:.6f}")
+            print(f"  Max Stake: {max_stake:.2f}")
+            print(f"  Adjusted Stake: {adjusted_stake:.2f}")
+            
+            return adjusted_stake
+            
+        return max_stake
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
-        Bounce Trading Strategy Implementation using Price Extrema:
+        Bounce Trading Strategy Implementation using Price Extrema with Convergence Detection:
         - Long entry: Price creates a LOW extrema near support, then moves up (bounce off support)
         - Short entry: Price creates a HIGH extrema near resistance, then moves down (bounce off resistance)
+        - Enhanced with Monte Carlo Score Convergence Detection for risk management
         
-        Following bounce trading methodology from RebelsFunding
+        Following bounce trading methodology from RebelsFunding with convergence risk management
         """
         # Initialize entry signals
         dataframe.loc[:, 'enter_long'] = 0
         dataframe.loc[:, 'enter_short'] = 0
         
-        # Long entry: Bounce off support using swing low extrema
-        # Look for a swing low near support followed by upward movement
-        if 'MC_Optimal_Support' in dataframe.columns:
-            # Check if previous candle made a swing low near support
-            # and current price is moving up from that low
-            dataframe.loc[
+        # Long entry: Bounce off support using swing low extrema with convergence check
+        if 'MC_Optimal_Support' in dataframe.columns and 'MC_Support_Score' in dataframe.columns and 'MC_Resistance_Score' in dataframe.columns:
+            # Basic bounce conditions
+            bounce_long_conditions = (
                 # Current close is above support
                 (dataframe['close'] > dataframe['MC_Optimal_Support']) &
                 # Previous low was at or near support (within small tolerance)
@@ -930,16 +1356,34 @@ class RiskMetrics(IStrategy):
                 (dataframe['close'] > dataframe['close'].shift(1)) &
                 # Support data is valid
                 (~dataframe['MC_Optimal_Support'].isna()) &
-                (~dataframe['MC_Optimal_Support'].shift(1).isna()),
-                'enter_long'
-            ] = 1
+                (~dataframe['MC_Optimal_Support'].shift(1).isna())
+            )
+            
+            # Add convergence filter for long entries
+            if self.enable_convergence_detection.value:
+                # Calculate convergence ratios for each row
+                convergence_ratios = dataframe.apply(
+                    lambda row: self.calculate_score_convergence_ratio(
+                        row.get('MC_Support_Score', 0), 
+                        row.get('MC_Resistance_Score', 0)
+                    ), axis=1
+                )
+                
+                # Allow entry only if convergence ratio is below high threshold
+                convergence_filter = convergence_ratios < self.score_convergence_high_threshold.value
+                
+                # Apply convergence filter to long conditions
+                dataframe.loc[bounce_long_conditions & convergence_filter, 'enter_long'] = 1
+                
+                print(f"Long entries with convergence filter applied")
+            else:
+                # Apply basic bounce conditions without convergence filter
+                dataframe.loc[bounce_long_conditions, 'enter_long'] = 1
         
-        # Short entry: Bounce off resistance using swing high extrema
-        # Look for a swing high near resistance followed by downward movement
-        if 'MC_Optimal_Resistance' in dataframe.columns:
-            # Check if previous candle made a swing high near resistance
-            # and current price is moving down from that high
-            dataframe.loc[
+        # Short entry: Bounce off resistance using swing high extrema with convergence check
+        if 'MC_Optimal_Resistance' in dataframe.columns and 'MC_Support_Score' in dataframe.columns and 'MC_Resistance_Score' in dataframe.columns:
+            # Basic bounce conditions
+            bounce_short_conditions = (
                 # Current close is below resistance
                 (dataframe['close'] < dataframe['MC_Optimal_Resistance']) &
                 # Previous high was at or near resistance (within small tolerance)
@@ -953,9 +1397,45 @@ class RiskMetrics(IStrategy):
                 (dataframe['close'] < dataframe['close'].shift(1)) &
                 # Resistance data is valid
                 (~dataframe['MC_Optimal_Resistance'].isna()) &
-                (~dataframe['MC_Optimal_Resistance'].shift(1).isna()),
-                'enter_short'
-            ] = 1
+                (~dataframe['MC_Optimal_Resistance'].shift(1).isna())
+            )
+            
+            # Add convergence filter for short entries
+            if self.enable_convergence_detection.value:
+                # Calculate convergence ratios for each row (reuse from long entry if available)
+                if 'convergence_ratios' not in locals():
+                    convergence_ratios = dataframe.apply(
+                        lambda row: self.calculate_score_convergence_ratio(
+                            row.get('MC_Support_Score', 0), 
+                            row.get('MC_Resistance_Score', 0)
+                        ), axis=1
+                    )
+                
+                # Allow entry only if convergence ratio is below high threshold
+                convergence_filter = convergence_ratios < self.score_convergence_high_threshold.value
+                
+                # Apply convergence filter to short conditions
+                dataframe.loc[bounce_short_conditions & convergence_filter, 'enter_short'] = 1
+                
+                print(f"Short entries with convergence filter applied")
+            else:
+                # Apply basic bounce conditions without convergence filter
+                dataframe.loc[bounce_short_conditions, 'enter_short'] = 1
+        
+        # Log entry signal summary
+        long_signals = dataframe['enter_long'].sum()
+        short_signals = dataframe['enter_short'].sum()
+        print(f"Entry signals generated: {long_signals} long, {short_signals} short")
+        
+        if self.enable_convergence_detection.value and len(dataframe) > 0:
+            # Log convergence analysis for the most recent candle
+            current_candle = dataframe.iloc[-1]
+            support_score = current_candle.get('MC_Support_Score', 0)
+            resistance_score = current_candle.get('MC_Resistance_Score', 0)
+            
+            should_enter, reason = self.should_enter_trade_with_convergence(support_score, resistance_score)
+            print(f"Current convergence status: {reason}")
+            print(f"Entry allowed: {should_enter}")
         
         return dataframe
 

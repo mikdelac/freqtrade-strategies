@@ -63,10 +63,26 @@ class VolatilityModel:
             return VolatilityRegime.MEDIUM
         return VolatilityRegime.HIGH
 
-    def calculate_volatility(self, prices: np.ndarray) -> float:
-        """Calculate historical volatility"""
-        returns = np.log(prices[1:] / prices[:-1])
-        return np.std(returns)
+    def calculate_volatility(self, returns: np.ndarray, garch_model: 'GARCHModel' = None) -> float:
+        """
+        Calculate volatility using GARCH model if provided, otherwise use simple historical volatility.
+        
+        Args:
+            returns: Array of log return values
+            garch_model: Optional GARCHModel instance to use for volatility calculation
+            
+        Returns:
+            float: Estimated volatility
+        """
+        if garch_model is not None:
+            # Use GARCH model for volatility calculation
+            garch_model.reset_variance()
+            return garch_model.calculate_volatility(returns)
+        else:
+            # Fallback to simple historical volatility
+            if len(returns) == 0:
+                return float('nan')
+            return np.std(returns)
     
     def calculate_atr(self, dataframe: pd.DataFrame) -> pd.Series:
         """
@@ -179,25 +195,29 @@ class GARCHModel():
         self.variance = self.omega + self.alpha * (R_t - self.theta * sigma_t)**2 + self.beta * self.variance
         return self.variance
 
-    def calculate_volatility(self, prices: np.ndarray) -> float:
+    def calculate_volatility(self, returns: np.ndarray) -> float:
         """
         Calculate volatility using GARCH(1,1) model.
-        First get the log returns, then iteratively update the variances using the GARCH(1,1) formula.
-        Finally, return the square root of the final estimated variance (standard deviation).
+        Takes log returns and iteratively updates the variances using the GARCH(1,1) formula.
+        Finally, returns the square root of the final estimated variance (standard deviation).
         
         Args:
-            prices: Array of price values.
+            returns: Array of log return values (not prices).
             
         Returns:
             float: Estimated volatility (standard deviation) from GARCH model.
         """
         
-        if len(prices) == 0:
+        if len(returns) == 0:
+            return float('nan')
+        
+        # Check for invalid data
+        if np.isnan(returns).any() or np.isinf(returns).any():
             return float('nan')
                 
         # Iteratively update variances using GARCH(1,1) formula
-        for R_t in prices:
+        for R_t in returns:
             self.update_conditional_variance(R_t)
         
-        # Return volatility as square root of variance (standard deviation)
+        # Return the square root of the final variance (volatility/standard deviation)
         return np.sqrt(self.variance)
