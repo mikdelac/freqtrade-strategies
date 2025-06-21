@@ -861,7 +861,7 @@ class RiskMetrics(IStrategy):
             List[int]: List of fixed lookback periods for testing
         """
         total_candles = len(dataframe)
-        max_lookback_period = min(total_candles, 1000)  # Use fixed max instead of garch_max_candles
+        max_lookback_period = total_candles  # Use all available data
         min_lookback_period = max(self.MIN_LOOKBACK_PERIOD, 50)  # Use fixed min
         
         # Define core fixed periods that cover different time horizons
