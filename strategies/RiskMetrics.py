@@ -572,9 +572,9 @@ class RiskMetrics(IStrategy):
         # Initialize signal generator
         self.signal_generator = SignalGenerator(self)
         
-        # === New State Variables for Periodic MC ===
-        self.last_mc_recalc_time: Optional[datetime] = None
-        self.cached_mc_results: Dict[str, any] = {}
+        # === Modified State Variables for Per-Pair Periodic MC ===
+        self.last_mc_recalc_time_per_pair: Dict[str, Optional[datetime]] = {}
+        self.cached_mc_results_per_pair: Dict[str, Dict[str, any]] = {}
         
         print(f"RiskMetrics strategy initialized with separated GARCH implementation:")
         print(f"  GARCH model: Used for risk management and volatility estimation only")
@@ -588,6 +588,7 @@ class RiskMetrics(IStrategy):
         print(f"  Enhanced ATR Stoploss: Enabled with {self.stoploss_atr_multiplier.value:.1f}x ATR multiplier")
         print(f"    - Stoploss bounds: Min={self.stoploss_min_percent.value*100:.1f}%, Max={self.stoploss_max_percent.value*100:.1f}%")
         print(f"    - Profit protection: Activates at {self.stoploss_profit_protection.value*100:.1f}% profit")
+        print(f"  PER-PAIR Monte Carlo: Each trading pair gets unique MC simulation and caching")
 
     def calculate_score_convergence_ratio(self, support_score: float, resistance_score: float) -> float:
         """
@@ -931,7 +932,7 @@ class RiskMetrics(IStrategy):
         return regime, current_volatility, risk_multiplier
 
 
-    def monte_carlo_period_optimization(self, dataframe: DataFrame) -> Dict[str, any]:
+    def monte_carlo_period_optimization(self, dataframe: DataFrame, pair: str = "UNKNOWN") -> Dict[str, any]:
         """
         Use Monte Carlo simulation to test different lookback periods and find
         the ones that produce the highest scoring resistance and support lines.
@@ -963,13 +964,13 @@ class RiskMetrics(IStrategy):
         random.seed(int(time.time() * 1000) % 10000)  # Use current time for seed
         
         # Generate fixed lookback periods
-        print("=== Monte Carlo Period Optimization with Fixed Periods ===")
+        print(f"=== Monte Carlo Period Optimization with Fixed Periods for {pair} ===")
         lookback_periods = self.generate_fixed_lookback_periods(dataframe)
         
         # Separately estimate volatility regime for risk management
         regime, current_volatility, risk_multiplier = self.estimate_current_volatility_regime(dataframe)
         
-        print(f"Starting Monte Carlo period optimization with {len(lookback_periods)} iterations...")
+        print(f"Starting Monte Carlo period optimization for {pair} with {len(lookback_periods)} iterations...")
         print(f"Testing periods from {min(lookback_periods)} to {max(lookback_periods)} candles (total data: {total_candles})")
         print(f"Volatility regime for risk management: {regime} (volatility: {current_volatility:.6f})")
         
@@ -1023,7 +1024,7 @@ class RiskMetrics(IStrategy):
                             resistance_line[current_idx] = trends['Max Line'].iloc[i]
                     best_resistance_line = resistance_line
                     
-                    print(f"New best resistance found at iteration {iteration + 1}: period {random_period}, score {current_resistance_score:.4f}")
+                    print(f"New best resistance found for {pair} at iteration {iteration + 1}: period {random_period}, score {current_resistance_score:.4f}")
                 
                 # Check if this is the best support line so far
                 if current_support_score > best_support_score:
@@ -1039,31 +1040,31 @@ class RiskMetrics(IStrategy):
                             support_line[current_idx] = trends['Min Line'].iloc[i]
                     best_support_line = support_line
                     
-                    print(f"New best support found at iteration {iteration + 1}: period {random_period}, score {current_support_score:.4f}")
+                    print(f"New best support found for {pair} at iteration {iteration + 1}: period {random_period}, score {current_support_score:.4f}")
                 
                 # Progress reporting with more details
                 if (iteration + 1) % 100 == 0:
-                    print(f"Monte Carlo progress: {iteration + 1}/{len(lookback_periods)} iterations completed")
+                    print(f"Monte Carlo progress for {pair}: {iteration + 1}/{len(lookback_periods)} iterations completed")
                     print(f"Current best - Resistance: {best_resistance_score:.4f} (period {best_resistance_period}), Support: {best_support_score:.4f} (period {best_support_period})")
                     print(f"Last 5 tested periods: {tested_periods[-5:] if len(tested_periods) >= 5 else tested_periods}")
                 
             except Exception as e:
-                print(f"Error in Monte Carlo iteration {iteration}: {e}")
+                print(f"Error in Monte Carlo iteration {iteration} for {pair}: {e}")
                 continue
         
-        print(f"Fixed-period Monte Carlo optimization completed!")
+        print(f"Fixed-period Monte Carlo optimization completed for {pair}!")
         print(f"Optimal resistance period: {best_resistance_period} (score: {best_resistance_score:.4f})")
         print(f"Optimal support period: {best_support_period} (score: {best_support_score:.4f})")
         print(f"Tested periods range: {min(tested_periods) if tested_periods else 'N/A'} to {max(tested_periods) if tested_periods else 'N/A'} candles")
         
         # Print period distribution for debugging
-        print("Period distribution (grouped by hundreds):")
+        print(f"Period distribution for {pair} (grouped by hundreds):")
         for period_range in sorted(period_counts.keys()):
             print(f"  {period_range}-{period_range+99}: {period_counts[period_range]} times")
         
         # Print some statistics about the tested periods
         if tested_periods:
-            print(f"Period statistics - Min: {min(tested_periods)}, Max: {max(tested_periods)}, Mean: {np.mean(tested_periods):.1f}")
+            print(f"Period statistics for {pair} - Min: {min(tested_periods)}, Max: {max(tested_periods)}, Mean: {np.mean(tested_periods):.1f}")
             print(f"Unique periods tested: {len(set(tested_periods))} out of {len(tested_periods)} total")
         
         return {
@@ -1139,18 +1140,18 @@ class RiskMetrics(IStrategy):
             else:
                 current_time = datetime.now(timezone.utc)
             
-            if self.last_mc_recalc_time is None:
+            if self.last_mc_recalc_time_per_pair.get(metadata['pair'], None) is None:
                 should_recalc_mc = True
-                print("First run: Initializing Monte Carlo optimization.")
+                print(f"First run: Initializing Monte Carlo optimization for {metadata['pair']}.")
             else:
-                time_since_last_recalc = (current_time - self.last_mc_recalc_time).total_seconds() / 60
+                time_since_last_recalc = (current_time - self.last_mc_recalc_time_per_pair[metadata['pair']]).total_seconds() / 60
                 if time_since_last_recalc >= self.mc_recalc_interval_minutes.value:
                     should_recalc_mc = True
-                    print(f"Time to recalculate MC: {time_since_last_recalc:.1f} minutes elapsed (threshold: {self.mc_recalc_interval_minutes.value})")
+                    print(f"Time to recalculate MC for {metadata['pair']}: {time_since_last_recalc:.1f} minutes elapsed (threshold: {self.mc_recalc_interval_minutes.value})")
 
         # --- HEAVY CALCULATION BLOCK ---
         if should_recalc_mc:
-            self.last_mc_recalc_time = current_time
+            self.last_mc_recalc_time_per_pair[metadata['pair']] = current_time
             
             # Calculate MAX_LOOKBACK_PERIOD dynamically based on available data (same as in monte_carlo_period_optimization)
             total_candles = len(dataframe)
@@ -1164,23 +1165,23 @@ class RiskMetrics(IStrategy):
                 mc_data = dataframe.tail(lookback_window).copy()
                 
                 # Run the full optimization and cache the results
-                self.cached_mc_results = self.monte_carlo_period_optimization(mc_data)
+                self.cached_mc_results_per_pair[metadata['pair']] = self.monte_carlo_period_optimization(mc_data, metadata['pair'])
             else:
                 print(f"Not enough data for MC optimization ({len(dataframe)} < {lookback_window}).")
 
         # --- LIGHTWEIGHT APPLICATION BLOCK (runs every time) ---
-        if self.cached_mc_results:
+        if self.cached_mc_results_per_pair.get(metadata['pair'], None):
             # Apply cached global scores and optimal periods
-            dataframe['MC_Resistance_Score'] = self.cached_mc_results['resistance_score']
-            dataframe['MC_Support_Score'] = self.cached_mc_results['support_score']
+            dataframe['MC_Resistance_Score'] = self.cached_mc_results_per_pair[metadata['pair']]['resistance_score']
+            dataframe['MC_Support_Score'] = self.cached_mc_results_per_pair[metadata['pair']]['support_score']
             dataframe['MC_Optimal_Period'] = max(
-                self.cached_mc_results['optimal_resistance_period'],
-                self.cached_mc_results['optimal_support_period']
+                self.cached_mc_results_per_pair[metadata['pair']]['optimal_resistance_period'],
+                self.cached_mc_results_per_pair[metadata['pair']]['optimal_support_period']
             )
 
             # Apply the optimal lines - these were calculated on a window, so we apply them to the tail
-            resistance_line = self.cached_mc_results['resistance_line']
-            support_line = self.cached_mc_results['support_line']
+            resistance_line = self.cached_mc_results_per_pair[metadata['pair']]['resistance_line']
+            support_line = self.cached_mc_results_per_pair[metadata['pair']]['support_line']
             
             # Align the calculated lines with the main dataframe
             if len(resistance_line) > 0 and not np.isnan(resistance_line).all():
@@ -1196,17 +1197,17 @@ class RiskMetrics(IStrategy):
             # This will still produce a single value, which is correct for this architecture
             self._process_convergence_analysis(
                 dataframe, 
-                self.cached_mc_results['resistance_score'], 
-                self.cached_mc_results['support_score']
+                self.cached_mc_results_per_pair[metadata['pair']]['resistance_score'], 
+                self.cached_mc_results_per_pair[metadata['pair']]['support_score']
             )
             
-            print(f"Applied cached Monte Carlo results:")
-            print(f"  Resistance Score: {self.cached_mc_results['resistance_score']:.6f}")
-            print(f"  Support Score: {self.cached_mc_results['support_score']:.6f}")
-            print(f"  Optimal Periods: R={self.cached_mc_results['optimal_resistance_period']}, S={self.cached_mc_results['optimal_support_period']}")
+            print(f"Applied cached Monte Carlo results for {metadata['pair']}:")
+            print(f"  Resistance Score: {self.cached_mc_results_per_pair[metadata['pair']]['resistance_score']:.6f}")
+            print(f"  Support Score: {self.cached_mc_results_per_pair[metadata['pair']]['support_score']:.6f}")
+            print(f"  Optimal Periods: R={self.cached_mc_results_per_pair[metadata['pair']]['optimal_resistance_period']}, S={self.cached_mc_results_per_pair[metadata['pair']]['optimal_support_period']}")
             
         else:
-            print("Monte Carlo results not yet available.")
+            print(f"Monte Carlo results not yet available for {metadata['pair']}.")
             # Initialize with defaults if no results are cached
             dataframe['MC_Resistance_Score'] = 0.0
             dataframe['MC_Support_Score'] = 0.0
@@ -1832,3 +1833,89 @@ class RiskMetrics(IStrategy):
         }
         
         return description
+
+    def get_pair_mc_results(self, pair: str) -> Dict[str, any]:
+        """
+        Get Monte Carlo results for a specific pair.
+        
+        Args:
+            pair: Trading pair name (e.g., 'BTC/USDT')
+            
+        Returns:
+            Dict containing Monte Carlo results for the pair, or empty dict if not available
+        """
+        return self.cached_mc_results_per_pair.get(pair, {})
+    
+    def has_pair_mc_results(self, pair: str) -> bool:
+        """
+        Check if Monte Carlo results are available for a specific pair.
+        
+        Args:
+            pair: Trading pair name (e.g., 'BTC/USDT')
+            
+        Returns:
+            bool: True if results are cached for the pair
+        """
+        return pair in self.cached_mc_results_per_pair and bool(self.cached_mc_results_per_pair[pair])
+    
+    def clear_pair_mc_cache(self, pair: str) -> None:
+        """
+        Clear Monte Carlo cache for a specific pair.
+        
+        Args:
+            pair: Trading pair name (e.g., 'BTC/USDT')
+        """
+        if pair in self.cached_mc_results_per_pair:
+            del self.cached_mc_results_per_pair[pair]
+        if pair in self.last_mc_recalc_time_per_pair:
+            del self.last_mc_recalc_time_per_pair[pair]
+        print(f"Cleared Monte Carlo cache for {pair}")
+    
+    def get_mc_cache_stats(self) -> Dict[str, any]:
+        """
+        Get statistics about the Monte Carlo cache across all pairs.
+        
+        Returns:
+            Dict containing cache statistics
+        """
+        stats = {
+            'total_pairs_cached': len(self.cached_mc_results_per_pair),
+            'pairs_with_results': [],
+            'cache_ages_minutes': {},
+            'last_recalc_times': {}
+        }
+        
+        current_time = datetime.now(timezone.utc)
+        
+        for pair in self.cached_mc_results_per_pair:
+            if self.cached_mc_results_per_pair[pair]:
+                stats['pairs_with_results'].append(pair)
+                
+            if pair in self.last_mc_recalc_time_per_pair and self.last_mc_recalc_time_per_pair[pair]:
+                last_time = self.last_mc_recalc_time_per_pair[pair]
+                age_minutes = (current_time - last_time).total_seconds() / 60
+                stats['cache_ages_minutes'][pair] = age_minutes
+                stats['last_recalc_times'][pair] = last_time.isoformat()
+        
+        return stats
+    
+    def print_mc_cache_summary(self) -> None:
+        """
+        Print a summary of the Monte Carlo cache status for all pairs.
+        """
+        stats = self.get_mc_cache_stats()
+        
+        print("=== Monte Carlo Cache Summary ===")
+        print(f"Total pairs with cache: {stats['total_pairs_cached']}")
+        print(f"Pairs with valid results: {len(stats['pairs_with_results'])}")
+        
+        if stats['pairs_with_results']:
+            print("Pairs with cached results:")
+            for pair in stats['pairs_with_results']:
+                age = stats['cache_ages_minutes'].get(pair, 0)
+                print(f"  - {pair}: {age:.1f} minutes old")
+        
+        if len(stats['cache_ages_minutes']) != len(stats['pairs_with_results']):
+            stale_pairs = set(self.cached_mc_results_per_pair.keys()) - set(stats['pairs_with_results'])
+            if stale_pairs:
+                print(f"Pairs with stale/empty cache: {list(stale_pairs)}")
