@@ -399,7 +399,6 @@ class RiskMetrics(IStrategy):
     
     # Trendline parameters
     trendline_proximity_threshold = DecimalParameter(0.005, 0.02, default=0.002, space="buy", optimize=True)
-    trendline_touch_weight = DecimalParameter(1.5, 3.0, default=2.5, space="buy", optimize=True)
     
     # Linear Regression parameters
     linearreg_timeperiod = IntParameter(10, 500, default=200, space="buy", optimize=True)
@@ -1472,7 +1471,6 @@ class RiskMetrics(IStrategy):
             trends,
             price_field="Data", 
             threshold=self.trendline_proximity_threshold.value,
-            touch_weight=self.trendline_touch_weight.value,
             all_highs=recent_data['all_highs'],
             all_lows=recent_data['all_lows'],
             pivot_bonus=10.0  # Higher bonus for MC optimization
@@ -1506,7 +1504,6 @@ class RiskMetrics(IStrategy):
                 seg_trends, 
                 price_field="Data", 
                 threshold=self.trendline_proximity_threshold.value,
-                touch_weight=self.trendline_touch_weight.value,
                 max_prefix="Max_Line_", 
                 min_prefix="Min_Line_",
                 all_highs=recent_data['all_highs'],
@@ -1537,7 +1534,6 @@ class RiskMetrics(IStrategy):
                 trends,  # Use the gentrends output that has Resistance Line and Support Line
                 price_field="Data", 
                 threshold=self.trendline_proximity_threshold.value,
-                touch_weight=self.trendline_touch_weight.value,
                 all_highs=recent_data['all_highs'],
                 all_lows=recent_data['all_lows'],
                 pivot_bonus=9.0  # Increased pivot bonus to emphasize swing points

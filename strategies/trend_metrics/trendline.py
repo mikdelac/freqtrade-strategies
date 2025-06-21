@@ -231,7 +231,7 @@ def segtrends(dataframe, field="close", segments=2, charts=False):
     return trends
 
 
-def rank_trendlines(trends, price_field="Data", threshold=0.01, touch_weight=2.0, max_prefix="Max_Line_", min_prefix="Min_Line_", all_highs=None, all_lows=None, pivot_bonus=5.0):
+def rank_trendlines(trends, price_field="Data", threshold=0.01, max_prefix="Max_Line_", min_prefix="Min_Line_", all_highs=None, all_lows=None, pivot_bonus=5.0):
     """
     Ranks trendlines based on the number of bounces off the trendline using the same
     bounce detection logic as generate_bounce_conditions from RiskMetrics.py.
@@ -252,7 +252,6 @@ def rank_trendlines(trends, price_field="Data", threshold=0.01, touch_weight=2.0
     :param trends: DataFrame containing price data and trendlines
     :param price_field: Column name for price data (default: "Data")
     :param threshold: Proximity threshold as a percentage (default: 0.01 or 1%)
-    :param touch_weight: Weight multiplier for strong bounces vs weak bounces (default: 2.0)
     :param max_prefix: Prefix for maxline columns (default: "Max_Line_")
     :param min_prefix: Prefix for minline columns (default: "Min_Line_")
     :param all_highs: Series or DataFrame column with high pivot points (default: None)
