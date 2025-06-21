@@ -460,6 +460,14 @@ class RiskMetrics(IStrategy):
     # Enable convergence detection
     enable_convergence_detection = BooleanParameter(default=True, space="buy", optimize=False)
     
+    # === ATR-based Custom Stoploss Parameters ===
+    use_custom_stoploss = True
+    stoploss_atr_multiplier = DecimalParameter(1.0, 5.0, default=3.0, space="buy", optimize=True)
+    # Additional stoploss safety parameters
+    stoploss_min_percent = DecimalParameter(0.005, 0.02, default=0.01, space="buy", optimize=True)  # Minimum 0.5-2% stoploss
+    stoploss_max_percent = DecimalParameter(0.08, 0.25, default=0.15, space="buy", optimize=True)  # Maximum 8-25% stoploss
+    stoploss_profit_protection = DecimalParameter(0.01, 0.05, default=0.02, space="buy", optimize=True)  # Tighten stoploss after 1-5% profit
+    
     # === New Periodic Monte Carlo Parameters ===
     mc_recalc_interval_minutes = IntParameter(60, 480, default=240, space="buy", optimize=False)
     mc_lookback_window_candles = IntParameter(1000, 3000, default=2000, space="buy", optimize=False)
@@ -474,12 +482,15 @@ class RiskMetrics(IStrategy):
         "0": 0.02     # Exit immediately if profit is 2%
     }
 
-    # Disable stoploss since we're using ROI-based exits only
-    stoploss = -0.1  # Effectively disabled
+    # Stoploss configuration - completely disable trailing stops
+    stoploss = -0.1  # Fallback value if custom_stoploss fails
     trailing_stop = False
-    use_exit_signal = True  # Disable exit signals since we're using ROI
-    exit_profit_only = False  # Only exit in profit
-    ignore_roi_if_entry_signal = False  # Don't ignore ROI even if we have a new entry signal
+    trailing_stop_positive = None  # Explicitly disable
+    trailing_stop_positive_offset = None  # Explicitly disable
+    trailing_only_offset_is_reached = None  # Explicitly disable
+    use_exit_signal = True
+    exit_profit_only = False
+    ignore_roi_if_entry_signal = False
 
     # Number of candles the strategy requires before producing valid signals
     startup_candle_count: int = 30
@@ -535,7 +546,8 @@ class RiskMetrics(IStrategy):
         # Add volatility regime subplot (always enabled for proper GARCH risk management)
         plot_config["subplots"]["Volatility Analysis"] = {
             "volatility": {"color": "purple", "type": "line", "width": 2.0},
-            "risk_multiplier": {"color": "orange", "type": "line", "width": 2.0}
+            "risk_multiplier": {"color": "orange", "type": "line", "width": 2.0},
+            "atr": {"color": "cyan", "type": "line", "width": 2.0}
         }
         
         # Dynamically add higher timeframe plots based on available timeframes
@@ -606,6 +618,9 @@ class RiskMetrics(IStrategy):
         print(f"  Proper GARCH usage: Volatility forecasting separate from technical analysis optimization")
         print(f"  Signal generator: Initialized for modular signal generation")
         print(f"  Periodic Monte Carlo: Recalc interval={self.mc_recalc_interval_minutes.value} minutes, Lookback window={self.mc_lookback_window_candles.value} candles")
+        print(f"  Enhanced ATR Stoploss: Enabled with {self.stoploss_atr_multiplier.value:.1f}x ATR multiplier")
+        print(f"    - Stoploss bounds: Min={self.stoploss_min_percent.value*100:.1f}%, Max={self.stoploss_max_percent.value*100:.1f}%")
+        print(f"    - Profit protection: Activates at {self.stoploss_profit_protection.value*100:.1f}% profit")
 
     def calculate_score_convergence_ratio(self, support_score: float, resistance_score: float) -> float:
         """
@@ -1676,6 +1691,117 @@ class RiskMetrics(IStrategy):
         Enhanced exit signals for bounce trading with cross-signal exits.
         """
         return self.signal_generator.generate_exit_signals(dataframe)
+
+    def custom_stoploss(self, pair: str, trade: 'Trade', current_time: datetime,
+                        current_rate: float, current_profit: float, **kwargs) -> float:
+        """
+        Enhanced custom stoploss based on ATR with dynamic adjustment.
+        This function is called for every candle for open trades.
+        
+        Features:
+        - ATR-based dynamic stoploss calculation
+        - Profit protection (tighten stoploss when in profit)
+        - Volatility regime adjustment
+        - Support/resistance level awareness
+        - Minimum and maximum stoploss bounds
+        
+        Args:
+            pair: Trading pair
+            trade: Trade object with entry information
+            current_time: Current datetime
+            current_rate: Current price
+            current_profit: Current profit percentage
+            **kwargs: Additional keyword arguments
+            
+        Returns:
+            float: Stoploss value as negative percentage relative to entry price
+        """
+        try:
+            # Get the analyzed dataframe for this pair
+            dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+            
+            if len(dataframe) == 0:
+                # Fallback to fixed stoploss if no data available
+                return -self.stoploss_max_percent.value
+            
+            # Get the most recent candle
+            last_candle = dataframe.iloc[-1].squeeze()
+            
+            # Ensure ATR is present and valid
+            if 'atr' not in last_candle or pd.isna(last_candle['atr']) or last_candle['atr'] <= 0:
+                # ATR not available, use fallback based on profit status
+                if current_profit > 0:
+                    return -self.stoploss_min_percent.value  # Tight stoploss when profitable
+                else:
+                    return -self.stoploss_max_percent.value  # Wider stoploss when losing
+            
+            atr_value = last_candle['atr']
+            atr_multiplier = self.stoploss_atr_multiplier.value
+            
+            # Get volatility regime for adjustment
+            volatility_regime = last_candle.get('volatility_regime', 'medium')
+            risk_multiplier = last_candle.get('risk_multiplier', 1.0)
+            
+            # Adjust ATR multiplier based on volatility regime
+            if volatility_regime == 'high':
+                # In high volatility, use wider stops to avoid noise
+                adjusted_multiplier = atr_multiplier * 1.5
+            elif volatility_regime == 'low':
+                # In low volatility, use tighter stops
+                adjusted_multiplier = atr_multiplier * 0.7
+            else:
+                # Medium volatility, use standard multiplier
+                adjusted_multiplier = atr_multiplier
+            
+            # Calculate base stoploss distance based on ATR
+            stoploss_distance = atr_value * adjusted_multiplier
+            
+            # Convert to percentage relative to entry price
+            base_stoploss_percentage = -(stoploss_distance / trade.open_rate)
+            
+            # Apply profit protection logic
+            if current_profit > self.stoploss_profit_protection.value:
+                # When in profit above threshold, tighten the stoploss
+                profit_protection_factor = 0.5  # Reduce stoploss distance by 50%
+                base_stoploss_percentage = base_stoploss_percentage * profit_protection_factor
+                
+                # But don't make it tighter than break-even
+                breakeven_stoploss = -0.001  # Small negative to account for fees
+                base_stoploss_percentage = min(base_stoploss_percentage, breakeven_stoploss)
+            
+            # Support/Resistance level awareness
+            if 'MC_Optimal_Support' in last_candle and not pd.isna(last_candle['MC_Optimal_Support']):
+                support_level = last_candle['MC_Optimal_Support']
+                # For long trades, don't set stoploss above the support level
+                if trade.is_open and not trade.is_short:
+                    support_based_stoploss = -(abs(current_rate - support_level) / trade.open_rate)
+                    # Use the more conservative (wider) of the two stoplosses
+                    base_stoploss_percentage = min(base_stoploss_percentage, support_based_stoploss)
+            
+            # Apply minimum and maximum bounds
+            final_stoploss = max(base_stoploss_percentage, -self.stoploss_max_percent.value)
+            final_stoploss = min(final_stoploss, -self.stoploss_min_percent.value)
+            
+            # Log stoploss calculation occasionally for debugging
+            import random
+            if random.random() < 0.005:  # Log 0.5% of the time to reduce spam
+                print(f"Enhanced ATR Stoploss for {pair}:")
+                print(f"  ATR={atr_value:.6f}, Base Multiplier={atr_multiplier:.1f}, Adjusted={adjusted_multiplier:.1f}")
+                print(f"  Volatility Regime={volatility_regime}, Risk Multiplier={risk_multiplier:.2f}")
+                print(f"  Current Profit={current_profit:.4f} ({current_profit*100:.2f}%)")
+                print(f"  Base Stoploss={base_stoploss_percentage:.4f}, Final={final_stoploss:.4f}")
+                print(f"  Bounds: Min={-self.stoploss_min_percent.value:.4f}, Max={-self.stoploss_max_percent.value:.4f}")
+            
+            return final_stoploss
+                
+        except Exception as e:
+            # Error in custom stoploss calculation, use conservative fallback
+            print(f"Error in enhanced custom_stoploss for {pair}: {e}")
+            # Use tight stoploss if in profit, wide if losing
+            if current_profit > 0:
+                return -self.stoploss_min_percent.value
+            else:
+                return -self.stoploss_max_percent.value
 
     def get_market_condition_description(self, dataframe: DataFrame) -> Dict[str, str]:
         """
