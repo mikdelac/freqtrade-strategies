@@ -398,7 +398,7 @@ class RiskMetrics(IStrategy):
     rv_1h_change_threshold = DecimalParameter(0.05, 0.10, default=0.01, space="buy", optimize=True)
     
     # Trendline parameters
-    trendline_proximity_threshold = DecimalParameter(0.005, 0.02, default=0.002, space="buy", optimize=True)
+    trendline_proximity_threshold = DecimalParameter(0.005, 0.02, default=0.0005, space="buy", optimize=True)
     
     # Linear Regression parameters
     linearreg_timeperiod = IntParameter(10, 500, default=200, space="buy", optimize=True)
