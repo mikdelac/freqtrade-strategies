@@ -459,6 +459,10 @@ class RiskMetrics(IStrategy):
     
     # Enable convergence detection
     enable_convergence_detection = BooleanParameter(default=True, space="buy", optimize=False)
+    
+    # === New Periodic Monte Carlo Parameters ===
+    mc_recalc_interval_minutes = IntParameter(60, 480, default=240, space="buy", optimize=False)
+    mc_lookback_window_candles = IntParameter(1000, 3000, default=2000, space="buy", optimize=False)
 
     # Minimal ROI designed for the strategy.
     minimal_roi = {
@@ -589,6 +593,10 @@ class RiskMetrics(IStrategy):
         # Initialize signal generator
         self.signal_generator = SignalGenerator(self)
         
+        # === New State Variables for Periodic MC ===
+        self.last_mc_recalc_time: Optional[datetime] = None
+        self.cached_mc_results: Dict[str, any] = {}
+        
         print(f"RiskMetrics strategy initialized with separated GARCH implementation:")
         print(f"  GARCH model: Used for risk management and volatility estimation only")
         print(f"  Lookback periods: Fixed periods for Monte Carlo optimization")
@@ -597,6 +605,7 @@ class RiskMetrics(IStrategy):
         print(f"  Convergence thresholds: High={self.score_convergence_high_threshold.value:.2f}, Medium={self.score_convergence_medium_threshold.value:.2f}, Low={self.score_convergence_low_threshold.value:.2f}")
         print(f"  Proper GARCH usage: Volatility forecasting separate from technical analysis optimization")
         print(f"  Signal generator: Initialized for modular signal generation")
+        print(f"  Periodic Monte Carlo: Recalc interval={self.mc_recalc_interval_minutes.value} minutes, Lookback window={self.mc_lookback_window_candles.value} candles")
 
     def calculate_score_convergence_ratio(self, support_score: float, resistance_score: float) -> float:
         """
@@ -1133,47 +1142,92 @@ class RiskMetrics(IStrategy):
         # Initialize all required dataframe columns
         self._initialize_dataframe_columns(dataframe)
 
-        # Monte Carlo Period Optimization
-        if self.enable_mc_optimization.value and len(dataframe) >= self.MIN_LOOKBACK_PERIOD:
-            print("=== Monte Carlo Period Optimization ===")
-            mc_results = self.monte_carlo_period_optimization(dataframe)
+        # === Periodic Monte Carlo Optimization Logic ===
+        
+        # Condition to trigger a full recalculation
+        should_recalc_mc = False
+        if self.enable_mc_optimization.value:
+            # Get current time - use 'date' column if available, otherwise use current time
+            if 'date' in dataframe.columns:
+                current_time = dataframe['date'].iloc[-1]
+                if not isinstance(current_time, datetime):
+                    current_time = pd.to_datetime(current_time)
+                if current_time.tzinfo is None:
+                    current_time = current_time.replace(tzinfo=timezone.utc)
+            else:
+                current_time = datetime.now(timezone.utc)
             
-            # Store the optimal lines
-            dataframe['MC_Optimal_Resistance'] = mc_results['resistance_line']
-            dataframe['MC_Optimal_Support'] = mc_results['support_line']
+            if self.last_mc_recalc_time is None:
+                should_recalc_mc = True
+                print("First run: Initializing Monte Carlo optimization.")
+            else:
+                time_since_last_recalc = (current_time - self.last_mc_recalc_time).total_seconds() / 60
+                if time_since_last_recalc >= self.mc_recalc_interval_minutes.value:
+                    should_recalc_mc = True
+                    print(f"Time to recalculate MC: {time_since_last_recalc:.1f} minutes elapsed (threshold: {self.mc_recalc_interval_minutes.value})")
+
+        # --- HEAVY CALCULATION BLOCK ---
+        if should_recalc_mc:
+            self.last_mc_recalc_time = current_time
             
-            # Get the raw scores
-            raw_resistance_score = mc_results['resistance_score']
-            raw_support_score = mc_results['support_score']
-                                    
-            # Store the raw scores so they show up on the graph
-            dataframe['MC_Resistance_Score'] = raw_resistance_score
-            dataframe['MC_Support_Score'] = raw_support_score
-            dataframe['MC_Optimal_Period'] = max(mc_results['optimal_resistance_period'], 
-                                                mc_results['optimal_support_period'])
+            # Calculate MAX_LOOKBACK_PERIOD dynamically based on available data (same as in monte_carlo_period_optimization)
+            total_candles = len(dataframe)
+            max_lookback_period = min(total_candles, 1000)  # Use the same logic as in the MC method
             
-            print(f"Monte Carlo results stored in dataframe")
-            print(f"Max lookback period used: {mc_results.get('max_lookback_period', 'N/A')} candles")
-            print(f"MC Resistance Score: {raw_resistance_score:.6f} (raw)")
-            print(f"MC Support Score: {raw_support_score:.6f} (raw)")
+            # Use the dynamically calculated lookback window
+            lookback_window = min(self.mc_lookback_window_candles.value, max_lookback_period)
             
-            # Additional debug info about the dataframe columns
-            print(f"Dataframe shape: {dataframe.shape}")
-            print(f"MC_Resistance_Score column stats: min={dataframe['MC_Resistance_Score'].min()}, max={dataframe['MC_Resistance_Score'].max()}")
-            print(f"MC_Support_Score column stats: min={dataframe['MC_Support_Score'].min()}, max={dataframe['MC_Support_Score'].max()}")
+            if len(dataframe) >= lookback_window:
+                print(f"Running MC optimization on last {lookback_window} candles (max available: {max_lookback_period}).")
+                mc_data = dataframe.tail(lookback_window).copy()
+                
+                # Run the full optimization and cache the results
+                self.cached_mc_results = self.monte_carlo_period_optimization(mc_data)
+            else:
+                print(f"Not enough data for MC optimization ({len(dataframe)} < {lookback_window}).")
+
+        # --- LIGHTWEIGHT APPLICATION BLOCK (runs every time) ---
+        if self.cached_mc_results:
+            # Apply cached global scores and optimal periods
+            dataframe['MC_Resistance_Score'] = self.cached_mc_results['resistance_score']
+            dataframe['MC_Support_Score'] = self.cached_mc_results['support_score']
+            dataframe['MC_Optimal_Period'] = max(
+                self.cached_mc_results['optimal_resistance_period'],
+                self.cached_mc_results['optimal_support_period']
+            )
+
+            # Apply the optimal lines - these were calculated on a window, so we apply them to the tail
+            resistance_line = self.cached_mc_results['resistance_line']
+            support_line = self.cached_mc_results['support_line']
             
-            # Process volatility and convergence analysis
-            self._process_convergence_analysis(dataframe, raw_resistance_score, raw_support_score)
+            # Align the calculated lines with the main dataframe
+            if len(resistance_line) > 0 and not np.isnan(resistance_line).all():
+                start_idx = max(0, len(dataframe) - len(resistance_line))
+                end_idx = len(dataframe)
+                dataframe.iloc[start_idx:end_idx, dataframe.columns.get_loc('MC_Optimal_Resistance')] = resistance_line[-len(dataframe[start_idx:end_idx]):]
+            if len(support_line) > 0 and not np.isnan(support_line).all():
+                start_idx = max(0, len(dataframe) - len(support_line))
+                end_idx = len(dataframe)
+                dataframe.iloc[start_idx:end_idx, dataframe.columns.get_loc('MC_Optimal_Support')] = support_line[-len(dataframe[start_idx:end_idx]):]
+
+            # Process convergence analysis using the globally optimal scores
+            # This will still produce a single value, which is correct for this architecture
+            self._process_convergence_analysis(
+                dataframe, 
+                self.cached_mc_results['resistance_score'], 
+                self.cached_mc_results['support_score']
+            )
+            
+            print(f"Applied cached Monte Carlo results:")
+            print(f"  Resistance Score: {self.cached_mc_results['resistance_score']:.6f}")
+            print(f"  Support Score: {self.cached_mc_results['support_score']:.6f}")
+            print(f"  Optimal Periods: R={self.cached_mc_results['optimal_resistance_period']}, S={self.cached_mc_results['optimal_support_period']}")
             
         else:
-            print("Monte Carlo optimization skipped (disabled or insufficient data)")
-            print(f"Available candles: {len(dataframe)}, minimum required: {self.MIN_LOOKBACK_PERIOD}")
-            
-            # Initialize with zeros when optimization is skipped
+            print("Monte Carlo results not yet available.")
+            # Initialize with defaults if no results are cached
             dataframe['MC_Resistance_Score'] = 0.0
             dataframe['MC_Support_Score'] = 0.0
-            
-            # Initialize convergence metrics with default values
             dataframe['score_convergence_ratio'] = 0.0
             dataframe['convergence_multiplier'] = 1.0
             dataframe['trading_mode_indicator'] = 0.0
