@@ -172,6 +172,16 @@ class SignalGenerator:
             print("Missing required columns for signal generation")
             return dataframe
         
+        # Additional validation: Check if trendlines have valid values
+        # Create a mask for rows where both support and resistance have valid values
+        valid_support = ~dataframe['MC_Optimal_Support'].isna()
+        valid_resistance = ~dataframe['MC_Optimal_Resistance'].isna()
+        valid_trendlines = valid_support & valid_resistance
+        
+        if not valid_trendlines.any():
+            print("No valid trendline data available - skipping entry signal generation")
+            return dataframe
+        
         # Generate long entry conditions (bounce off support)
         long_bounce_conditions = self.generate_bounce_conditions(
             dataframe, 'MC_Optimal_Support', 'low', 'long'
@@ -183,6 +193,9 @@ class SignalGenerator:
             self.strategy.enable_convergence_detection.value,
             self.strategy.score_convergence_high_threshold.value
         )
+        
+        # Apply trendline validity filter for long entries
+        long_conditions_filtered = long_conditions_filtered & valid_trendlines
         
         # Generate short entry conditions (bounce off resistance)
         short_bounce_conditions = self.generate_bounce_conditions(
@@ -196,6 +209,9 @@ class SignalGenerator:
             self.strategy.score_convergence_high_threshold.value
         )
         
+        # Apply trendline validity filter for short entries
+        short_conditions_filtered = short_conditions_filtered & valid_trendlines
+        
         # Set entry signals
         dataframe.loc[long_conditions_filtered, 'enter_long'] = 1
         dataframe.loc[short_conditions_filtered, 'enter_short'] = 1
@@ -203,7 +219,11 @@ class SignalGenerator:
         # Log entry signal summary
         long_signals = dataframe['enter_long'].sum()
         short_signals = dataframe['enter_short'].sum()
+        valid_rows = valid_trendlines.sum()
+        total_rows = len(dataframe)
+        
         print(f"Entry signals generated: {long_signals} long, {short_signals} short")
+        print(f"Valid trendline data: {valid_rows}/{total_rows} rows ({valid_rows/total_rows*100:.1f}%)")
         
         # Log convergence analysis for the most recent candle
         if self.strategy.enable_convergence_detection.value and len(dataframe) > 0:
@@ -216,6 +236,10 @@ class SignalGenerator:
             )
             print(f"Current convergence status: {reason}")
             print(f"Entry allowed: {should_enter}")
+            
+            # Check if current candle has valid trendlines
+            current_valid = valid_trendlines.iloc[-1] if len(valid_trendlines) > 0 else False
+            print(f"Current candle trendline validity: {current_valid}")
         
         return dataframe
     
