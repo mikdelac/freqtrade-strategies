@@ -44,7 +44,7 @@ from risk_metrics.volatility_models import VolatilityModel, VolatilityRegime, GA
 from risk_metrics.risk_indicators import RiskIndicators
 from risk_metrics.monte_carlo import MonteCarloSimulator
 from trend_metrics.trend_analysis import TrendAnalysis
-from trend_metrics.trendline import gentrends, segtrends, rank_trendlines
+from trend_metrics.trendline import gentrends, segtrends, rank_trendlines, generate_bounce_conditions
 from technical.util import resample_to_interval, resampled_merge
 
 class SignalGenerator:
@@ -62,66 +62,6 @@ class SignalGenerator:
         """
         self.strategy = strategy_instance
         
-    def generate_bounce_conditions(self, dataframe: DataFrame, level_column: str, 
-                                 price_column: str, direction: str) -> pd.Series:
-        """
-        Generate bounce conditions for support or resistance levels.
-        
-        Args:
-            dataframe: DataFrame with OHLCV data
-            level_column: Column name for support/resistance level
-            price_column: Column name for price comparison ('high' or 'low')
-            direction: Either 'long' for support bounce or 'short' for resistance bounce
-            
-        Returns:
-            pandas.Series: Boolean series indicating bounce conditions
-        """
-        if level_column not in dataframe.columns:
-            return pd.Series([False] * len(dataframe), index=dataframe.index)
-        
-        tolerance = 0.002  # 0.2% tolerance for level proximity
-        
-        if direction == 'long':
-            # Long entry: Bounce off support using swing low extrema
-            bounce_conditions = (
-                # Current close is above support
-                (dataframe['close'] > dataframe[level_column]) &
-                # Previous low was at or near support (within tolerance)
-                (abs(dataframe[price_column].shift(1) - dataframe[level_column].shift(1)) <= 
-                 dataframe[level_column].shift(1) * tolerance) &
-                # Previous low was lower than the low 2 candles ago (swing low pattern)
-                (dataframe[price_column].shift(1) <= dataframe[price_column].shift(2)) &
-                # Previous low was lower than current low (confirming bounce)
-                (dataframe[price_column].shift(1) < dataframe[price_column]) &
-                # Current close is higher than previous close (upward movement)
-                (dataframe['close'] > dataframe['close'].shift(1)) &
-                # Level data is valid
-                (~dataframe[level_column].isna()) &
-                (~dataframe[level_column].shift(1).isna())
-            )
-        elif direction == 'short':
-            # Short entry: Bounce off resistance using swing high extrema
-            bounce_conditions = (
-                # Current close is below resistance
-                (dataframe['close'] < dataframe[level_column]) &
-                # Previous high was at or near resistance (within tolerance)
-                (abs(dataframe[price_column].shift(1) - dataframe[level_column].shift(1)) <= 
-                 dataframe[level_column].shift(1) * tolerance) &
-                # Previous high was higher than the high 2 candles ago (swing high pattern)
-                (dataframe[price_column].shift(1) >= dataframe[price_column].shift(2)) &
-                # Previous high was higher than current high (confirming bounce)
-                (dataframe[price_column].shift(1) > dataframe[price_column]) &
-                # Current close is lower than previous close (downward movement)
-                (dataframe['close'] < dataframe['close'].shift(1)) &
-                # Level data is valid
-                (~dataframe[level_column].isna()) &
-                (~dataframe[level_column].shift(1).isna())
-            )
-        else:
-            return pd.Series([False] * len(dataframe), index=dataframe.index)
-            
-        return bounce_conditions
-    
     def apply_convergence_filter(self, dataframe: DataFrame, conditions: pd.Series, 
                                enable_convergence: bool, threshold: float) -> pd.Series:
         """
@@ -182,9 +122,10 @@ class SignalGenerator:
             print("No valid trendline data available - skipping entry signal generation")
             return dataframe
         
-        # Generate long entry conditions (bounce off support)
-        long_bounce_conditions = self.generate_bounce_conditions(
-            dataframe, 'MC_Optimal_Support', 'low', 'long'
+        # Generate long entry conditions (bounce off support) - using direct import from trendline.py
+        long_bounce_conditions = generate_bounce_conditions(
+            dataframe['close'], dataframe['high'], dataframe['low'], 
+            dataframe['MC_Optimal_Support'], 'long', self.strategy.trendline_proximity_threshold.value
         )
         
         # Apply convergence filter for long entries
@@ -197,9 +138,10 @@ class SignalGenerator:
         # Apply trendline validity filter for long entries
         long_conditions_filtered = long_conditions_filtered & valid_trendlines
         
-        # Generate short entry conditions (bounce off resistance)
-        short_bounce_conditions = self.generate_bounce_conditions(
-            dataframe, 'MC_Optimal_Resistance', 'high', 'short'
+        # Generate short entry conditions (bounce off resistance) - using direct import from trendline.py
+        short_bounce_conditions = generate_bounce_conditions(
+            dataframe['close'], dataframe['high'], dataframe['low'], 
+            dataframe['MC_Optimal_Resistance'], 'short', self.strategy.trendline_proximity_threshold.value
         )
         
         # Apply convergence filter for short entries
@@ -296,14 +238,16 @@ class SignalGenerator:
         Returns:
             Tuple[pd.Series, pd.Series]: (exit_long_conditions, exit_short_conditions)
         """
-        # Generate short entry conditions for long exits
-        short_entry_conditions = self.generate_bounce_conditions(
-            dataframe, 'MC_Optimal_Resistance', 'high', 'short'
+        # Generate short entry conditions for long exits - using direct import from trendline.py
+        short_entry_conditions = generate_bounce_conditions(
+            dataframe['close'], dataframe['high'], dataframe['low'], 
+            dataframe['MC_Optimal_Resistance'], 'short', self.strategy.trendline_proximity_threshold.value
         )
         
-        # Generate long entry conditions for short exits
-        long_entry_conditions = self.generate_bounce_conditions(
-            dataframe, 'MC_Optimal_Support', 'low', 'long'
+        # Generate long entry conditions for short exits - using direct import from trendline.py
+        long_entry_conditions = generate_bounce_conditions(
+            dataframe['close'], dataframe['high'], dataframe['low'], 
+            dataframe['MC_Optimal_Support'], 'long', self.strategy.trendline_proximity_threshold.value
         )
         
         # Apply convergence filter if enabled
@@ -1808,7 +1752,7 @@ class RiskMetrics(IStrategy):
             
             # Log stoploss calculation occasionally for debugging
             import random
-            if random.random() < 0.005:  # Log 0.5% of the time to reduce spam
+            if random.random() < 1:  # Log 100% of the time to reduce spam
                 print(f"Enhanced ATR Stoploss for {pair}:")
                 print(f"  ATR={atr_value:.6f}, Base Multiplier={atr_multiplier:.1f}, Adjusted={adjusted_multiplier:.1f}")
                 print(f"  Volatility Regime={volatility_regime}, Risk Multiplier={risk_multiplier:.2f}")
