@@ -7,35 +7,36 @@ https://github.com/dysonance/Trendy
 import numpy as np
 import pandas as pd
 
-def generate_bounce_conditions(close_data, high_data, low_data, level_data, direction: str, tolerance: float = 0.00005):
+def generate_bounce_conditions(close_data, level_data, direction: str, tolerance: float = 0.00005, pivot_highs=None, pivot_lows=None):
     """
     Generate bounce conditions for support or resistance levels.
     This is the centralized bounce detection logic used throughout the system.
     
     Args:
         close_data: Close price series
-        high_data: High price series  
-        low_data: Low price series
         level_data: Trendline level series
         direction: Either 'long' for support bounce or 'short' for resistance bounce
         tolerance: Proximity tolerance (default: 0.00005 or 0.005%)
+        pivot_highs: Pre-calculated pivot high points (pandas Series with same index) - REQUIRED
+        pivot_lows: Pre-calculated pivot low points (pandas Series with same index) - REQUIRED
         
     Returns:
         pandas.Series: Boolean series indicating bounce conditions
     """
     if direction == 'long':
-        # Long entry: Bounce off support using swing low extrema
+        if pivot_lows is None:
+            raise ValueError("pivot_lows must be provided for long direction bounce detection")
+            
+        # Long entry: Bounce off support using pre-calculated pivot lows
         bounce_conditions = (
             # Current close is above support
             (close_data > level_data) &
-            # Previous low was at or near support but ABOVE it (within tolerance, rejected)
-            (low_data.shift(1) >= level_data.shift(1)) &  # Low is above or at support
-            (abs(low_data.shift(1) - level_data.shift(1)) <= 
+            # Previous candle had a pivot low (swing low extrema)
+            (~pivot_lows.shift(1).isna()) &
+            # Previous pivot low was at or near support but ABOVE it (within tolerance, rejected)
+            (pivot_lows.shift(1) >= level_data.shift(1)) &  # Pivot low is above or at support
+            (abs(pivot_lows.shift(1) - level_data.shift(1)) <= 
              level_data.shift(1) * tolerance) &  # But close enough to be considered a test
-            # Previous low was lower than the low 2 candles ago (swing low pattern)
-            (low_data.shift(1) <= low_data.shift(2)) &
-            # Previous low was lower than current low (confirming bounce)
-            (low_data.shift(1) < low_data) &
             # Current close is higher than previous close (upward movement)
             (close_data > close_data.shift(1)) &
             # Level data is valid
@@ -43,18 +44,19 @@ def generate_bounce_conditions(close_data, high_data, low_data, level_data, dire
             (~level_data.shift(1).isna())
         )
     elif direction == 'short':
-        # Short entry: Bounce off resistance using swing high extrema
+        if pivot_highs is None:
+            raise ValueError("pivot_highs must be provided for short direction bounce detection")
+            
+        # Short entry: Bounce off resistance using pre-calculated pivot highs
         bounce_conditions = (
             # Current close is below resistance
             (close_data < level_data) &
-            # Previous high was at or near resistance but BELOW it (within tolerance, rejected)
-            (high_data.shift(1) <= level_data.shift(1)) &  # High is below or at resistance
-            (abs(high_data.shift(1) - level_data.shift(1)) <= 
+            # Previous candle had a pivot high (swing high extrema)
+            (~pivot_highs.shift(1).isna()) &
+            # Previous pivot high was at or near resistance but BELOW it (within tolerance, rejected)
+            (pivot_highs.shift(1) <= level_data.shift(1)) &  # Pivot high is below or at resistance
+            (abs(pivot_highs.shift(1) - level_data.shift(1)) <= 
              level_data.shift(1) * tolerance) &  # But close enough to be considered a test
-            # Previous high was higher than the high 2 candles ago (swing high pattern)
-            (high_data.shift(1) >= high_data.shift(2)) &
-            # Previous high was higher than current high (confirming bounce)
-            (high_data.shift(1) > high_data) &
             # Current close is lower than previous close (downward movement)
             (close_data < close_data.shift(1)) &
             # Level data is valid
@@ -376,14 +378,17 @@ def rank_trendlines(trends, price_field="Data", threshold=0.01, max_prefix="Max_
         if pivot_points is None or pivot_points.isna().all():
             return None
             
-        array = pivot_points.reset_index(drop=True).values
+        # Keep as pandas Series instead of converting to numpy array
+        series = pivot_points.reset_index(drop=True)
         
-        if len(array) > n_points:
-            return array[:n_points]
-        elif len(array) < n_points:
-            padding = np.full(n_points - len(array), np.nan)
-            return np.concatenate([array, padding])
-        return array
+        if len(series) > n_points:
+            # Truncate to n_points and maintain Series structure
+            return series.iloc[:n_points]
+        elif len(series) < n_points:
+            # Pad with NaN values and maintain Series structure
+            padding = pd.Series([np.nan] * (n_points - len(series)))
+            return pd.concat([series, padding], ignore_index=True)
+        return series
     
     # Prepare pivot arrays once
     prepared_pivots = {
@@ -413,24 +418,14 @@ def rank_trendlines(trends, price_field="Data", threshold=0.01, max_prefix="Max_
             start_idx, end_idx = get_trendline_active_range(trendline_data)
             active_length = max(end_idx - start_idx + 1, 1)
             
-            # We need high and low data for bounce detection
-            # If not available in trends DataFrame, use price_data as approximation
-            if 'high' in trends.columns and 'low' in trends.columns:
-                high_data = trends['high']
-                low_data = trends['low']
-            else:
-                # Fallback: use price_data for both high and low
-                high_data = price_data
-                low_data = price_data
-            
             # Generate bounce conditions using the centralized function
             if trendline_type == 'resistance':
                 bounce_conditions = generate_bounce_conditions(
-                    price_data, high_data, low_data, trendline_data, 'short', threshold
+                    price_data, trendline_data, 'short', threshold, prepared_pivots['highs'], prepared_pivots['lows']
                 )
             else:  # support
                 bounce_conditions = generate_bounce_conditions(
-                    price_data, high_data, low_data, trendline_data, 'long', threshold
+                    price_data, trendline_data, 'long', threshold, prepared_pivots['highs'], prepared_pivots['lows']
                 )
             
             # Calculate score based on bounces
@@ -560,14 +555,16 @@ def rank_trendlines(trends, price_field="Data", threshold=0.01, max_prefix="Max_
                 else:
                     strength_bonus = 0
                 
-                # Calculate proximity bonus
+                # Calculate proximity bonus using pivot points instead of high/low data
                 trendline_value = trendline_data.iloc[pos]
                 if trendline_type == 'resistance':
-                    relevant_price = high_data.iloc[pos]
+                    # For resistance bounces, use pivot highs
+                    relevant_price = prepared_pivots['highs'].iloc[pos] if pos < len(prepared_pivots['highs']) else price_data.iloc[pos]
                 else:
-                    relevant_price = low_data.iloc[pos]
+                    # For support bounces, use pivot lows
+                    relevant_price = prepared_pivots['lows'].iloc[pos] if pos < len(prepared_pivots['lows']) else price_data.iloc[pos]
                 
-                if not pd.isna(trendline_value) and trendline_value > 0:
+                if not pd.isna(trendline_value) and trendline_value > 0 and not pd.isna(relevant_price):
                     distance_pct = abs(relevant_price - trendline_value) / trendline_value
                     proximity_bonus = max(0, (threshold - distance_pct) / threshold * 5.0)
                 else:

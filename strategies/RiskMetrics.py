@@ -124,8 +124,9 @@ class SignalGenerator:
         
         # Generate long entry conditions (bounce off support) - using direct import from trendline.py
         long_bounce_conditions = generate_bounce_conditions(
-            dataframe['close'], dataframe['high'], dataframe['low'], 
-            dataframe['MC_Optimal_Support'], 'long', self.strategy.trendline_proximity_threshold.value
+            dataframe['close'], 
+            dataframe['MC_Optimal_Support'], 'long', self.strategy.trendline_proximity_threshold.value,
+            dataframe.get('all_highs'), dataframe.get('all_lows')
         )
         
         # Apply convergence filter for long entries
@@ -140,8 +141,9 @@ class SignalGenerator:
         
         # Generate short entry conditions (bounce off resistance) - using direct import from trendline.py
         short_bounce_conditions = generate_bounce_conditions(
-            dataframe['close'], dataframe['high'], dataframe['low'], 
-            dataframe['MC_Optimal_Resistance'], 'short', self.strategy.trendline_proximity_threshold.value
+            dataframe['close'], 
+            dataframe['MC_Optimal_Resistance'], 'short', self.strategy.trendline_proximity_threshold.value,
+            dataframe.get('all_highs'), dataframe.get('all_lows')
         )
         
         # Apply convergence filter for short entries
@@ -240,14 +242,16 @@ class SignalGenerator:
         """
         # Generate short entry conditions for long exits - using direct import from trendline.py
         short_entry_conditions = generate_bounce_conditions(
-            dataframe['close'], dataframe['high'], dataframe['low'], 
-            dataframe['MC_Optimal_Resistance'], 'short', self.strategy.trendline_proximity_threshold.value
+            dataframe['close'], 
+            dataframe['MC_Optimal_Resistance'], 'short', self.strategy.trendline_proximity_threshold.value,
+            dataframe.get('all_highs'), dataframe.get('all_lows')
         )
         
         # Generate long entry conditions for short exits - using direct import from trendline.py
         long_entry_conditions = generate_bounce_conditions(
-            dataframe['close'], dataframe['high'], dataframe['low'], 
-            dataframe['MC_Optimal_Support'], 'long', self.strategy.trendline_proximity_threshold.value
+            dataframe['close'], 
+            dataframe['MC_Optimal_Support'], 'long', self.strategy.trendline_proximity_threshold.value,
+            dataframe.get('all_highs'), dataframe.get('all_lows')
         )
         
         # Apply convergence filter if enabled
@@ -398,7 +402,7 @@ class RiskMetrics(IStrategy):
     rv_1h_change_threshold = DecimalParameter(0.05, 0.10, default=0.01, space="buy", optimize=True)
     
     # Trendline parameters
-    trendline_proximity_threshold = DecimalParameter(0.005, 0.02, default=0.0005, space="buy", optimize=True)
+    trendline_proximity_threshold = DecimalParameter(0.005, 0.02, default=0.005, space="buy", optimize=True)
     
     # Linear Regression parameters
     linearreg_timeperiod = IntParameter(10, 500, default=200, space="buy", optimize=True)
@@ -432,7 +436,7 @@ class RiskMetrics(IStrategy):
     mc_lookback_window_candles = IntParameter(1000, 3000, default=2000, space="buy", optimize=False)
     
     # Rolling Monte Carlo optimization (eliminates lookahead bias)
-    enable_rolling_mc_optimization = BooleanParameter(default=True, space="buy", optimize=False)
+    enable_rolling_mc_optimization = BooleanParameter(default=False, space="buy", optimize=False)
 
     # Minimal ROI designed for the strategy.
     minimal_roi = {
