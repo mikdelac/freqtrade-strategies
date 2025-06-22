@@ -221,3 +221,75 @@ class GARCHModel():
         
         # Return the square root of the final variance (volatility/standard deviation)
         return np.sqrt(self.variance)
+
+def run_garch_examples() -> None:
+    """
+    Run GARCH examples and risk calculations for demonstration purposes.
+    """
+    from .monte_carlo import MonteCarloSimulator
+    from ..risk_metrics.risk_indicators import RiskIndicators
+    from scipy.stats import norm, t
+    
+    print("--------------------------------")
+    print("--------------------------------")
+    print("Begin Default GARCH")        
+    print("---")
+
+    # Exemple d'utilisation
+    garch_model = GARCHModel()
+    risk_indicators = RiskIndicators()
+
+    # Example 1: Basic GARCH(1,1) with default parameters
+    simulated_returns = [0.07, 0.06, 0.05, 0.09]
+    np_array = np.array(simulated_returns)
+    # Calculate log returns on arithmetics returns
+    log_returns = np.log(1 + np_array)
+    # Calculate log returns based on price levels
+    #log_returns = np.log(prices[1:] / prices[:-1])
+
+    #df = 5  # Can be adjusted based on empirical data
+    #VaR_Z = t.ppf(1 - confidence_level, df) * std
+    confidence_level = 0.01
+    VaR_1_percent, ES_1_percent = risk_indicators.calculate_var_es(
+        simulated_returns=log_returns,
+        z_score=norm.ppf(1 - confidence_level),
+        std=garch_model.calculate_volatility(log_returns)
+    )
+    garch_model.reset_variance()
+    print(f"VaR à 1% sur 35 jours (simulation GARCH sans Monte Carlo): {VaR_1_percent:.4f} ({VaR_1_percent * 100:.2f}%)")
+    print(f"ES à 1% sur 35 jours (simulation GARCH sans Monte Carlo): {ES_1_percent:.4f} ({ES_1_percent * 100:.2f}%)")
+
+    print("--------------------------------")
+    print("Begin Monte Carlo with GARCH")        
+    print("---")
+
+    # Example 2: Monte Carlo simulation with GARCH using the new MonteCarloSimulator
+    monte_carlo = MonteCarloSimulator(garch_model)
+    simulated_returns = monte_carlo.simulate_with_garch(T=3, iterations=1000)
+    confidence_level = 0.01
+    VaR_1_percent, ES_1_percent = risk_indicators.calculate_var_es(
+        simulated_returns=simulated_returns,
+        z_score=norm.ppf(1 - confidence_level),
+        std=garch_model.calculate_volatility(simulated_returns)
+    )
+    print(f"VaR à 1% sur 3 jours avec 1000 simulations (GARCH avec Monte Carlo): {VaR_1_percent:.4f} ({VaR_1_percent * 100:.2f}%)")
+    print(f"ES à 1% sur 3 jours avec 1000 simulations (GARCH avec Monte Carlo): {ES_1_percent:.4f} ({ES_1_percent * 100:.2f}%)")
+    
+    # Example 3: Monte Carlo with custom distribution (Student's t)
+    print("--------------------------------")
+    print("Begin Monte Carlo with Student's t-distribution")        
+    print("---")
+    
+    simulated_returns_t = monte_carlo.simulate_with_custom_distribution(T=3, iterations=1000)
+    VaR_1_percent_t, ES_1_percent_t = risk_indicators.calculate_var_es(
+        simulated_returns=simulated_returns_t,
+        z_score=norm.ppf(1 - confidence_level),
+        std=garch_model.calculate_volatility(simulated_returns_t)
+    )
+    print(f"VaR à 1% sur 3 jours avec distribution t de Student: {VaR_1_percent_t:.4f} ({VaR_1_percent_t * 100:.2f}%)")
+    print(f"ES à 1% sur 3 jours avec distribution t de Student: {ES_1_percent_t:.4f} ({ES_1_percent_t * 100:.2f}%)")
+    
+    # Display simulation statistics
+    stats = monte_carlo.get_simulation_statistics(simulated_returns)
+    print(f"Statistiques de simulation - Moyenne: {stats['mean']:.4f}, Écart-type: {stats['std']:.4f}")
+    print(f"Skewness: {stats['skewness']:.4f}, Kurtosis: {stats['kurtosis']:.4f}")

@@ -544,3 +544,45 @@ class TrendAnalysis:
         
         return result
 
+    def find_and_map_swing_points(self, dataframe: pd.DataFrame, recent_data: pd.DataFrame) -> Tuple[List, List]:
+        """
+        Find swing points (highs and lows) and map them to the full dataframe.
+        
+        Args:
+            dataframe: Full dataframe to store swing points in
+            recent_data: Recent data to analyze
+            
+        Returns:
+            Tuple[List, List]: (mapped_highs, mapped_lows) for the full dataframe
+        """
+        # Find swing highs and lows in the recent data using the correct TrendAnalysis method
+        highs = self._find_swing_points(recent_data['high'].values, 'high', min_points=2, distance=5)
+        lows = self._find_swing_points(recent_data['low'].values, 'low', min_points=2, distance=5)
+        
+        # Initialize the swing point columns with NaN values matching the dataframe length exactly
+        dataframe.loc[:, 'all_highs'] = np.nan
+        dataframe.loc[:, 'all_lows'] = np.nan
+        
+        # Calculate the offset to map recent_data indices to dataframe indices
+        offset = len(dataframe) - len(recent_data)
+        
+        # Map swing highs
+        for idx, price in highs:
+            if 0 <= idx < len(recent_data):
+                mapped_index = offset + idx
+                if 0 <= mapped_index < len(dataframe):
+                    dataframe.loc[dataframe.index[mapped_index], 'all_highs'] = price
+        
+        # Map swing lows
+        for idx, price in lows:
+            if 0 <= idx < len(recent_data):
+                mapped_index = offset + idx
+                if 0 <= mapped_index < len(dataframe):
+                    dataframe.loc[dataframe.index[mapped_index], 'all_lows'] = price
+        
+        # Return the mapped arrays for backward compatibility
+        mapped_highs = dataframe['all_highs'].values.tolist()
+        mapped_lows = dataframe['all_lows'].values.tolist()
+        
+        return mapped_highs, mapped_lows
+
