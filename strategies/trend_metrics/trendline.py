@@ -126,6 +126,10 @@ def gentrends(dataframe, field="close", window=1 / 3.0, charts=False):
     trends = pd.DataFrame(
         trends, index=np.arange(0, len(x_data)), columns=["Data", "Max Line", "Min Line"]
     )
+    
+    # Add slope information to the DataFrame
+    trends['Max Slope'] = maxslope
+    trends['Min Slope'] = minslope
 
     if charts:
         from matplotlib.pyplot import close, grid, plot, savefig

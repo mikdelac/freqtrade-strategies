@@ -365,7 +365,7 @@ class RiskMetrics(IStrategy):
     ONE_HOUR_CANDLES = 12  # 12 candles = 60 minutes
     
     # Monte Carlo period optimization settings
-    MC_ITERATIONS = 1000
+    MC_ITERATIONS = 200
     MIN_LOOKBACK_PERIOD = 50
     # MAX_LOOKBACK_PERIOD will be set dynamically based on available data
     
@@ -428,8 +428,11 @@ class RiskMetrics(IStrategy):
     enable_convergence_detection = BooleanParameter(default=False, space="buy", optimize=False)
         
     # === New Periodic Monte Carlo Parameters ===
-    mc_recalc_interval_minutes = IntParameter(60, 480, default=240, space="buy", optimize=False)
+    mc_recalc_interval_minutes = IntParameter(60, 480, default=30, space="buy", optimize=False)
     mc_lookback_window_candles = IntParameter(1000, 3000, default=2000, space="buy", optimize=False)
+    
+    # Rolling Monte Carlo optimization (eliminates lookahead bias)
+    enable_rolling_mc_optimization = BooleanParameter(default=True, space="buy", optimize=False)
 
     # Minimal ROI designed for the strategy.
     minimal_roi = {
@@ -585,6 +588,13 @@ class RiskMetrics(IStrategy):
         print(f"  Signal generator: Initialized for modular signal generation")
         print(f"  Monte Carlo Manager: Initialized with {self.mc_recalc_interval_minutes.value}min recalc interval")
         print(f"  Modular Monte Carlo: Clean separation of concerns with specialized classes")
+        print(f"  Rolling Monte Carlo optimization: {'ENABLED' if self.enable_rolling_mc_optimization.value else 'DISABLED'}")
+        if self.enable_rolling_mc_optimization.value:
+            print(f"    - Eliminates lookahead bias for realistic backtesting")
+            print(f"    - Uses {self.mc_lookback_window_candles.value} candle lookback window")
+            print(f"    - Recalculates every {self.mc_recalc_interval_minutes.value} minutes")
+        else:
+            print(f"    - Using original method (faster but with potential lookahead bias)")
 
     def calculate_score_convergence_ratio(self, support_score: float, resistance_score: float) -> float:
         """
@@ -839,6 +849,7 @@ class RiskMetrics(IStrategy):
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
         Adds several different TA indicators to the given DataFrame, including ATR.
+        Now implements rolling Monte Carlo optimization to eliminate lookahead bias.
         """
         if len(dataframe) == 0:
             return dataframe
@@ -900,39 +911,177 @@ class RiskMetrics(IStrategy):
         # Initialize all required dataframe columns
         self._initialize_dataframe_columns(dataframe)
 
-        # === Periodic Monte Carlo Optimization Logic ===
+        # === Rolling Monte Carlo Optimization Logic (Eliminates Lookahead Bias) ===
+        recalc_interval_candles = self.mc_recalc_interval_minutes.value // timeframe_to_minutes(self.timeframe)
+        startup_candles = self.mc_lookback_window_candles.value
+        min_required_candles = max(self.MIN_LOOKBACK_PERIOD, 100)  # Use minimum required data instead of large startup window
         
-        # Execute Monte Carlo optimization using the manager
-        mc_results = self.monte_carlo_manager.execute_monte_carlo_optimization(
-            dataframe, metadata['pair'], self.enable_mc_optimization.value
-        )
-        
-        # Apply the results to the dataframe
-        self.monte_carlo_manager.apply_monte_carlo_results(dataframe, mc_results)
-        
-        # Process convergence analysis if we have results
-        if mc_results:
-            self._process_convergence_analysis(
-                dataframe, 
-                mc_results.get('resistance_score', 0.0), 
-                mc_results.get('support_score', 0.0)
+        # Check if rolling optimization is enabled
+        if not self.enable_rolling_mc_optimization.value:
+            print("=== Using Original Monte Carlo Optimization (with potential lookahead bias) ===")
+            # Execute Monte Carlo optimization using the manager (original method)
+            mc_results = self.monte_carlo_manager.execute_monte_carlo_optimization(
+                dataframe, metadata['pair'], self.enable_mc_optimization.value
             )
             
-            print(f"Applied Monte Carlo results for {metadata['pair']}:")
-            print(f"  Resistance Score: {mc_results.get('resistance_score', 0.0):.6f}")
-            print(f"  Support Score: {mc_results.get('support_score', 0.0):.6f}")
-            print(f"  Optimal Periods: R={mc_results.get('optimal_resistance_period', 0)}, S={mc_results.get('optimal_support_period', 0)}")
-        else:
-            print(f"Monte Carlo results not yet available for {metadata['pair']}.")
-            # Initialize with defaults if no results are available using proper pandas assignment
+            # Apply the results to the dataframe
+            self.monte_carlo_manager.apply_monte_carlo_results(dataframe, mc_results)
+            
+            # Process convergence analysis if we have results
+            if mc_results:
+                self._process_convergence_analysis_original(
+                    dataframe, 
+                    mc_results.get('resistance_score', 0.0), 
+                    mc_results.get('support_score', 0.0)
+                )
+                
+                print(f"Applied Monte Carlo results for {metadata['pair']}:")
+                print(f"  Resistance Score: {mc_results.get('resistance_score', 0.0):.6f}")
+                print(f"  Support Score: {mc_results.get('support_score', 0.0):.6f}")
+                print(f"  Optimal Periods: R={mc_results.get('optimal_resistance_period', 0)}, S={mc_results.get('optimal_support_period', 0)}")
+            else:
+                print(f"Monte Carlo results not yet available for {metadata['pair']}.")
+                # Initialize with defaults if no results are available using proper pandas assignment
+                dataframe.loc[:, 'MC_Resistance_Score'] = 0.0
+                dataframe.loc[:, 'MC_Support_Score'] = 0.0
+                dataframe.loc[:, 'score_convergence_ratio'] = 0.0
+                dataframe.loc[:, 'convergence_multiplier'] = 1.0
+                dataframe.loc[:, 'trading_mode_indicator'] = 0.0
+                dataframe.loc[:, 'trading_mode'] = "INSUFFICIENT_DATA"
+        
+        # Check if we have minimum required data for rolling optimization
+        elif len(dataframe) <= min_required_candles:
+            print(f"Not enough data for rolling Monte Carlo. Need at least {min_required_candles} candles, got {len(dataframe)}. Skipping Monte Carlo optimization.")
+            # Initialize with default values
             dataframe.loc[:, 'MC_Resistance_Score'] = 0.0
             dataframe.loc[:, 'MC_Support_Score'] = 0.0
             dataframe.loc[:, 'score_convergence_ratio'] = 0.0
             dataframe.loc[:, 'convergence_multiplier'] = 1.0
             dataframe.loc[:, 'trading_mode_indicator'] = 0.0
             dataframe.loc[:, 'trading_mode'] = "INSUFFICIENT_DATA"
+        else:
+            print("=== Using Rolling Monte Carlo Optimization (eliminates lookahead bias) ===")
+            last_mc_results = None
+            print(f"=== Starting Rolling Monte Carlo Analysis for {metadata['pair']} ===")
+            print(f"Recalc interval: {recalc_interval_candles} candles ({self.mc_recalc_interval_minutes.value} minutes)")
+            print(f"Lookback window: {self.mc_lookback_window_candles.value} candles")
+            print(f"Processing ALL {len(dataframe) - min_required_candles} candles starting from minimum required data ({min_required_candles})")
 
+            # --- State variables for projecting trendlines with slopes ---
+            last_resistance_value = np.nan
+            last_support_value = np.nan
+            current_resistance_slope = 0.0
+            current_support_slope = 0.0
+
+            # Start rolling optimization from minimum required data, not startup_candles
+            for i in range(min_required_candles, len(dataframe)):
+                # Determine if it is time to recalculate
+                should_recalculate = (i == min_required_candles) or ((i - min_required_candles) % recalc_interval_candles == 0)
+
+                if should_recalculate:
+                    print(f"Recalculating MC results at candle {i}/{len(dataframe)} ({(i/len(dataframe)*100):.1f}%)")
+                    # Define the lookback window for the current candle (point-in-time data only)
+                    # Use the smaller of: lookback window or all available data up to this point
+                    lookback_start = max(0, i - self.mc_lookback_window_candles.value)
+                    current_dataframe_slice = dataframe.iloc[lookback_start:i].copy()
+
+                    print(f"  Using data slice: {lookback_start} to {i} ({len(current_dataframe_slice)} candles)")
+
+                    # Execute MC optimization on the slice of data available at this point in time
+                    # Create a temporary manager to ensure no state from future data is used
+                    temp_mc_manager = MonteCarloManager(
+                        mc_iterations=self.MC_ITERATIONS,
+                        min_lookback_period=self.MIN_LOOKBACK_PERIOD,
+                        recalc_interval_minutes=0,  # Force recalc for temporary manager
+                        trendline_proximity_threshold=self.trendline_proximity_threshold.value,
+                        trend_analyzer=self.trend_analyzer,
+                        volatility_model=self.volatility_model,
+                        garch_model=self.garch_model
+                    )
                     
+                    mc_results = temp_mc_manager.execute_monte_carlo_optimization(
+                        current_dataframe_slice, metadata['pair'], self.enable_mc_optimization.value
+                    )
+                    
+                    if mc_results:
+                        last_mc_results = mc_results
+                        
+                        # Update slopes from the new MC results
+                        current_resistance_slope = mc_results.get('best_resistance_slope', 0.0)
+                        current_support_slope = mc_results.get('best_support_slope', 0.0)
+                        
+                        # Get the last valid value from the calculated lines as the starting point
+                        res_line = mc_results.get('resistance_line', np.array([]))
+                        valid_res = res_line[~np.isnan(res_line)]
+                        if len(valid_res) > 0:
+                            last_resistance_value = valid_res[-1]
+
+                        sup_line = mc_results.get('support_line', np.array([]))
+                        valid_sup = sup_line[~np.isnan(sup_line)]
+                        if len(valid_sup) > 0:
+                            last_support_value = valid_sup[-1]
+                        
+                        print(f"  New MC results: R_score={mc_results.get('resistance_score', 0):.4f}, S_score={mc_results.get('support_score', 0):.4f}")
+                        print(f"  Slopes: R_slope={current_resistance_slope:.6f}, S_slope={current_support_slope:.6f}")
+
+                # Project the trendlines forward using the slope (creating continuous sloped lines)
+                pandas_index = dataframe.index[i]
+                
+                if not np.isnan(last_resistance_value):
+                    # Project resistance line forward by adding slope
+                    last_resistance_value += current_resistance_slope
+                    dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = last_resistance_value
+                else:
+                    dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = np.nan
+                
+                if not np.isnan(last_support_value):
+                    # Project support line forward by adding slope
+                    last_support_value += current_support_slope
+                    dataframe.loc[pandas_index, 'MC_Optimal_Support'] = last_support_value
+                else:
+                    dataframe.loc[pandas_index, 'MC_Optimal_Support'] = np.nan
+                
+                # Apply scores and convergence analysis
+                if last_mc_results:
+                    # Apply scores to this specific row
+                    dataframe.loc[pandas_index, 'MC_Resistance_Score'] = last_mc_results.get('resistance_score', 0.0)
+                    dataframe.loc[pandas_index, 'MC_Support_Score'] = last_mc_results.get('support_score', 0.0)
+                    dataframe.loc[pandas_index, 'MC_Optimal_Period'] = last_mc_results.get('optimal_resistance_period', 0.0)
+                    
+                    # Process convergence analysis for this row
+                    self._process_convergence_analysis_for_row(
+                        dataframe, i,
+                        last_mc_results.get('resistance_score', 0.0),
+                        last_mc_results.get('support_score', 0.0)
+                    )
+                else:
+                    # No MC results available yet - initialize with defaults
+                    dataframe.loc[pandas_index, 'MC_Resistance_Score'] = 0.0
+                    dataframe.loc[pandas_index, 'MC_Support_Score'] = 0.0
+                    dataframe.loc[pandas_index, 'MC_Optimal_Period'] = 0.0
+                    dataframe.loc[pandas_index, 'score_convergence_ratio'] = 0.0
+                    dataframe.loc[pandas_index, 'convergence_multiplier'] = 1.0
+                    dataframe.loc[pandas_index, 'trading_mode_indicator'] = 0.0
+                    dataframe.loc[pandas_index, 'trading_mode'] = "INSUFFICIENT_DATA"
+
+            print(f"Rolling Monte Carlo optimization completed for {metadata['pair']}")
+            if last_mc_results:
+                print(f"Final results: R_score={last_mc_results.get('resistance_score', 0):.4f}, S_score={last_mc_results.get('support_score', 0):.4f}")
+                print(f"Final slopes: R_slope={current_resistance_slope:.6f}, S_slope={current_support_slope:.6f}")
+                
+            # Initialize the early candles that couldn't be processed with rolling optimization
+            for i in range(0, min_required_candles):
+                pandas_index = dataframe.index[i]
+                dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = np.nan
+                dataframe.loc[pandas_index, 'MC_Optimal_Support'] = np.nan
+                dataframe.loc[pandas_index, 'MC_Resistance_Score'] = 0.0
+                dataframe.loc[pandas_index, 'MC_Support_Score'] = 0.0
+                dataframe.loc[pandas_index, 'MC_Optimal_Period'] = 0.0
+                dataframe.loc[pandas_index, 'score_convergence_ratio'] = 0.0
+                dataframe.loc[pandas_index, 'convergence_multiplier'] = 1.0
+                dataframe.loc[pandas_index, 'trading_mode_indicator'] = 0.0
+                dataframe.loc[pandas_index, 'trading_mode'] = "INSUFFICIENT_DATA"
+
         # Calculate linear regression trendlines using TA-Lib
         try:
             # Get appropriate timeperiod for linear regression
@@ -975,6 +1124,81 @@ class RiskMetrics(IStrategy):
             
         return dataframe
 
+    def _process_convergence_analysis_for_row(self, dataframe: DataFrame, index: int,
+                                              raw_resistance_score: float,
+                                              raw_support_score: float) -> None:
+        """
+        Process volatility regime and convergence analysis, storing results in a specific row.
+        
+        Args:
+            dataframe: DataFrame to store analysis results
+            index: The row index to store results in
+            raw_resistance_score: Raw resistance score from Monte Carlo
+            raw_support_score: Raw support score from Monte Carlo
+        """
+        convergence_ratio = self.calculate_score_convergence_ratio(raw_support_score, raw_resistance_score)
+        convergence_multiplier = self.get_convergence_multiplier(convergence_ratio)
+        trading_mode = self.get_trading_mode(convergence_ratio)
+        
+        trading_mode_mapping = {
+            "NORMAL_BOUNCE": 1.0, "LOW_CONVERGENCE": 2.0,
+            "MEDIUM_CONVERGENCE": 3.0, "HIGH_CONVERGENCE": 4.0
+        }
+        trading_mode_indicator = trading_mode_mapping.get(trading_mode, 0.0)
+        
+        pandas_index = dataframe.index[index]
+        dataframe.loc[pandas_index, 'score_convergence_ratio'] = convergence_ratio
+        dataframe.loc[pandas_index, 'convergence_multiplier'] = convergence_multiplier
+        dataframe.loc[pandas_index, 'trading_mode_indicator'] = trading_mode_indicator
+        dataframe.loc[pandas_index, 'trading_mode'] = trading_mode
+
+    def _process_convergence_analysis_original(self, dataframe: DataFrame, 
+                                             raw_resistance_score: float, 
+                                             raw_support_score: float) -> None:
+        """
+        Process volatility regime and convergence analysis, storing results in dataframe.
+        This is the original method used when rolling optimization is disabled.
+        
+        Args:
+            dataframe: DataFrame to store analysis results
+            raw_resistance_score: Raw resistance score from Monte Carlo
+            raw_support_score: Raw support score from Monte Carlo
+        """
+        print("=== Trendlines Score Convergence Analysis (Original Method) ===")
+        
+        # Calculate convergence ratio between MC scores
+        convergence_ratio = self.calculate_score_convergence_ratio(raw_support_score, raw_resistance_score)
+        convergence_multiplier = self.get_convergence_multiplier(convergence_ratio)
+        trading_mode = self.get_trading_mode(convergence_ratio)
+        
+        # Convert trading mode to numeric indicator for plotting
+        trading_mode_mapping = {
+            "NORMAL_BOUNCE": 1.0,
+            "LOW_CONVERGENCE": 2.0,
+            "MEDIUM_CONVERGENCE": 3.0,
+            "HIGH_CONVERGENCE": 4.0
+        }
+        trading_mode_indicator = trading_mode_mapping.get(trading_mode, 0.0)
+        
+        # Store convergence metrics in dataframe
+        dataframe.loc[:, 'score_convergence_ratio'] = convergence_ratio
+        dataframe.loc[:, 'convergence_multiplier'] = convergence_multiplier
+        dataframe.loc[:, 'trading_mode_indicator'] = trading_mode_indicator
+        dataframe.loc[:, 'trading_mode'] = trading_mode
+        
+        # Log convergence analysis results
+        print(f"Score Convergence Analysis Results:")
+        print(f"  Support Score: {raw_support_score:.6f}")
+        print(f"  Resistance Score: {raw_resistance_score:.6f}")
+        print(f"  Convergence Ratio: {convergence_ratio:.3f}")
+        print(f"  Convergence Multiplier: {convergence_multiplier:.3f}")
+        print(f"  Trading Mode: {trading_mode}")
+        print(f"  Trading Mode Indicator: {trading_mode_indicator}")
+        
+        # Get detailed breakout scenario analysis
+        breakout_analysis = self.detect_breakout_scenario(dataframe)
+        print(f"  Breakout Analysis: {breakout_analysis['recommendation']}")
+
     def _initialize_dataframe_columns(self, dataframe: DataFrame) -> None:
         """
         Initialize all required columns in the dataframe with default values.
@@ -1010,56 +1234,11 @@ class RiskMetrics(IStrategy):
             dataframe.loc[:, f'Max_Line_{i}'] = np.nan
             dataframe.loc[:, f'Min_Line_{i}'] = np.nan
 
-    def _process_convergence_analysis(self, dataframe: DataFrame, 
-                                                   raw_resistance_score: float, 
-                                                   raw_support_score: float) -> None:
-        """
-        Process volatility regime and convergence analysis, storing results in dataframe.
-        
-        Args:
-            dataframe: DataFrame to store analysis results
-            raw_resistance_score: Raw resistance score from Monte Carlo
-            raw_support_score: Raw support score from Monte Carlo
-        """
-        print("=== Trendlines Score Convergence Analysis ===")
-        
-        # Calculate convergence ratio between MC scores
-        convergence_ratio = self.calculate_score_convergence_ratio(raw_support_score, raw_resistance_score)
-        convergence_multiplier = self.get_convergence_multiplier(convergence_ratio)
-        trading_mode = self.get_trading_mode(convergence_ratio)
-        
-        # Convert trading mode to numeric indicator for plotting
-        trading_mode_mapping = {
-            "NORMAL_BOUNCE": 1.0,
-            "LOW_CONVERGENCE": 2.0,
-            "MEDIUM_CONVERGENCE": 3.0,
-            "HIGH_CONVERGENCE": 4.0
-        }
-        trading_mode_indicator = trading_mode_mapping.get(trading_mode, 0.0)
-        
-        # Store convergence metrics in dataframe
-        dataframe.loc[:, 'score_convergence_ratio'] = convergence_ratio
-        dataframe.loc[:, 'convergence_multiplier'] = convergence_multiplier
-        dataframe.loc[:, 'trading_mode_indicator'] = trading_mode_indicator
-        dataframe.loc[:, 'trading_mode'] = trading_mode
-        
-        # Log convergence analysis results
-        print(f"Score Convergence Analysis Results:")
-        print(f"  Support Score: {raw_support_score:.6f}")
-        print(f"  Resistance Score: {raw_resistance_score:.6f}")
-        print(f"  Convergence Ratio: {convergence_ratio:.3f}")
-        print(f"  Convergence Multiplier: {convergence_multiplier:.3f}")
-        print(f"  Trading Mode: {trading_mode}")
-        print(f"  Trading Mode Indicator: {trading_mode_indicator}")
-        
-        # Get detailed breakout scenario analysis
-        breakout_analysis = self.detect_breakout_scenario(dataframe)
-        print(f"  Breakout Analysis: {breakout_analysis['recommendation']}")
-
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
         Generate entry signals using the modular SignalGenerator.
         Bounce Trading Strategy Implementation using Price Extrema with Convergence Detection.
+        Now uses historically accurate rolling Monte Carlo calculations - no lookahead bias.
         """
         return self.signal_generator.generate_entry_signals(dataframe)
 
@@ -1067,6 +1246,7 @@ class RiskMetrics(IStrategy):
         """
         Generate exit signals using the modular SignalGenerator.
         Enhanced exit signals for bounce trading with cross-signal exits.
+        Now uses historically accurate rolling Monte Carlo calculations - no lookahead bias.
         """
         return self.signal_generator.generate_exit_signals(dataframe)
 

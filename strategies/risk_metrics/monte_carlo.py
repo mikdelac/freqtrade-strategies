@@ -484,10 +484,16 @@ class TrendlineMonteCarloOptimizer:
         resistance_score = main_lines_score["ranked_maxlines"].get("Max Line", 0)
         support_score = main_lines_score["ranked_minlines"].get("Min Line", 0)
         
+        # Extract slope from the trends dataframe - gentrends now provides these columns
+        resistance_slope = trends['Max Slope'].iloc[-1] if 'Max Slope' in trends.columns else 0.0
+        support_slope = trends['Min Slope'].iloc[-1] if 'Min Slope' in trends.columns else 0.0
+        
         return {
             'trends': trends,
             'resistance_score': resistance_score,
             'support_score': support_score,
+            'resistance_slope': resistance_slope,
+            'support_slope': support_slope,
             'high_swing_points': high_swing_points,
             'low_swing_points': low_swing_points
         }
@@ -536,6 +542,8 @@ class TrendlineMonteCarloOptimizer:
         best_support_period = self.min_lookback_period
         best_resistance_line = np.full(len(dataframe), np.nan)
         best_support_line = np.full(len(dataframe), np.nan)
+        best_resistance_slope = 0.0
+        best_support_slope = 0.0
         
         # Store all tested periods and scores for analysis
         tested_periods = []
@@ -580,6 +588,8 @@ class TrendlineMonteCarloOptimizer:
                             resistance_line[current_idx] = trends['Max Line'].iloc[i]
                     best_resistance_line = resistance_line
                     
+                    best_resistance_slope = trendline_results['resistance_slope']
+                    
                     print(f"New best resistance found for {pair} at iteration {iteration + 1}: period {random_period}, score {current_resistance_score:.4f}")
                 
                 # Check if this is the best support line so far
@@ -595,6 +605,8 @@ class TrendlineMonteCarloOptimizer:
                         if current_idx < len(dataframe):
                             support_line[current_idx] = trends['Min Line'].iloc[i]
                     best_support_line = support_line
+                    
+                    best_support_slope = trendline_results['support_slope']
                     
                     print(f"New best support found for {pair} at iteration {iteration + 1}: period {random_period}, score {current_support_score:.4f}")
                 
@@ -634,7 +646,9 @@ class TrendlineMonteCarloOptimizer:
             'all_resistance_scores': resistance_scores,
             'all_support_scores': support_scores,
             'max_lookback_period': max_lookback_period,
-            'period_distribution': period_counts
+            'period_distribution': period_counts,
+            'best_resistance_slope': best_resistance_slope,
+            'best_support_slope': best_support_slope
         }
 
 
@@ -801,6 +815,52 @@ class MonteCarloManager:
         dataframe.loc[:, 'MC_Resistance_Score'] = mc_results.get('resistance_score', 0.0)
         dataframe.loc[:, 'MC_Support_Score'] = mc_results.get('support_score', 0.0)
         dataframe.loc[:, 'MC_Optimal_Period'] = mc_results.get('optimal_resistance_period', 0.0)
+    
+    def apply_monte_carlo_results_to_row(self, dataframe: pd.DataFrame, row_index: int, mc_results: Dict[str, Any]) -> None:
+        """
+        Apply Monte Carlo results to a specific row of the dataframe for rolling analysis.
+        This method is used during historical backtesting to apply trendlines calculated
+        with point-in-time data only.
+        
+        Args:
+            dataframe: DataFrame to apply results to
+            row_index: Specific row index to update
+            mc_results: Monte Carlo optimization results
+        """
+        if not mc_results or row_index >= len(dataframe):
+            return
+        
+        # Get the actual pandas index for the row
+        pandas_index = dataframe.index[row_index]
+        
+        # Apply resistance line value if available
+        if 'resistance_line' in mc_results:
+            resistance_line = mc_results['resistance_line']
+            # Get the last valid value from the resistance line (most recent trendline value)
+            resistance_value = np.nan
+            if len(resistance_line) > 0:
+                # Find the last non-NaN value in the resistance line
+                valid_resistance = resistance_line[~np.isnan(resistance_line)]
+                if len(valid_resistance) > 0:
+                    resistance_value = valid_resistance[-1]
+            dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = resistance_value
+            
+        # Apply support line value if available
+        if 'support_line' in mc_results:
+            support_line = mc_results['support_line']
+            # Get the last valid value from the support line (most recent trendline value)
+            support_value = np.nan
+            if len(support_line) > 0:
+                # Find the last non-NaN value in the support line
+                valid_support = support_line[~np.isnan(support_line)]
+                if len(valid_support) > 0:
+                    support_value = valid_support[-1]
+            dataframe.loc[pandas_index, 'MC_Optimal_Support'] = support_value
+        
+        # Apply scores to the specific row
+        dataframe.loc[pandas_index, 'MC_Resistance_Score'] = mc_results.get('resistance_score', 0.0)
+        dataframe.loc[pandas_index, 'MC_Support_Score'] = mc_results.get('support_score', 0.0)
+        dataframe.loc[pandas_index, 'MC_Optimal_Period'] = mc_results.get('optimal_resistance_period', 0.0)
     
     # Expose cache methods for external access
     def get_pair_results(self, pair: str) -> Dict[str, Any]:
