@@ -33,10 +33,9 @@ def generate_bounce_conditions(close_data, level_data, direction: str, tolerance
             (close_data > level_data) &
             # Previous candle had a pivot low (swing low extrema)
             (~pivot_lows.shift(1).isna()) &
-            # Previous pivot low was at or near support but ABOVE it (within tolerance, rejected)
-            (pivot_lows.shift(1) >= level_data.shift(1)) &  # Pivot low is above or at support
+            # Previous pivot low was close to support (allows piercing)
             (abs(pivot_lows.shift(1) - level_data.shift(1)) <= 
-             level_data.shift(1) * tolerance) &  # But close enough to be considered a test
+             level_data.shift(1) * tolerance) &  # Close enough to be considered a test
             # Current close is higher than previous close (upward movement)
             (close_data > close_data.shift(1)) &
             # Level data is valid
@@ -53,10 +52,9 @@ def generate_bounce_conditions(close_data, level_data, direction: str, tolerance
             (close_data < level_data) &
             # Previous candle had a pivot high (swing high extrema)
             (~pivot_highs.shift(1).isna()) &
-            # Previous pivot high was at or near resistance but BELOW it (within tolerance, rejected)
-            (pivot_highs.shift(1) <= level_data.shift(1)) &  # Pivot high is below or at resistance
+            # Previous pivot high was close to resistance (allows piercing)
             (abs(pivot_highs.shift(1) - level_data.shift(1)) <= 
-             level_data.shift(1) * tolerance) &  # But close enough to be considered a test
+             level_data.shift(1) * tolerance) &  # Close enough to be considered a test
             # Current close is lower than previous close (downward movement)
             (close_data < close_data.shift(1)) &
             # Level data is valid
