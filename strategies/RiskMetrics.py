@@ -369,7 +369,7 @@ class RiskMetrics(IStrategy):
     ONE_HOUR_CANDLES = 12  # 12 candles = 60 minutes
     
     # Monte Carlo period optimization settings
-    MC_ITERATIONS = 200
+    MC_ITERATIONS = 600
     MIN_LOOKBACK_PERIOD = 50
     # MAX_LOOKBACK_PERIOD will be set dynamically based on available data
     
@@ -432,7 +432,7 @@ class RiskMetrics(IStrategy):
     enable_convergence_detection = BooleanParameter(default=False, space="buy", optimize=False)
         
     # === New Periodic Monte Carlo Parameters ===
-    mc_recalc_interval_minutes = IntParameter(60, 480, default=MINUTES_PER_CANDLE * 30, space="buy", optimize=False)
+    mc_recalc_interval_minutes = IntParameter(60, 480, default=MINUTES_PER_CANDLE * 60, space="buy", optimize=False)
     mc_lookback_window_candles = IntParameter(1000, 3000, default=2000, space="buy", optimize=False)
     
     # Rolling Monte Carlo optimization (eliminates lookahead bias)
@@ -552,7 +552,8 @@ class RiskMetrics(IStrategy):
                 "Monte Carlo Optimization": {
                     "MC_Resistance_Score": {"color": "darkred", "type": "line", "width": 3.0},
                     "MC_Support_Score": {"color": "darkgreen", "type": "line", "width": 3.0},
-                    "MC_Optimal_Period": {"color": "orange", "type": "line", "width": 1.5}
+                    "MC_Optimal_Resistance_Period": {"color": "red", "type": "line", "width": 1.5},
+                    "MC_Optimal_Support_Period": {"color": "green", "type": "line", "width": 1.5}
                 },
                 "Bounce Analysis": {
                     "resistance_bounce_count": {"color": "darkred", "type": "line", "width": 2.0},
@@ -1111,7 +1112,8 @@ class RiskMetrics(IStrategy):
                     # Apply scores to this specific row
                     dataframe.loc[pandas_index, 'MC_Resistance_Score'] = last_mc_results.get('resistance_score', 0.0)
                     dataframe.loc[pandas_index, 'MC_Support_Score'] = last_mc_results.get('support_score', 0.0)
-                    dataframe.loc[pandas_index, 'MC_Optimal_Period'] = last_mc_results.get('optimal_resistance_period', 0.0)
+                    dataframe.loc[pandas_index, 'MC_Optimal_Resistance_Period'] = last_mc_results.get('optimal_resistance_period', 0.0)
+                    dataframe.loc[pandas_index, 'MC_Optimal_Support_Period'] = last_mc_results.get('optimal_support_period', 0.0)
                     
                     # Process convergence analysis for this row
                     self._process_convergence_analysis_for_row(
@@ -1123,7 +1125,8 @@ class RiskMetrics(IStrategy):
                     # No MC results available yet - initialize with defaults
                     dataframe.loc[pandas_index, 'MC_Resistance_Score'] = 0.0
                     dataframe.loc[pandas_index, 'MC_Support_Score'] = 0.0
-                    dataframe.loc[pandas_index, 'MC_Optimal_Period'] = 0.0
+                    dataframe.loc[pandas_index, 'MC_Optimal_Resistance_Period'] = 0.0
+                    dataframe.loc[pandas_index, 'MC_Optimal_Support_Period'] = 0.0
                     dataframe.loc[pandas_index, 'score_convergence_ratio'] = 0.0
                     dataframe.loc[pandas_index, 'convergence_multiplier'] = 1.0
                     dataframe.loc[pandas_index, 'trading_mode_indicator'] = 0.0
@@ -1141,7 +1144,8 @@ class RiskMetrics(IStrategy):
                 dataframe.loc[pandas_index, 'MC_Optimal_Support'] = np.nan
                 dataframe.loc[pandas_index, 'MC_Resistance_Score'] = 0.0
                 dataframe.loc[pandas_index, 'MC_Support_Score'] = 0.0
-                dataframe.loc[pandas_index, 'MC_Optimal_Period'] = 0.0
+                dataframe.loc[pandas_index, 'MC_Optimal_Resistance_Period'] = 0.0
+                dataframe.loc[pandas_index, 'MC_Optimal_Support_Period'] = 0.0
                 dataframe.loc[pandas_index, 'score_convergence_ratio'] = 0.0
                 dataframe.loc[pandas_index, 'convergence_multiplier'] = 1.0
                 dataframe.loc[pandas_index, 'trading_mode_indicator'] = 0.0

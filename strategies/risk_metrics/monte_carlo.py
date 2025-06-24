@@ -513,7 +513,7 @@ class TrendlineMonteCarloOptimizer:
         """
         # Set MAX_LOOKBACK_PERIOD dynamically based on available data
         total_candles = len(dataframe)
-        max_lookback_period = min(total_candles, 1000)  # Fixed max instead of garch_max_candles
+        max_lookback_period = total_candles
         
         if total_candles < self.min_lookback_period:
             print(f"Not enough data for Monte Carlo optimization. Need at least {self.min_lookback_period} candles, got {total_candles}.")
