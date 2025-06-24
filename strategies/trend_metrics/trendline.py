@@ -239,395 +239,264 @@ def segtrends(dataframe, field="close", segments=2, charts=False):
 
 def rank_trendlines(trends, price_field="Data", threshold=0.01, max_prefix="Max_Line_", min_prefix="Min_Line_", all_highs=None, all_lows=None, pivot_bonus=5.0):
     """
-    Ranks trendlines based on the number of bounces off the trendline using the same
-    bounce detection logic as generate_bounce_conditions from RiskMetrics.py.
+    Ranks trendlines based purely on bounce quality using generate_bounce_conditions.
     
-    A bounce is defined as:
-    1. Price approaches the trendline (within threshold)
-    2. Price forms a swing point (pivot) near the trendline
-    3. Price then moves away from the trendline in the expected direction
+    Scoring System based on professional trendline analysis:
+    - Number of bounces: More bounces = higher score
+    - Precision of bounces: Closer to trendline = higher score
+    - Distribution of bounces: Well-distributed bounces across trendline length = higher score
     
-    For resistance lines (maxlines): 
-    - Price approaches from below, forms a swing high near the line, then moves back down
-    
-    For support lines (minlines):
-    - Price approaches from above, forms a swing low near the line, then moves back up
-    
-    This scoring method is consistent with the bounce detection used in signal generation.
-    
-    Enhanced with distribution analysis:
-    - Trendlines with bounces spread across their length get higher scores
-    - Length coverage bonus rewards trendlines with good distribution
-    - Spacing quality score rewards even distribution rather than clustering
-    
-    :param trends: DataFrame containing price data and trendlines
-    :param price_field: Column name for price data (default: "Data")
-    :param threshold: Proximity threshold as a percentage (default: 0.01 or 1%)
-    :param max_prefix: Prefix for maxline columns (default: "Max_Line_")
-    :param min_prefix: Prefix for minline columns (default: "Min_Line_")
-    :param all_highs: Series or DataFrame column with high pivot points (default: None)
-    :param all_lows: Series or DataFrame column with low pivot points (default: None)
-    :param pivot_bonus: Multiplier for bonus points when bounces occur at pivot points (default: 5.0)
-    :return: Dictionary with ranked maxlines and minlines
+    Args:
+        trends: DataFrame containing price data and trendlines
+        price_field: Column name for price data (default: "Data")
+        threshold: Proximity threshold as a percentage (default: 0.01 or 1%)
+        max_prefix: Prefix for maxline columns (default: "Max_Line_")
+        min_prefix: Prefix for minline columns (default: "Min_Line_")
+        all_highs: Series with high pivot points (REQUIRED)
+        all_lows: Series with low pivot points (REQUIRED)
+        pivot_bonus: Not used in this simplified version
+        
+    Returns:
+        Dictionary with ranked maxlines and minlines based on bounce quality
     """
     import pandas as pd
     import numpy as np
     
-    # --- Initialization ---
-    trendlines = {
+    # Validate required inputs
+    if all_highs is None or all_lows is None:
+        print("ERROR: all_highs and all_lows pivot points are required for bounce analysis")
+        return {"ranked_maxlines": {}, "ranked_minlines": {}}
+    
+    if len(trends) == 0:
+        print("ERROR: Empty trends DataFrame")
+        return {"ranked_maxlines": {}, "ranked_minlines": {}}
+    
+    # Get price data
+    if price_field not in trends.columns:
+        print(f"ERROR: Price field '{price_field}' not found in trends DataFrame")
+        return {"ranked_maxlines": {}, "ranked_minlines": {}}
+    
+    price_data = trends[price_field]
+    n_points = len(price_data)
+    
+    print(f"=== BOUNCE-BASED TRENDLINE RANKING ===")
+    print(f"Analyzing {n_points} data points with threshold {threshold:.3f}")
+    
+    # Prepare pivot points as pandas Series
+    def prepare_pivot_series(pivot_points, n_points):
+        """Convert pivot points to properly indexed pandas Series"""
+        if pivot_points is None:
+            return pd.Series([np.nan] * n_points, index=price_data.index)
+        
+        # Ensure we have a pandas Series with the right index
+        if hasattr(pivot_points, 'reindex'):
+            return pivot_points.reindex(price_data.index, fill_value=np.nan)
+        else:
+            # Convert to Series if it's not already
+            series = pd.Series(pivot_points, index=price_data.index[:len(pivot_points)])
+            return series.reindex(price_data.index, fill_value=np.nan)
+    
+    pivot_highs_series = prepare_pivot_series(all_highs, n_points)
+    pivot_lows_series = prepare_pivot_series(all_lows, n_points)
+    
+    # Define trendline categories
+    trendline_categories = {
         'resistance': {
             'columns': [col for col in trends.columns if col.startswith(max_prefix) or col == "Max Line"],
             'scores': {},
-            'pivot_points': all_highs,  # Resistance lines should use high pivots
+            'direction': 'short'  # Bounce off resistance = short signal
         },
         'support': {
             'columns': [col for col in trends.columns if col.startswith(min_prefix) or col == "Min Line"],
             'scores': {},
-            'pivot_points': all_lows,  # Support lines should use low pivots
+            'direction': 'long'   # Bounce off support = long signal
         }
     }
     
-    # Total number of datapoints
-    n_points = len(trends)
-    
-    # Calculate recency weights - newer bounces are more valuable
-    recency_weights = np.linspace(1.0, 3.0, n_points)
-    
-    # --- Distribution Analysis Helper Functions ---
-    def calculate_distribution_metrics(bounce_positions, total_length):
-        """
-        Calculate distribution quality metrics for bounce positions along trendline.
-        
-        Args:
-            bounce_positions: List of positions where bounces occurred
-            total_length: Total length of the trendline data
-            
-        Returns:
-            Dict with distribution metrics
-        """
-        if len(bounce_positions) == 0:
-            return {
-                'coverage_ratio': 0.0,
-                'distribution_quality': 0.0,
-                'spacing_uniformity': 0.0,
-                'length_bonus': 0.0
-            }
-        
-        # Convert to numpy array and sort
-        positions = np.array(sorted(bounce_positions))
-        
-        # Calculate coverage ratio (how much of the trendline length is covered)
-        if len(positions) >= 2:
-            coverage_span = positions[-1] - positions[0]
-            coverage_ratio = coverage_span / max(total_length - 1, 1)
-        else:
-            coverage_ratio = 0.1  # Single bounce gets minimal coverage
-        
-        # Calculate distribution quality based on how evenly bounces are spaced
-        distribution_quality = 0.0
-        spacing_uniformity = 0.0
-        
-        if len(positions) >= 2:
-            # Calculate gaps between consecutive bounces
-            gaps = np.diff(positions)
-            
-            # Ideal gap would be evenly distributed
-            ideal_gap = coverage_span / (len(positions) - 1) if len(positions) > 1 else 0
-            
-            if ideal_gap > 0:
-                # Calculate how close actual gaps are to ideal gaps
-                gap_deviations = np.abs(gaps - ideal_gap) / ideal_gap
-                spacing_uniformity = max(0, 1.0 - np.mean(gap_deviations))
-            
-            # Distribution quality combines coverage and uniformity
-            distribution_quality = (coverage_ratio * 0.6) + (spacing_uniformity * 0.4)
-        
-        # Length bonus: More bounces across longer span = exponential bonus
-        if len(positions) >= 3 and coverage_ratio > 0.5:
-            length_bonus = (len(positions) * coverage_ratio) ** 1.5
-        else:
-            length_bonus = 0.0
-        
-        return {
-            'coverage_ratio': coverage_ratio,
-            'distribution_quality': distribution_quality,
-            'spacing_uniformity': spacing_uniformity,
-            'length_bonus': length_bonus
-        }
-    
-    def get_trendline_active_range(trendline_data):
-        """
-        Get the active range of a trendline (where it has valid values).
-        
-        Args:
-            trendline_data: Series with trendline values
-            
-        Returns:
-            Tuple of (start_idx, end_idx) for active range
-        """
-        valid_mask = ~trendline_data.isna()
-        if not valid_mask.any():
-            return 0, 0
-        
-        valid_indices = np.where(valid_mask)[0]
-        return valid_indices[0], valid_indices[-1]
-    
-    # --- Prepare pivot point arrays ---
-    def prepare_pivot_array(pivot_points, n_points):
-        """Helper function to prepare pivot point arrays with consistent length"""
-        if pivot_points is None or pivot_points.isna().all():
-            return None
-            
-        # Keep as pandas Series instead of converting to numpy array
-        series = pivot_points.reset_index(drop=True)
-        
-        if len(series) > n_points:
-            # Truncate to n_points and maintain Series structure
-            return series.iloc[:n_points]
-        elif len(series) < n_points:
-            # Pad with NaN values and maintain Series structure
-            padding = pd.Series([np.nan] * (n_points - len(series)))
-            return pd.concat([series, padding], ignore_index=True)
-        return series
-    
-    # Prepare pivot arrays once
-    prepared_pivots = {
-        'highs': prepare_pivot_array(all_highs, n_points),
-        'lows': prepare_pivot_array(all_lows, n_points)
-    }
-    
-    # --- Calculate bounce scores for each trendline ---
-    # Generate bounce conditions using the existing helper function
-    for trendline_type, config in trendlines.items():
+    # === BOUNCE ANALYSIS FOR EACH TRENDLINE ===
+    for trendline_type, config in trendline_categories.items():
         columns = config['columns']
         scores = config['scores']
+        direction = config['direction']
         
-        # Get the appropriate pivot points for this trendline type
-        pivot_points = prepared_pivots['highs'] if trendline_type == 'resistance' else prepared_pivots['lows']
+        print(f"\n--- Analyzing {trendline_type.upper()} Lines ---")
         
         for col in columns:
-            # Skip columns with all NaN values
-            if trends[col].isna().all():
+            if col not in trends.columns:
                 continue
                 
-            # Get price and trendline data
-            price_data = trends[price_field]
             trendline_data = trends[col]
             
-            # Get active range of trendline
-            start_idx, end_idx = get_trendline_active_range(trendline_data)
-            active_length = max(end_idx - start_idx + 1, 1)
+            # Skip trendlines with all NaN values
+            if trendline_data.isna().all():
+                scores[col] = 0.0
+                continue
             
-            # Generate bounce conditions using the centralized function
-            if trendline_type == 'resistance':
-                bounce_conditions = generate_bounce_conditions(
-                    price_data, trendline_data, 'short', threshold, prepared_pivots['highs'], prepared_pivots['lows']
-                )
-            else:  # support
-                bounce_conditions = generate_bounce_conditions(
-                    price_data, trendline_data, 'long', threshold, prepared_pivots['highs'], prepared_pivots['lows']
-                )
+            print(f"\nEvaluating {col}:")
             
-            # Calculate score based on bounces
-            total_score = 0
+            # === STEP 1: DETECT BOUNCES ===
+            try:
+                bounce_conditions = generate_bounce_conditions(
+                    close_data=price_data,
+                    level_data=trendline_data,
+                    direction=direction,
+                    tolerance=threshold,
+                    pivot_highs=pivot_highs_series,
+                    pivot_lows=pivot_lows_series
+                )
+            except Exception as e:
+                print(f"  ERROR detecting bounces: {e}")
+                scores[col] = 0.0
+                continue
+            
+            # Get bounce indices
             bounce_indices = bounce_conditions[bounce_conditions].index
+            bounce_count = len(bounce_indices)
             
-            # Convert bounce indices to positions for distribution analysis
-            bounce_positions = [bounce_conditions.index.get_loc(idx) for idx in bounce_indices]
+            if bounce_count == 0:
+                print(f"  No bounces detected")
+                scores[col] = 0.0
+                continue
             
-            # === MAJOR SCORING COMPONENT: Count Respecting Pivots ===
-            # This is the most important scoring factor - how many pivots respect this trendline
-            respecting_pivots_score = 0
-            respecting_pivots_count = 0
-            respecting_pivot_positions = []
+            print(f"  Found {bounce_count} bounces")
             
-            if pivot_points is not None:
-                valid_pivot_indices = np.where(~np.isnan(pivot_points))[0]
-                
-                for pivot_idx in valid_pivot_indices:
-                    if pivot_idx >= len(trendline_data):
-                        continue
-                        
-                    pivot_value = pivot_points[pivot_idx]
-                    trendline_value = trendline_data.iloc[pivot_idx]
-                    
-                    if pd.isna(trendline_value) or pd.isna(pivot_value) or pivot_value <= 0:
-                        continue
-                    
-                    # Check if this pivot respects the trendline
-                    if trendline_type == 'resistance':
-                        # For resistance: pivot high should be BELOW the resistance line
-                        if pivot_value <= trendline_value:
-                            # Calculate how close the pivot is to the resistance
-                            distance_pct = abs(trendline_value - pivot_value) / trendline_value
-                            
-                            # Award points based on proximity (closer = more points)
-                            proximity_factor = max(0, 1.0 - (distance_pct / (threshold * 3)))  # Extended range for pivots
-                            
-                            # Base points for respecting pivot
-                            base_pivot_points = 50.0  # Much higher than bounce points
-                            
-                            # Bonus for very close pivots (within threshold)
-                            if distance_pct <= threshold:
-                                proximity_bonus = 25.0 * (1.0 - distance_pct / threshold)
-                            else:
-                                proximity_bonus = 0
-                            
-                            # Apply recency weighting
-                            recency_factor = recency_weights[min(pivot_idx, len(recency_weights)-1)]
-                            
-                            pivot_score = (base_pivot_points + proximity_bonus) * proximity_factor * recency_factor
-                            respecting_pivots_score += pivot_score
-                            respecting_pivots_count += 1
-                            respecting_pivot_positions.append(pivot_idx)
-                            
-                    else:  # support
-                        # For support: pivot low should be ABOVE the support line
-                        if pivot_value >= trendline_value:
-                            # Calculate how close the pivot is to the support
-                            distance_pct = abs(pivot_value - trendline_value) / trendline_value
-                            
-                            # Award points based on proximity (closer = more points)
-                            proximity_factor = max(0, 1.0 - (distance_pct / (threshold * 3)))  # Extended range for pivots
-                            
-                            # Base points for respecting pivot
-                            base_pivot_points = 50.0  # Much higher than bounce points
-                            
-                            # Bonus for very close pivots (within threshold)
-                            if distance_pct <= threshold:
-                                proximity_bonus = 25.0 * (1.0 - distance_pct / threshold)
-                            else:
-                                proximity_bonus = 0
-                            
-                            # Apply recency weighting
-                            recency_factor = recency_weights[min(pivot_idx, len(recency_weights)-1)]
-                            
-                            pivot_score = (base_pivot_points + proximity_bonus) * proximity_factor * recency_factor
-                            respecting_pivots_score += pivot_score
-                            respecting_pivots_count += 1
-                            respecting_pivot_positions.append(pivot_idx)
+            # === STEP 2: CALCULATE BOUNCE QUALITY SCORES ===
+            total_score = 0.0
+            bounce_positions = []  # For distribution analysis
             
-            # === DISTRIBUTION ANALYSIS FOR PIVOTS ===
-            pivot_distribution = calculate_distribution_metrics(respecting_pivot_positions, active_length)
-            
-            # === MULTIPLIER BONUS: More respecting pivots = exponential bonus ===
-            if respecting_pivots_count > 0:
-                # Exponential multiplier based on number of respecting pivots
-                pivot_count_multiplier = 1.0 + (respecting_pivots_count * 0.5)  # +50% per additional pivot
+            for i, bounce_idx in enumerate(bounce_indices):
+                # Get position in dataframe
+                pos = bounce_conditions.index.get_loc(bounce_idx)
+                bounce_positions.append(pos)
                 
-                # NEW: Distribution multiplier for pivots
-                pivot_distribution_multiplier = 1.0 + (pivot_distribution['distribution_quality'] * 2.0)  # Up to +200% for perfect distribution
-                
-                # Apply both multipliers
-                respecting_pivots_score *= pivot_count_multiplier * pivot_distribution_multiplier
-                
-                print(f"  {col}: {respecting_pivots_count} respecting pivots")
-                print(f"    Distribution quality: {pivot_distribution['distribution_quality']:.3f}")
-                print(f"    Coverage ratio: {pivot_distribution['coverage_ratio']:.3f}")
-                print(f"    Base score: {respecting_pivots_score/(pivot_count_multiplier * pivot_distribution_multiplier):.2f}")
-                print(f"    Count multiplier: {pivot_count_multiplier:.2f}x")
-                print(f"    Distribution multiplier: {pivot_distribution_multiplier:.2f}x")
-                print(f"    Final pivot score: {respecting_pivots_score:.2f}")
-            
-            # === SECONDARY SCORING: Actual Bounces ===
-            bounce_score = 0
-            for idx in bounce_indices:
-                # Convert pandas index to integer position
-                pos = bounce_conditions.index.get_loc(idx)
-                
-                # Base score for the bounce (much lower than pivot score)
-                base_bounce_score = 10.0  # Base points for any confirmed bounce
-                
-                # Calculate bounce strength based on price movement
-                if pos < len(price_data) - 1:
-                    if trendline_type == 'resistance':
-                        # For resistance: measure downward movement after bounce
-                        current_price = price_data.iloc[pos]
-                        next_price = price_data.iloc[pos + 1]
-                        strength = max(0, (current_price - next_price) / current_price)
-                    else:
-                        # For support: measure upward movement after bounce
-                        current_price = price_data.iloc[pos]
-                        next_price = price_data.iloc[pos + 1]
-                        strength = max(0, (next_price - current_price) / current_price)
-                    
-                    strength_bonus = strength * 100  # Convert percentage to points
-                else:
-                    strength_bonus = 0
-                
-                # Calculate proximity bonus using pivot points instead of high/low data
+                # Get trendline and price values at bounce
                 trendline_value = trendline_data.iloc[pos]
-                if trendline_type == 'resistance':
-                    # For resistance bounces, use pivot highs
-                    relevant_price = prepared_pivots['highs'].iloc[pos] if pos < len(prepared_pivots['highs']) else price_data.iloc[pos]
+                price_value = price_data.iloc[pos]
+                
+                if pd.isna(trendline_value) or pd.isna(price_value):
+                    continue
+                
+                # === PRECISION SCORE ===
+                # How close was the bounce to the trendline?
+                distance_pct = abs(price_value - trendline_value) / trendline_value
+                
+                # Precision factor: closer = higher score (1.0 at exact touch, decreases with distance)
+                if distance_pct <= threshold:
+                    precision_factor = 1.0 - (distance_pct / threshold)  # 1.0 to 0.0
                 else:
-                    # For support bounces, use pivot lows
-                    relevant_price = prepared_pivots['lows'].iloc[pos] if pos < len(prepared_pivots['lows']) else price_data.iloc[pos]
+                    precision_factor = max(0.0, 1.0 - (distance_pct / (threshold * 3)))  # Extended range
                 
-                if not pd.isna(trendline_value) and trendline_value > 0 and not pd.isna(relevant_price):
-                    distance_pct = abs(relevant_price - trendline_value) / trendline_value
-                    proximity_bonus = max(0, (threshold - distance_pct) / threshold * 5.0)
-                else:
-                    proximity_bonus = 0
+                # === BASE BOUNCE SCORE ===
+                base_bounce_score = 100.0  # Base points per bounce
                 
-                # Apply recency weighting
-                recency_factor = recency_weights[min(pos, len(recency_weights)-1)]
+                # === STRENGTH SCORE ===
+                # How strong was the reaction after the bounce?
+                strength_bonus = 0.0
+                if pos < len(price_data) - 1:
+                    current_price = price_data.iloc[pos]
+                    next_price = price_data.iloc[pos + 1]
+                    
+                    if direction == 'short':  # Resistance bounce - expect downward movement
+                        if next_price < current_price:
+                            strength_pct = (current_price - next_price) / current_price
+                            strength_bonus = strength_pct * 50.0  # Up to 50 bonus points
+                    else:  # Support bounce - expect upward movement
+                        if next_price > current_price:
+                            strength_pct = (next_price - current_price) / current_price
+                            strength_bonus = strength_pct * 50.0  # Up to 50 bonus points
                 
-                # Calculate individual bounce score
-                individual_bounce_score = (base_bounce_score + strength_bonus + proximity_bonus) * recency_factor
-                bounce_score += individual_bounce_score
-            
-            # === DISTRIBUTION ANALYSIS FOR BOUNCES ===
-            bounce_distribution = calculate_distribution_metrics(bounce_positions, active_length)
-            
-            # Apply distribution bonus to bounce score
-            if len(bounce_positions) > 0:
-                bounce_distribution_multiplier = 1.0 + (bounce_distribution['distribution_quality'] * 1.5)  # Up to +150% for perfect distribution
-                bounce_score *= bounce_distribution_multiplier
+                # === RECENCY FACTOR ===
+                # More recent bounces are slightly more valuable (higher pos = more recent)
+                # Scale from 0.8 (oldest) to 1.2 (most recent) for reasonable weighting
+                recency_factor = 0.8 + (0.4 * pos / len(price_data))  # 0.8 to 1.2
                 
-                print(f"    Bounces: {len(bounce_positions)}")
-                print(f"    Bounce distribution quality: {bounce_distribution['distribution_quality']:.3f}")
-                print(f"    Bounce distribution multiplier: {bounce_distribution_multiplier:.2f}x")
-                print(f"    Enhanced bounce score: {bounce_score:.2f}")
-            
-            # === NEW: LENGTH COVERAGE BONUS ===
-            # Combine pivot and bounce positions for overall distribution analysis
-            all_interaction_positions = respecting_pivot_positions + bounce_positions
-            overall_distribution = calculate_distribution_metrics(all_interaction_positions, active_length)
-            
-            # Length coverage bonus - reward trendlines with interactions across their full length
-            length_coverage_bonus = 0.0
-            if overall_distribution['coverage_ratio'] > 0.7:  # If covering >70% of trendline length
-                length_coverage_bonus = overall_distribution['length_bonus'] * 20.0  # Significant bonus
+                # === INDIVIDUAL BOUNCE SCORE ===
+                individual_score = (base_bounce_score + strength_bonus) * precision_factor * recency_factor
+                total_score += individual_score
                 
-                print(f"    Overall coverage ratio: {overall_distribution['coverage_ratio']:.3f}")
-                print(f"    Length coverage bonus: {length_coverage_bonus:.2f}")
+                print(f"    Bounce {i+1} at pos {pos}: precision={precision_factor:.3f}, strength_bonus={strength_bonus:.1f}, score={individual_score:.1f}")
             
-            # === TOTAL SCORE CALCULATION ===
-            # Pivot score is the dominant factor, bounce score is secondary, length coverage is bonus
-            total_score = respecting_pivots_score + bounce_score + length_coverage_bonus
+            # === STEP 3: DISTRIBUTION BONUS ===
+            distribution_bonus = calculate_distribution_bonus(bounce_positions, n_points)
             
-            # Store the final score
-            scores[col] = total_score
+            # === STEP 4: FINAL SCORE CALCULATION ===
+            # Base score from individual bounces
+            base_score = total_score
             
-            # Enhanced debug output
-            if respecting_pivots_count > 0 or len(bounce_indices) > 0:
-                print(f"{col} ({trendline_type}):")
-                print(f"  Final components:")
-                print(f"    Pivot score: {respecting_pivots_score:.2f}")
-                print(f"    Bounce score: {bounce_score:.2f}")
-                print(f"    Length coverage bonus: {length_coverage_bonus:.2f}")
-                print(f"  TOTAL SCORE: {total_score:.2f}")
-                print(f"  ---")
+            # Count multiplier: More bounces = exponential benefit
+            count_multiplier = 1.0 + (bounce_count - 1) * 0.3  # +30% per additional bounce
+            
+            # Distribution multiplier: Well-distributed bounces get bonus
+            distribution_multiplier = 1.0 + distribution_bonus
+            
+            # Final score
+            final_score = base_score * count_multiplier * distribution_multiplier
+            scores[col] = final_score
+            
+            print(f"  FINAL SCORE: {final_score:.1f}")
+            print(f"    Base score: {base_score:.1f}")
+            print(f"    Count multiplier: {count_multiplier:.2f}x ({bounce_count} bounces)")
+            print(f"    Distribution multiplier: {distribution_multiplier:.2f}x")
     
-    # --- Sort and return results ---
+    # === STEP 5: SORT AND RETURN RESULTS ===
     ranked_results = {
-        "ranked_maxlines": {k: v for k, v in sorted(trendlines['resistance']['scores'].items(), 
+        "ranked_maxlines": {k: v for k, v in sorted(trendline_categories['resistance']['scores'].items(), 
                                                    key=lambda item: item[1], 
                                                    reverse=True)},
-        "ranked_minlines": {k: v for k, v in sorted(trendlines['support']['scores'].items(), 
+        "ranked_minlines": {k: v for k, v in sorted(trendline_categories['support']['scores'].items(), 
                                                    key=lambda item: item[1], 
                                                    reverse=True)}
     }
     
+    # Print final rankings
+    print(f"\n=== FINAL RANKINGS ===")
+    print("RESISTANCE LINES:")
+    for i, (line, score) in enumerate(ranked_results["ranked_maxlines"].items(), 1):
+        if score > 0:
+            print(f"  {i}. {line}: {score:.1f}")
+    
+    print("SUPPORT LINES:")
+    for i, (line, score) in enumerate(ranked_results["ranked_minlines"].items(), 1):
+        if score > 0:
+            print(f"  {i}. {line}: {score:.1f}")
+    
     return ranked_results
+
+
+def calculate_distribution_bonus(bounce_positions, total_length):
+    """
+    Calculate distribution bonus based on how well bounces are spread across trendline.
+    
+    Args:
+        bounce_positions: List of positions where bounces occurred
+        total_length: Total length of the data
+        
+    Returns:
+        float: Distribution bonus (0.0 to 1.0)
+    """
+    if len(bounce_positions) <= 1:
+        return 0.0
+    
+    # Sort positions
+    positions = sorted(bounce_positions)
+    
+    # Calculate coverage ratio (how much of the trendline is covered)
+    coverage_span = positions[-1] - positions[0]
+    coverage_ratio = coverage_span / max(total_length - 1, 1)
+    
+    # Calculate distribution uniformity
+    gaps = np.diff(positions)
+    if len(gaps) > 0:
+        ideal_gap = coverage_span / len(gaps)
+        if ideal_gap > 0:
+            gap_deviations = [abs(gap - ideal_gap) / ideal_gap for gap in gaps]
+            uniformity = max(0.0, 1.0 - np.mean(gap_deviations))
+        else:
+            uniformity = 0.0
+    else:
+        uniformity = 0.0
+    
+    # Combine coverage and uniformity
+    distribution_bonus = (coverage_ratio * 0.6 + uniformity * 0.4) * 0.5  # Max 50% bonus
+    
+    return distribution_bonus

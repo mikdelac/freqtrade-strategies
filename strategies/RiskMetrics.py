@@ -350,9 +350,9 @@ class RiskMetrics(IStrategy):
     INTERFACE_VERSION = 3
 
     # Timeframe settings
-    timeframe = "5m"
+    timeframe = "1m"
     MINUTES_IN_DAY = 24 * 60
-    MINUTES_PER_CANDLE = 5
+    MINUTES_PER_CANDLE = 1
     CANDLES_PER_DAY = MINUTES_IN_DAY // MINUTES_PER_CANDLE  # 288 5-min candles per day
     TRADING_DAYS_PER_YEAR = 252
     WEEKS_PER_MONTH = 4.33
@@ -432,11 +432,11 @@ class RiskMetrics(IStrategy):
     enable_convergence_detection = BooleanParameter(default=False, space="buy", optimize=False)
         
     # === New Periodic Monte Carlo Parameters ===
-    mc_recalc_interval_minutes = IntParameter(60, 480, default=30, space="buy", optimize=False)
+    mc_recalc_interval_minutes = IntParameter(60, 480, default=MINUTES_PER_CANDLE * 30, space="buy", optimize=False)
     mc_lookback_window_candles = IntParameter(1000, 3000, default=2000, space="buy", optimize=False)
     
     # Rolling Monte Carlo optimization (eliminates lookahead bias)
-    enable_rolling_mc_optimization = BooleanParameter(default=False, space="buy", optimize=False)
+    enable_rolling_mc_optimization = BooleanParameter(default=True, space="buy", optimize=False)
 
     # Minimal ROI designed for the strategy.
     minimal_roi = {
@@ -475,6 +475,61 @@ class RiskMetrics(IStrategy):
         "exit": "GTC"
     }
 
+    def calculate_bounce_metrics(self, dataframe: DataFrame) -> Dict[str, float]:
+        """
+        Calculate bounce counts and related metrics for MC_Optimal_Resistance and MC_Optimal_Support.
+        
+        Args:
+            dataframe: DataFrame with OHLCV data and indicators
+            
+        Returns:
+            Dict containing bounce metrics for both resistance and support
+        """
+        metrics = {
+            'resistance_bounce_count': 0.0,
+            'support_bounce_count': 0.0,
+            'resistance_score': 0.0,
+            'support_score': 0.0
+        }
+        
+        # Check if required columns exist
+        required_columns = ['MC_Optimal_Support', 'MC_Optimal_Resistance', 
+                          'MC_Support_Score', 'MC_Resistance_Score']
+        if not all(col in dataframe.columns for col in required_columns):
+            return metrics
+        
+        # Check if pivot points are available
+        if 'all_highs' not in dataframe.columns or 'all_lows' not in dataframe.columns:
+            return metrics
+        
+        try:
+            # Calculate resistance bounces (short direction)
+            resistance_bounce_conditions = generate_bounce_conditions(
+                dataframe['close'], 
+                dataframe['MC_Optimal_Resistance'], 'short', self.trendline_proximity_threshold.value,
+                dataframe.get('all_highs'), dataframe.get('all_lows')
+            )
+            metrics['resistance_bounce_count'] = float(resistance_bounce_conditions.sum())
+            
+            # Calculate support bounces (long direction)  
+            support_bounce_conditions = generate_bounce_conditions(
+                dataframe['close'], 
+                dataframe['MC_Optimal_Support'], 'long', self.trendline_proximity_threshold.value,
+                dataframe.get('all_highs'), dataframe.get('all_lows')
+            )
+            metrics['support_bounce_count'] = float(support_bounce_conditions.sum())
+            
+            # Get the latest scores
+            if len(dataframe) > 0:
+                latest_candle = dataframe.iloc[-1]
+                metrics['resistance_score'] = float(latest_candle.get('MC_Resistance_Score', 0.0))
+                metrics['support_score'] = float(latest_candle.get('MC_Support_Score', 0.0))
+                
+        except Exception as e:
+            print(f"Error calculating bounce metrics: {e}")
+        
+        return metrics
+
     @property
     def plot_config(self):
         # Basic configuration with default plots
@@ -498,6 +553,12 @@ class RiskMetrics(IStrategy):
                     "MC_Resistance_Score": {"color": "darkred", "type": "line", "width": 3.0},
                     "MC_Support_Score": {"color": "darkgreen", "type": "line", "width": 3.0},
                     "MC_Optimal_Period": {"color": "orange", "type": "line", "width": 1.5}
+                },
+                "Bounce Analysis": {
+                    "resistance_bounce_count": {"color": "darkred", "type": "line", "width": 2.0},
+                    "support_bounce_count": {"color": "darkgreen", "type": "line", "width": 2.0},
+                    "resistance_bounce_score_display": {"color": "red", "type": "line", "width": 1.5, "dash": "dash"},
+                    "support_bounce_score_display": {"color": "green", "type": "line", "width": 1.5, "dash": "dash"}
                 },
                 "Score Convergence Analysis": {
                     "score_convergence_ratio": {"color": "purple", "type": "line", "width": 2.0},
@@ -1120,6 +1181,31 @@ class RiskMetrics(IStrategy):
             
         except Exception as e:
             print(f"Error finding swing points: {e}")
+
+        # === Calculate and Store Bounce Metrics for Chart Display ===
+        try:
+            print("=== Calculating Bounce Metrics for Chart Display ===")
+            bounce_metrics = self.calculate_bounce_metrics(dataframe)
+            
+            # Store bounce counts as constant values across all rows for chart display
+            dataframe.loc[:, 'resistance_bounce_count'] = bounce_metrics['resistance_bounce_count']
+            dataframe.loc[:, 'support_bounce_count'] = bounce_metrics['support_bounce_count']
+            
+            # Store normalized scores for better chart visualization (divide by 100 to fit with bounce counts)
+            dataframe.loc[:, 'resistance_bounce_score_display'] = bounce_metrics['resistance_score'] / 100.0
+            dataframe.loc[:, 'support_bounce_score_display'] = bounce_metrics['support_score'] / 100.0
+            
+            print(f"Bounce Metrics Summary:")
+            print(f"  Resistance: {bounce_metrics['resistance_bounce_count']:.0f} bounces, score: {bounce_metrics['resistance_score']:.4f}")
+            print(f"  Support: {bounce_metrics['support_bounce_count']:.0f} bounces, score: {bounce_metrics['support_score']:.4f}")
+            
+        except Exception as e:
+            print(f"Error calculating bounce metrics: {e}")
+            # Initialize with default values if calculation fails
+            dataframe.loc[:, 'resistance_bounce_count'] = 0.0
+            dataframe.loc[:, 'support_bounce_count'] = 0.0
+            dataframe.loc[:, 'resistance_bounce_score_display'] = 0.0
+            dataframe.loc[:, 'support_bounce_score_display'] = 0.0
 
         
         # Uncomment the line below to run GARCH examples for demonstration
