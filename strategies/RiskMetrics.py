@@ -62,34 +62,6 @@ class SignalGenerator:
         """
         self.strategy = strategy_instance
         
-    def apply_convergence_filter(self, dataframe: DataFrame, conditions: pd.Series, 
-                               enable_convergence: bool, threshold: float) -> pd.Series:
-        """
-        Apply convergence filter to trading conditions.
-        
-        Args:
-            dataframe: DataFrame with MC scores
-            conditions: Boolean series of trading conditions
-            enable_convergence: Whether convergence detection is enabled
-            threshold: Convergence threshold for filtering
-            
-        Returns:
-            pandas.Series: Filtered conditions with convergence applied
-        """
-        if not enable_convergence:
-            return conditions
-            
-        # Calculate convergence ratios for each row
-        convergence_ratios = dataframe.apply(
-            lambda row: self.strategy.calculate_score_convergence_ratio(
-                row.get('MC_Support_Score', 0), 
-                row.get('MC_Resistance_Score', 0)
-            ), axis=1
-        )
-        
-        # Apply convergence filter
-        convergence_filter = convergence_ratios < threshold
-        return conditions & convergence_filter
     
     def generate_entry_signals(self, dataframe: DataFrame) -> DataFrame:
         """
@@ -128,16 +100,9 @@ class SignalGenerator:
             dataframe['MC_Optimal_Support'], 'long', self.strategy.trendline_proximity_threshold.value,
             dataframe.get('all_highs'), dataframe.get('all_lows')
         )
-        
-        # Apply convergence filter for long entries
-        long_conditions_filtered = self.apply_convergence_filter(
-            dataframe, long_bounce_conditions, 
-            self.strategy.enable_convergence_detection.value,
-            self.strategy.score_convergence_high_threshold.value
-        )
-        
+                
         # Apply trendline validity filter for long entries
-        long_conditions_filtered = long_conditions_filtered & valid_trendlines
+        long_conditions_filtered = long_bounce_conditions & valid_trendlines
         
         # Generate short entry conditions (bounce off resistance) - using direct import from trendline.py
         short_bounce_conditions = generate_bounce_conditions(
@@ -145,16 +110,9 @@ class SignalGenerator:
             dataframe['MC_Optimal_Resistance'], 'short', self.strategy.trendline_proximity_threshold.value,
             dataframe.get('all_highs'), dataframe.get('all_lows')
         )
-        
-        # Apply convergence filter for short entries
-        short_conditions_filtered = self.apply_convergence_filter(
-            dataframe, short_bounce_conditions,
-            self.strategy.enable_convergence_detection.value,
-            self.strategy.score_convergence_high_threshold.value
-        )
-        
+
         # Apply trendline validity filter for short entries
-        short_conditions_filtered = short_conditions_filtered & valid_trendlines
+        short_conditions_filtered = short_bounce_conditions & valid_trendlines
         
         # Set entry signals
         dataframe.loc[long_conditions_filtered, 'enter_long'] = 1
@@ -169,21 +127,6 @@ class SignalGenerator:
         print(f"Entry signals generated: {long_signals} long, {short_signals} short")
         print(f"Valid trendline data: {valid_rows}/{total_rows} rows ({valid_rows/total_rows*100:.1f}%)")
         
-        # Log convergence analysis for the most recent candle
-        if self.strategy.enable_convergence_detection.value and len(dataframe) > 0:
-            current_candle = dataframe.iloc[-1]
-            support_score = current_candle.get('MC_Support_Score', 0)
-            resistance_score = current_candle.get('MC_Resistance_Score', 0)
-            
-            should_enter, reason = self.strategy.should_enter_trade_with_convergence(
-                support_score, resistance_score
-            )
-            print(f"Current convergence status: {reason}")
-            print(f"Entry allowed: {should_enter}")
-            
-            # Check if current candle has valid trendlines
-            current_valid = valid_trendlines.iloc[-1] if len(valid_trendlines) > 0 else False
-            print(f"Current candle trendline validity: {current_valid}")
         
         return dataframe
     
@@ -254,19 +197,9 @@ class SignalGenerator:
             dataframe.get('all_highs'), dataframe.get('all_lows')
         )
         
-        # Apply convergence filter if enabled
-        if self.strategy.enable_convergence_detection.value:
-            short_entry_filtered = self.apply_convergence_filter(
-                dataframe, short_entry_conditions,
-                True, self.strategy.score_convergence_high_threshold.value
-            )
-            long_entry_filtered = self.apply_convergence_filter(
-                dataframe, long_entry_conditions,
-                True, self.strategy.score_convergence_high_threshold.value
-            )
-        else:
-            short_entry_filtered = short_entry_conditions
-            long_entry_filtered = long_entry_conditions
+
+        short_entry_filtered = short_entry_conditions
+        long_entry_filtered = long_entry_conditions
         
         return short_entry_filtered, long_entry_filtered
     
@@ -366,7 +299,7 @@ class RiskMetrics(IStrategy):
     DAILY_CANDLES = CANDLES_PER_DAY  # Target: 288 candles
     WEEKLY_CANDLES = CANDLES_PER_DAY * TRADING_DAYS_PER_WEEK  # Target: 1440 candles
     MONTHLY_CANDLES = CANDLES_PER_DAY * TRADING_DAYS_PER_MONTH  # Target: 6336 candles
-    ONE_HOUR_CANDLES = 12  # 12 candles = 60 minutes
+    ONE_HOUR_CANDLES = 60 / MINUTES_PER_CANDLE  # 12 candles = 60 minutes
     
     # Monte Carlo period optimization settings
     MC_ITERATIONS = 600
@@ -432,7 +365,7 @@ class RiskMetrics(IStrategy):
     enable_convergence_detection = BooleanParameter(default=False, space="buy", optimize=False)
         
     # === New Periodic Monte Carlo Parameters ===
-    mc_recalc_interval_minutes = IntParameter(60, 480, default=MINUTES_PER_CANDLE * 60, space="buy", optimize=False)
+    mc_recalc_interval_minutes = IntParameter(60, 480, default=30, space="buy", optimize=False)
     mc_lookback_window_candles = IntParameter(1000, 3000, default=2000, space="buy", optimize=False)
     
     # Rolling Monte Carlo optimization (eliminates lookahead bias)

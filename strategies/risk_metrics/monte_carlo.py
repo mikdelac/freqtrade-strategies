@@ -443,16 +443,12 @@ class TrendlineMonteCarloOptimizer:
         # Find swing points for this period with adaptive parameters
         high_swing_points = self.trend_analyzer._find_swing_points(
             prices=recent_data['high'].values,
-            price_type='high',
-            min_points=max(3, random_period // 50),  # Adaptive min_points
-            distance=max(5, random_period // 100)    # Adaptive distance
+            price_type='high'
         )
         
         low_swing_points = self.trend_analyzer._find_swing_points(
             prices=recent_data['low'].values,
-            price_type='low',
-            min_points=max(3, random_period // 50),
-            distance=max(5, random_period // 100)
+            price_type='low'
         )
         
         # Initialize swing point columns

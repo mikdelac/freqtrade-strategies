@@ -110,8 +110,7 @@ class TrendAnalysis:
                     prices: np.ndarray, 
                     price_type: str = 'high',
                     min_points: int = 2,
-                    distance: int = 5,
-                    atr_values: np.ndarray = None) -> List[Tuple[int, float]]:
+                    distance: int = 5) -> List[Tuple[int, float]]:
         """
         Find swing high or low points in the price array using scipy.signal.find_peaks.
         
@@ -144,12 +143,8 @@ class TrendAnalysis:
         # If we don't have enough points, try with smaller distance
         if len(swing_points) < min_points and distance > 1:
             smaller_distance = max(1, distance - 1)
-            return self._find_swing_points(prices, price_type, min_points, smaller_distance, atr_values)
-        
-        # Filter by ATR significance if provided
-        if atr_values is not None and len(atr_values) > 0:
-            swing_points = self._filter_by_atr_significance(prices, swing_points, atr_values, price_type)
-            
+            return self._find_swing_points(prices, price_type)
+                    
         # Sort points by time index
         return sorted(swing_points, key=lambda x: x[0])
         
@@ -556,8 +551,8 @@ class TrendAnalysis:
             Tuple[List, List]: (mapped_highs, mapped_lows) for the full dataframe
         """
         # Find swing highs and lows in the recent data using the correct TrendAnalysis method
-        highs = self._find_swing_points(recent_data['high'].values, 'high', min_points=2, distance=5)
-        lows = self._find_swing_points(recent_data['low'].values, 'low', min_points=2, distance=5)
+        highs = self._find_swing_points(recent_data['high'].values, 'high')
+        lows = self._find_swing_points(recent_data['low'].values, 'low')
         
         # Initialize the swing point columns with NaN values matching the dataframe length exactly
         dataframe.loc[:, 'all_highs'] = np.nan

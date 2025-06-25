@@ -30,17 +30,11 @@ def generate_bounce_conditions(close_data, level_data, direction: str, tolerance
         # Long entry: Bounce off support using pre-calculated pivot lows
         bounce_conditions = (
             # Current close is above support
-            (close_data > level_data) &
+            #(close_data > level_data) &
             # Previous candle had a pivot low (swing low extrema)
             (~pivot_lows.shift(1).isna()) &
-            # Previous pivot low was close to support (allows piercing)
-            (abs(pivot_lows.shift(1) - level_data.shift(1)) <= 
-             level_data.shift(1) * tolerance) &  # Close enough to be considered a test
             # Current close is higher than previous close (upward movement)
-            (close_data > close_data.shift(1)) &
-            # Level data is valid
-            (~level_data.isna()) &
-            (~level_data.shift(1).isna())
+            (close_data > close_data.shift(1)) 
         )
     elif direction == 'short':
         if pivot_highs is None:
@@ -49,17 +43,11 @@ def generate_bounce_conditions(close_data, level_data, direction: str, tolerance
         # Short entry: Bounce off resistance using pre-calculated pivot highs
         bounce_conditions = (
             # Current close is below resistance
-            (close_data < level_data) &
+            #(close_data < level_data) &
             # Previous candle had a pivot high (swing high extrema)
             (~pivot_highs.shift(1).isna()) &
-            # Previous pivot high was close to resistance (allows piercing)
-            (abs(pivot_highs.shift(1) - level_data.shift(1)) <= 
-             level_data.shift(1) * tolerance) &  # Close enough to be considered a test
             # Current close is lower than previous close (downward movement)
-            (close_data < close_data.shift(1)) &
-            # Level data is valid
-            (~level_data.isna()) &
-            (~level_data.shift(1).isna())
+            (close_data < close_data.shift(1)) 
         )
     else:
         return pd.Series([False] * len(close_data), index=close_data.index)
@@ -348,6 +336,23 @@ def rank_trendlines(trends, price_field="Data", threshold=0.01, max_prefix="Max_
             # Count bounces - this is the only score that matters
             bounce_count = bounce_conditions.sum()
             scores[col] = bounce_count
+            
+            # === CAPTURE BOUNCE TIMESTAMPS (MINIMAL OUTPUT) ===
+            if bounce_count > 0:
+                bounce_indices = bounce_conditions[bounce_conditions].index.tolist()
+                bounce_timestamps = []
+                
+                # Get timestamps if available in the index
+                if hasattr(price_data.index, 'to_pydatetime'):
+                    bounce_timestamps = [price_data.index[i].strftime('%Y-%m-%d %H:%M') for i in range(len(price_data)) if i < len(bounce_conditions) and bounce_conditions.iloc[i]]
+                else:
+                    # Use index positions if no datetime index
+                    bounce_timestamps = [f"Index_{i}" for i in range(len(price_data)) if i < len(bounce_conditions) and bounce_conditions.iloc[i]]
+                
+                # Sort chronologically (oldest to newest)
+                bounce_timestamps.sort()
+                
+                print(f"  Bounces at: {' | '.join(bounce_timestamps)}")
             
             print(f"  Found {bounce_count} bounces - Score: {bounce_count}")
     
