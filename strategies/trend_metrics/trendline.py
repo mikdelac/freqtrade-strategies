@@ -30,7 +30,7 @@ def generate_bounce_conditions(close_data, level_data, direction: str, tolerance
         # Long entry: Bounce off support using pre-calculated pivot lows
         bounce_conditions = (
             # Current close is above support
-            #(close_data > level_data) &
+            (close_data > level_data) &
             # Previous candle had a pivot low (swing low extrema)
             (~pivot_lows.shift(1).isna()) &
             # Current close is higher than previous close (upward movement)
@@ -43,7 +43,7 @@ def generate_bounce_conditions(close_data, level_data, direction: str, tolerance
         # Short entry: Bounce off resistance using pre-calculated pivot highs
         bounce_conditions = (
             # Current close is below resistance
-            #(close_data < level_data) &
+            (close_data < level_data) &
             # Previous candle had a pivot high (swing high extrema)
             (~pivot_highs.shift(1).isna()) &
             # Current close is lower than previous close (downward movement)

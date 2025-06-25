@@ -49,7 +49,7 @@ from technical.util import resample_to_interval, resampled_merge
 
 class SignalGenerator:
     """
-    Signal generation logic for bounce trading with convergence detection.
+    Signal generation logic for bounce trading.
     Handles entry and exit signal generation with proper separation of concerns.
     """
     
@@ -270,10 +270,6 @@ class RiskMetrics(IStrategy):
     - Dynamic timeframe selection based on available data
       * Automatically selects the highest appropriate timeframe
       * Adapts analysis based on available historical data length
-    - Monte Carlo Score Convergence Detection and Risk Management
-      * Detects when support and resistance scores are similar
-      * Implements adaptive position sizing during convergence periods
-      * Switches between bounce trading and breakout modes
     
     GARCH Usage:
     - Estimates current market volatility for risk management
@@ -350,20 +346,6 @@ class RiskMetrics(IStrategy):
     garch_min_candles = IntParameter(100, 300, default=100, space="buy", optimize=False)  # Kept for compatibility
     garch_max_candles = IntParameter(500, 1000, default=1000, space="buy", optimize=False)  # Kept for compatibility
     
-    
-    # Monte Carlo Score Convergence Parameters
-    score_convergence_high_threshold = DecimalParameter(0.85, 0.95, default=0.90, space="buy", optimize=True)
-    score_convergence_medium_threshold = DecimalParameter(0.70, 0.85, default=0.80, space="buy", optimize=True)
-    score_convergence_low_threshold = DecimalParameter(0.50, 0.70, default=0.60, space="buy", optimize=True)
-    
-    # Convergence risk multipliers
-    convergence_high_penalty = DecimalParameter(0.1, 0.3, default=0.2, space="buy", optimize=True)
-    convergence_medium_penalty = DecimalParameter(0.4, 0.6, default=0.5, space="buy", optimize=True)
-    convergence_low_penalty = DecimalParameter(0.7, 0.9, default=0.8, space="buy", optimize=True)
-    
-    # Enable convergence detection
-    enable_convergence_detection = BooleanParameter(default=False, space="buy", optimize=False)
-        
     # === New Periodic Monte Carlo Parameters ===
     mc_recalc_interval_minutes = IntParameter(60, 480, default=30, space="buy", optimize=False)
     mc_lookback_window_candles = IntParameter(1000, 3000, default=2000, space="buy", optimize=False)
@@ -581,8 +563,6 @@ class RiskMetrics(IStrategy):
         print(f"  GARCH model: Used for risk management and volatility estimation only")
         print(f"  Lookback periods: Fixed periods for Monte Carlo optimization")
         print(f"  Monte Carlo iterations: {self.MC_ITERATIONS}")
-        print(f"  Score convergence detection enabled: {self.enable_convergence_detection.value}")
-        print(f"  Convergence thresholds: High={self.score_convergence_high_threshold.value:.2f}, Medium={self.score_convergence_medium_threshold.value:.2f}, Low={self.score_convergence_low_threshold.value:.2f}")
         print(f"  Proper GARCH usage: Volatility forecasting separate from technical analysis optimization")
         print(f"  Signal generator: Initialized for modular signal generation")
         print(f"  Monte Carlo Manager: Initialized with {self.mc_recalc_interval_minutes.value}min recalc interval")
@@ -594,152 +574,6 @@ class RiskMetrics(IStrategy):
             print(f"    - Recalculates every {self.mc_recalc_interval_minutes.value} minutes")
         else:
             print(f"    - Using original method (faster but with potential lookahead bias)")
-
-    def calculate_score_convergence_ratio(self, support_score: float, resistance_score: float) -> float:
-        """
-        Calculate the convergence ratio between MC support and resistance scores.
-        Returns the ratio of the smaller score to the larger score (0.0 to 1.0).
-        
-        Args:
-            support_score: MC_Support_Score value
-            resistance_score: MC_Resistance_Score value
-            
-        Returns:
-            float: Convergence ratio (0.0 = completely different, 1.0 = identical)
-        """
-        if support_score <= 0 or resistance_score <= 0:
-            return 0.0
-        
-        # Calculate the ratio of smaller to larger score
-        min_score = min(support_score, resistance_score)
-        max_score = max(support_score, resistance_score)
-        
-        return min_score / max_score
-
-    def get_convergence_multiplier(self, convergence_ratio: float) -> float:
-        """
-        Calculate position size multiplier based on score convergence ratio.
-        Higher convergence = lower position size due to increased uncertainty.
-        
-        Args:
-            convergence_ratio: Score convergence ratio (0.0 to 1.0)
-            
-        Returns:
-            float: Position size multiplier (0.0 to 1.0)
-        """
-        if not self.enable_convergence_detection.value:
-            return 1.0
-        
-        if convergence_ratio >= self.score_convergence_high_threshold.value:
-            # High convergence - significant risk reduction
-            return self.convergence_high_penalty.value
-        elif convergence_ratio >= self.score_convergence_medium_threshold.value:
-            # Medium convergence - moderate risk reduction
-            return self.convergence_medium_penalty.value
-        elif convergence_ratio >= self.score_convergence_low_threshold.value:
-            # Low convergence - slight risk reduction
-            return self.convergence_low_penalty.value
-        
-        # No significant convergence - no penalty
-        return 1.0
-
-    def get_trading_mode(self, convergence_ratio: float) -> str:
-        """
-        Determine current trading mode based on score convergence ratio.
-        
-        Args:
-            convergence_ratio: Score convergence ratio (0.0 to 1.0)
-            
-        Returns:
-            str: Trading mode identifier
-        """
-        if not self.enable_convergence_detection.value:
-            return "NORMAL_BOUNCE"
-        
-        if convergence_ratio >= self.score_convergence_high_threshold.value:
-            return "HIGH_CONVERGENCE"    # Avoid trading or prepare for breakout
-        elif convergence_ratio >= self.score_convergence_medium_threshold.value:
-            return "MEDIUM_CONVERGENCE"  # Reduced size + breakout watch
-        elif convergence_ratio >= self.score_convergence_low_threshold.value:
-            return "LOW_CONVERGENCE"     # Slight caution
-        
-        return "NORMAL_BOUNCE"  # Standard bounce trading
-
-    def should_enter_trade_with_convergence(self, support_score: float, resistance_score: float) -> Tuple[bool, str]:
-        """
-        Enhanced entry logic considering score convergence.
-        
-        Args:
-            support_score: MC_Support_Score value
-            resistance_score: MC_Resistance_Score value
-            
-        Returns:
-            Tuple[bool, str]: (should_enter, reason)
-        """
-        if not self.enable_convergence_detection.value:
-            return True, "CONVERGENCE_DISABLED"
-        
-        convergence_ratio = self.calculate_score_convergence_ratio(support_score, resistance_score)
-        trading_mode = self.get_trading_mode(convergence_ratio)
-        
-        if trading_mode == "HIGH_CONVERGENCE":
-            return False, f"HIGH_CONVERGENCE_DETECTED ({convergence_ratio:.3f})"
-        elif trading_mode == "MEDIUM_CONVERGENCE":
-            return True, f"MEDIUM_CONVERGENCE_CAUTION ({convergence_ratio:.3f})"
-        elif trading_mode == "LOW_CONVERGENCE":
-            return True, f"LOW_CONVERGENCE_SLIGHT_CAUTION ({convergence_ratio:.3f})"
-        
-        return True, f"NORMAL_BOUNCE_MODE ({convergence_ratio:.3f})"
-
-    def detect_breakout_scenario(self, dataframe: DataFrame) -> Dict[str, any]:
-        """
-        Detect when market is in breakout mode due to score convergence.
-        
-        Args:
-            dataframe: DataFrame with MC scores
-            
-        Returns:
-            Dict containing breakout analysis
-        """
-        if len(dataframe) == 0:
-            return {"mode": "INSUFFICIENT_DATA", "ratio": 0.0, "multiplier": 1.0}
-        
-        current_candle = dataframe.iloc[-1]
-        support_score = current_candle.get('MC_Support_Score', 0)
-        resistance_score = current_candle.get('MC_Resistance_Score', 0)
-        
-        convergence_ratio = self.calculate_score_convergence_ratio(support_score, resistance_score)
-        convergence_multiplier = self.get_convergence_multiplier(convergence_ratio)
-        trading_mode = self.get_trading_mode(convergence_ratio)
-        
-        return {
-            "mode": trading_mode,
-            "ratio": convergence_ratio,
-            "multiplier": convergence_multiplier,
-            "support_score": support_score,
-            "resistance_score": resistance_score,
-            "recommendation": self._get_trading_recommendation(trading_mode, convergence_ratio)
-        }
-
-    def _get_trading_recommendation(self, trading_mode: str, convergence_ratio: float) -> str:
-        """
-        Get trading recommendation based on convergence analysis.
-        
-        Args:
-            trading_mode: Current trading mode
-            convergence_ratio: Score convergence ratio
-            
-        Returns:
-            str: Trading recommendation
-        """
-        recommendations = {
-            "HIGH_CONVERGENCE": f"AVOID bounce trades. Scores too similar ({convergence_ratio:.3f}). Wait for breakout or clear divergence.",
-            "MEDIUM_CONVERGENCE": f"CAUTION: Reduced position size. Monitor for breakout signals. Convergence ratio: {convergence_ratio:.3f}",
-            "LOW_CONVERGENCE": f"SLIGHT CAUTION: Minor convergence detected ({convergence_ratio:.3f}). Normal trading with reduced risk.",
-            "NORMAL_BOUNCE": f"NORMAL bounce trading conditions. Clear score differentiation ({convergence_ratio:.3f})."
-        }
-        
-        return recommendations.get(trading_mode, f"Unknown mode: {trading_mode}")
 
     def determine_highest_timeframe(self, dataframe: DataFrame) -> str:
         """
@@ -926,38 +760,13 @@ class RiskMetrics(IStrategy):
             # Apply the results to the dataframe
             self.monte_carlo_manager.apply_monte_carlo_results(dataframe, mc_results)
             
-            # Process convergence analysis if we have results
             if mc_results:
-                self._process_convergence_analysis_original(
-                    dataframe, 
-                    mc_results.get('resistance_score', 0.0), 
-                    mc_results.get('support_score', 0.0)
-                )
-                
                 print(f"Applied Monte Carlo results for {metadata['pair']}:")
                 print(f"  Resistance Score: {mc_results.get('resistance_score', 0.0):.6f}")
                 print(f"  Support Score: {mc_results.get('support_score', 0.0):.6f}")
                 print(f"  Optimal Periods: R={mc_results.get('optimal_resistance_period', 0)}, S={mc_results.get('optimal_support_period', 0)}")
             else:
                 print(f"Monte Carlo results not yet available for {metadata['pair']}.")
-                # Initialize with defaults if no results are available using proper pandas assignment
-                dataframe.loc[:, 'MC_Resistance_Score'] = 0.0
-                dataframe.loc[:, 'MC_Support_Score'] = 0.0
-                dataframe.loc[:, 'score_convergence_ratio'] = 0.0
-                dataframe.loc[:, 'convergence_multiplier'] = 1.0
-                dataframe.loc[:, 'trading_mode_indicator'] = 0.0
-                dataframe.loc[:, 'trading_mode'] = "INSUFFICIENT_DATA"
-        
-        # Check if we have minimum required data for rolling optimization
-        elif len(dataframe) <= min_required_candles:
-            print(f"Not enough data for rolling Monte Carlo. Need at least {min_required_candles} candles, got {len(dataframe)}. Skipping Monte Carlo optimization.")
-            # Initialize with default values
-            dataframe.loc[:, 'MC_Resistance_Score'] = 0.0
-            dataframe.loc[:, 'MC_Support_Score'] = 0.0
-            dataframe.loc[:, 'score_convergence_ratio'] = 0.0
-            dataframe.loc[:, 'convergence_multiplier'] = 1.0
-            dataframe.loc[:, 'trading_mode_indicator'] = 0.0
-            dataframe.loc[:, 'trading_mode'] = "INSUFFICIENT_DATA"
         else:
             print("=== Using Rolling Monte Carlo Optimization (eliminates lookahead bias) ===")
             last_mc_results = None
@@ -1040,30 +849,11 @@ class RiskMetrics(IStrategy):
                 else:
                     dataframe.loc[pandas_index, 'MC_Optimal_Support'] = np.nan
                 
-                # Apply scores and convergence analysis
-                if last_mc_results:
-                    # Apply scores to this specific row
-                    dataframe.loc[pandas_index, 'MC_Resistance_Score'] = last_mc_results.get('resistance_score', 0.0)
-                    dataframe.loc[pandas_index, 'MC_Support_Score'] = last_mc_results.get('support_score', 0.0)
-                    dataframe.loc[pandas_index, 'MC_Optimal_Resistance_Period'] = last_mc_results.get('optimal_resistance_period', 0.0)
-                    dataframe.loc[pandas_index, 'MC_Optimal_Support_Period'] = last_mc_results.get('optimal_support_period', 0.0)
-                    
-                    # Process convergence analysis for this row
-                    self._process_convergence_analysis_for_row(
-                        dataframe, i,
-                        last_mc_results.get('resistance_score', 0.0),
-                        last_mc_results.get('support_score', 0.0)
-                    )
-                else:
-                    # No MC results available yet - initialize with defaults
-                    dataframe.loc[pandas_index, 'MC_Resistance_Score'] = 0.0
-                    dataframe.loc[pandas_index, 'MC_Support_Score'] = 0.0
-                    dataframe.loc[pandas_index, 'MC_Optimal_Resistance_Period'] = 0.0
-                    dataframe.loc[pandas_index, 'MC_Optimal_Support_Period'] = 0.0
-                    dataframe.loc[pandas_index, 'score_convergence_ratio'] = 0.0
-                    dataframe.loc[pandas_index, 'convergence_multiplier'] = 1.0
-                    dataframe.loc[pandas_index, 'trading_mode_indicator'] = 0.0
-                    dataframe.loc[pandas_index, 'trading_mode'] = "INSUFFICIENT_DATA"
+                # Apply scores to this specific row
+                dataframe.loc[pandas_index, 'MC_Resistance_Score'] = last_mc_results.get('resistance_score', 0.0)
+                dataframe.loc[pandas_index, 'MC_Support_Score'] = last_mc_results.get('support_score', 0.0)
+                dataframe.loc[pandas_index, 'MC_Optimal_Resistance_Period'] = last_mc_results.get('optimal_resistance_period', 0.0)
+                dataframe.loc[pandas_index, 'MC_Optimal_Support_Period'] = last_mc_results.get('optimal_support_period', 0.0)
 
             print(f"Rolling Monte Carlo optimization completed for {metadata['pair']}")
             if last_mc_results:
@@ -1150,81 +940,6 @@ class RiskMetrics(IStrategy):
         # run_garch_examples()
             
         return dataframe
-
-    def _process_convergence_analysis_for_row(self, dataframe: DataFrame, index: int,
-                                              raw_resistance_score: float,
-                                              raw_support_score: float) -> None:
-        """
-        Process volatility regime and convergence analysis, storing results in a specific row.
-        
-        Args:
-            dataframe: DataFrame to store analysis results
-            index: The row index to store results in
-            raw_resistance_score: Raw resistance score from Monte Carlo
-            raw_support_score: Raw support score from Monte Carlo
-        """
-        convergence_ratio = self.calculate_score_convergence_ratio(raw_support_score, raw_resistance_score)
-        convergence_multiplier = self.get_convergence_multiplier(convergence_ratio)
-        trading_mode = self.get_trading_mode(convergence_ratio)
-        
-        trading_mode_mapping = {
-            "NORMAL_BOUNCE": 1.0, "LOW_CONVERGENCE": 2.0,
-            "MEDIUM_CONVERGENCE": 3.0, "HIGH_CONVERGENCE": 4.0
-        }
-        trading_mode_indicator = trading_mode_mapping.get(trading_mode, 0.0)
-        
-        pandas_index = dataframe.index[index]
-        dataframe.loc[pandas_index, 'score_convergence_ratio'] = convergence_ratio
-        dataframe.loc[pandas_index, 'convergence_multiplier'] = convergence_multiplier
-        dataframe.loc[pandas_index, 'trading_mode_indicator'] = trading_mode_indicator
-        dataframe.loc[pandas_index, 'trading_mode'] = trading_mode
-
-    def _process_convergence_analysis_original(self, dataframe: DataFrame, 
-                                             raw_resistance_score: float, 
-                                             raw_support_score: float) -> None:
-        """
-        Process volatility regime and convergence analysis, storing results in dataframe.
-        This is the original method used when rolling optimization is disabled.
-        
-        Args:
-            dataframe: DataFrame to store analysis results
-            raw_resistance_score: Raw resistance score from Monte Carlo
-            raw_support_score: Raw support score from Monte Carlo
-        """
-        print("=== Trendlines Score Convergence Analysis (Original Method) ===")
-        
-        # Calculate convergence ratio between MC scores
-        convergence_ratio = self.calculate_score_convergence_ratio(raw_support_score, raw_resistance_score)
-        convergence_multiplier = self.get_convergence_multiplier(convergence_ratio)
-        trading_mode = self.get_trading_mode(convergence_ratio)
-        
-        # Convert trading mode to numeric indicator for plotting
-        trading_mode_mapping = {
-            "NORMAL_BOUNCE": 1.0,
-            "LOW_CONVERGENCE": 2.0,
-            "MEDIUM_CONVERGENCE": 3.0,
-            "HIGH_CONVERGENCE": 4.0
-        }
-        trading_mode_indicator = trading_mode_mapping.get(trading_mode, 0.0)
-        
-        # Store convergence metrics in dataframe
-        dataframe.loc[:, 'score_convergence_ratio'] = convergence_ratio
-        dataframe.loc[:, 'convergence_multiplier'] = convergence_multiplier
-        dataframe.loc[:, 'trading_mode_indicator'] = trading_mode_indicator
-        dataframe.loc[:, 'trading_mode'] = trading_mode
-        
-        # Log convergence analysis results
-        print(f"Score Convergence Analysis Results:")
-        print(f"  Support Score: {raw_support_score:.6f}")
-        print(f"  Resistance Score: {raw_resistance_score:.6f}")
-        print(f"  Convergence Ratio: {convergence_ratio:.3f}")
-        print(f"  Convergence Multiplier: {convergence_multiplier:.3f}")
-        print(f"  Trading Mode: {trading_mode}")
-        print(f"  Trading Mode Indicator: {trading_mode_indicator}")
-        
-        # Get detailed breakout scenario analysis
-        breakout_analysis = self.detect_breakout_scenario(dataframe)
-        print(f"  Breakout Analysis: {breakout_analysis['recommendation']}")
 
     def _initialize_dataframe_columns(self, dataframe: DataFrame) -> None:
         """
