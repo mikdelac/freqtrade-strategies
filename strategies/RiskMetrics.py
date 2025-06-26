@@ -8,7 +8,6 @@ from datetime import datetime, timedelta, timezone
 from pandas import DataFrame
 from typing import Dict, Optional, Union, Tuple, List
 from functools import reduce
-from scipy.stats import norm, t
 import random
 
 
@@ -40,11 +39,9 @@ from freqtrade.strategy import (
 
 # --------------------------------
 # Add your lib to import here
-from risk_metrics.volatility_models import VolatilityModel, VolatilityRegime, GARCHModel
-from risk_metrics.risk_indicators import RiskIndicators
 from risk_metrics.monte_carlo import MonteCarloSimulator, MonteCarloManager
 from trend_metrics.trend_analysis import TrendAnalysis
-from trend_metrics.trendline import gentrends, segtrends, rank_trendlines, generate_bounce_conditions
+from trend_metrics.trendline import gentrends, segtrends, rank_trendlines, generate_bounce_conditions, Trendline
 from technical.util import resample_to_interval, resampled_merge
 
 class SignalGenerator:
@@ -254,12 +251,10 @@ class SignalGenerator:
 
 class RiskMetrics(IStrategy):
     """
-    RiskMetrics strategy using proper GARCH implementation for volatility forecasting and risk management.
+    RiskMetrics strategy focused on trendline analysis and Monte Carlo optimization.
     
     Features:
-    - GARCH model for volatility forecasting and risk management (properly separated from technical analysis)
-    - Risk-adjusted position sizing based on volatility regime
-    - Fixed lookback periods for Monte Carlo optimization (not volatility-based)
+    - Fixed lookback periods for Monte Carlo optimization
     - Trendline analysis with support and resistance identification
     - Trendline ranking based on price proximity and touch frequency
     - Monte Carlo optimization for optimal trendline periods using fixed sampling
@@ -270,35 +265,17 @@ class RiskMetrics(IStrategy):
     - Dynamic timeframe selection based on available data
       * Automatically selects the highest appropriate timeframe
       * Adapts analysis based on available historical data length
-    
-    GARCH Usage:
-    - Estimates current market volatility for risk management
-    - Provides volatility regime classification (low/medium/high)
-    - Used for position sizing and risk multipliers
     """
     INTERFACE_VERSION = 3
 
     # Timeframe settings
-    timeframe = "1m"
+    timeframe = "5m"
     MINUTES_IN_DAY = 24 * 60
-    MINUTES_PER_CANDLE = 1
+    MINUTES_PER_CANDLE = 5
     CANDLES_PER_DAY = MINUTES_IN_DAY // MINUTES_PER_CANDLE  # 288 5-min candles per day
-    TRADING_DAYS_PER_YEAR = 252
-    WEEKS_PER_MONTH = 4.33
-    TRADING_DAYS_PER_WEEK = 5
-    TRADING_DAYS_PER_MONTH = 22
-    HOURS_PER_DAY = 24
-    WEEKS_PER_YEAR = 52
-    MONTHS_PER_YEAR = 12
-    
-    # Volatility calculation constants
-    DAILY_CANDLES = CANDLES_PER_DAY  # Target: 288 candles
-    WEEKLY_CANDLES = CANDLES_PER_DAY * TRADING_DAYS_PER_WEEK  # Target: 1440 candles
-    MONTHLY_CANDLES = CANDLES_PER_DAY * TRADING_DAYS_PER_MONTH  # Target: 6336 candles
-    ONE_HOUR_CANDLES = 60 / MINUTES_PER_CANDLE  # 12 candles = 60 minutes
     
     # Monte Carlo period optimization settings
-    MC_ITERATIONS = 600
+    MC_ITERATIONS = 200
     MIN_LOOKBACK_PERIOD = 50
     # MAX_LOOKBACK_PERIOD will be set dynamically based on available data
     
@@ -307,28 +284,15 @@ class RiskMetrics(IStrategy):
     TIMEFRAME_THRESHOLDS = {
         '1d': CANDLES_PER_DAY,           # Need at least 1 day of data
         '3d': CANDLES_PER_DAY * 3,       # Need at least 3 days of data
-        '1w': WEEKLY_CANDLES,            # Need at least 1 week of data
-        '1M': MONTHLY_CANDLES,           # Need at least 1 month of data
+        '1w': CANDLES_PER_DAY * 5,       # Need at least 1 week of data
+        '1M': CANDLES_PER_DAY * 22,      # Need at least 1 month of data
     }
     
     # Supported higher timeframes in order of preference (highest first)
     HIGHER_TIMEFRAMES = ['1M', '1w', '3d', '1d']
     
-    # Risk thresholds - Note: These thresholds are now in terms of non-annualized volatility
-    LOW_VOL_THRESHOLD = 0.01
-    MEDIUM_VOL_THRESHOLD = 0.015
-    
-    # RSI settings
-    RSI_PERIOD = 14
-    
     # Trading parameters
     can_short: bool = False
-    
-    # Risk parameters
-    risk_reduction_high = DecimalParameter(0.3, 0.7, default=0.5, space="buy", optimize=True)
-    risk_reduction_medium = DecimalParameter(0.6, 0.9, default=0.8, space="buy", optimize=True)
-    high_vol_threshold_1h = DecimalParameter(0.01, 0.05, default=0.02, space="buy", optimize=True)
-    rv_1h_change_threshold = DecimalParameter(0.05, 0.10, default=0.01, space="buy", optimize=True)
     
     # Trendline parameters
     trendline_proximity_threshold = DecimalParameter(0.005, 0.02, default=0.0005, space="buy", optimize=True)
@@ -339,15 +303,9 @@ class RiskMetrics(IStrategy):
 
     # Monte Carlo optimization parameters
     enable_mc_optimization = BooleanParameter(default=True, space="buy", optimize=False)
-
-    # GARCH Volatility-based period sampling parameters
-    # These parameters were incorrectly mixing GARCH volatility estimation with lookback period selection
-    # GARCH is now properly used only for risk management and volatility forecasting
-    garch_min_candles = IntParameter(100, 300, default=100, space="buy", optimize=False)  # Kept for compatibility
-    garch_max_candles = IntParameter(500, 1000, default=1000, space="buy", optimize=False)  # Kept for compatibility
     
-    # === New Periodic Monte Carlo Parameters ===
-    mc_recalc_interval_minutes = IntParameter(60, 480, default=30, space="buy", optimize=False)
+    # === Periodic Monte Carlo Parameters ===
+    mc_recalc_interval_minutes = IntParameter(60, 480, default=120, space="buy", optimize=False)
     mc_lookback_window_candles = IntParameter(1000, 3000, default=2000, space="buy", optimize=False)
     
     # Rolling Monte Carlo optimization (eliminates lookahead bias)
@@ -486,27 +444,9 @@ class RiskMetrics(IStrategy):
             }
         }
         
-        # Add volatility regime subplot (always enabled for proper GARCH risk management)
-        plot_config["subplots"]["Volatility Analysis"] = {
-            "volatility": {"color": "purple", "type": "line", "width": 2.0},
-            "risk_multiplier": {"color": "orange", "type": "line", "width": 2.0},
-            "atr": {"color": "cyan", "type": "line", "width": 2.0}
-        }
-        
         # Dynamically add higher timeframe plots based on available timeframes
-        # These won't be added until determine_highest_timeframe is called
         if hasattr(self, 'highest_timeframe') and self.highest_timeframe != self.timeframe:
             suffix = f"_{self.highest_timeframe}"
-            
-            # Add higher timeframe volatility to subplots
-            if "Risk Metrics" not in plot_config["subplots"]:
-                plot_config["subplots"]["Risk Metrics"] = {}
-                
-            plot_config["subplots"]["Risk Metrics"][f"rv{suffix}"] = {
-                "color": "red", 
-                "type": "line", 
-                "width": 2.0
-            }
             
             # Add higher timeframe price data to main plot with semi-transparent color
             for field in ['open', 'high', 'low', 'close']:
@@ -520,53 +460,38 @@ class RiskMetrics(IStrategy):
     
     def __init__(self, config: dict) -> None:
         super().__init__(config)
-        # Initialize volatility model with thresholds and risk multipliers
-        self.volatility_model = VolatilityModel(
-            low_threshold=self.LOW_VOL_THRESHOLD,
-            medium_threshold=self.MEDIUM_VOL_THRESHOLD,
-            risk_multipliers={
-                VolatilityRegime.LOW: 1.0,
-                VolatilityRegime.MEDIUM: self.risk_reduction_medium.value,
-                VolatilityRegime.HIGH: self.risk_reduction_high.value
-            }
-        )
+        
         self.trend_analyzer = TrendAnalysis(
             min_points=2,  # Reduced minimum points
             min_slope=0.00001,  # Reduced minimum slope
             min_strength=0.2,  # Reduced strength requirement
             angle_threshold=90  # Increased angle threshold
         )
-        self.har_model = None
-        self.last_fit = None
+        
         # Initialize highest timeframe as None - will be determined dynamically
         self.highest_timeframe = None
         self.available_timeframes = []
         
-        # Initialize GARCH model for risk management
-        self.garch_model = GARCHModel()
-        
         # Initialize signal generator
         self.signal_generator = SignalGenerator(self)
         
-        # Initialize Monte Carlo Manager with all required parameters
+        # Initialize trendline storage for all iterations
+        self.stored_trendlines = []  # List to store all Trendline objects from each Monte Carlo iteration
+        
+        # Initialize Monte Carlo Manager with required parameters
         self.monte_carlo_manager = MonteCarloManager(
             mc_iterations=self.MC_ITERATIONS,
             min_lookback_period=self.MIN_LOOKBACK_PERIOD,
             recalc_interval_minutes=self.mc_recalc_interval_minutes.value,
             trendline_proximity_threshold=self.trendline_proximity_threshold.value,
-            trend_analyzer=self.trend_analyzer,
-            volatility_model=self.volatility_model,
-            garch_model=self.garch_model
+            trend_analyzer=self.trend_analyzer
         )
         
-        print(f"RiskMetrics strategy initialized with modular Monte Carlo architecture:")
-        print(f"  GARCH model: Used for risk management and volatility estimation only")
+        print(f"RiskMetrics strategy initialized with Monte Carlo architecture:")
         print(f"  Lookback periods: Fixed periods for Monte Carlo optimization")
         print(f"  Monte Carlo iterations: {self.MC_ITERATIONS}")
-        print(f"  Proper GARCH usage: Volatility forecasting separate from technical analysis optimization")
         print(f"  Signal generator: Initialized for modular signal generation")
         print(f"  Monte Carlo Manager: Initialized with {self.mc_recalc_interval_minutes.value}min recalc interval")
-        print(f"  Modular Monte Carlo: Clean separation of concerns with specialized classes")
         print(f"  Rolling Monte Carlo optimization: {'ENABLED' if self.enable_rolling_mc_optimization.value else 'DISABLED'}")
         if self.enable_rolling_mc_optimization.value:
             print(f"    - Eliminates lookahead bias for realistic backtesting")
@@ -674,18 +599,31 @@ class RiskMetrics(IStrategy):
 
     # Define scaling factors for different frequencies
     SCALING_FACTORS = {
-        'daily': TRADING_DAYS_PER_YEAR,
-        'weekly': WEEKS_PER_YEAR,
-        'monthly': MONTHS_PER_YEAR
+        'daily': 252,
+        'weekly': 52,
+        'monthly': 12
     }
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
-        Adds several different TA indicators to the given DataFrame, including ATR.
+        Adds several different TA indicators to the given DataFrame.
         Now implements rolling Monte Carlo optimization to eliminate lookahead bias.
         """
         if len(dataframe) == 0:
             return dataframe
+        
+        # Add datetime column if not present (required for trendline timestamps)
+        if 'datetime' not in dataframe.columns:
+            if hasattr(dataframe.index, 'to_pydatetime'):
+                dataframe['datetime'] = dataframe.index
+            else:
+                # Fallback: create datetime column based on row count (assuming 5min candles)
+                base_time = pd.Timestamp.now() - pd.Timedelta(minutes=len(dataframe) * 5)
+                dataframe['datetime'] = pd.date_range(start=base_time, periods=len(dataframe), freq='5min')
+        
+        # Clear stored trendlines from previous runs
+        self.stored_trendlines.clear()
+        print(f"Cleared previous trendline storage for new analysis of {metadata.get('pair', 'UNKNOWN')}")
             
         # Determine the highest timeframe we can use based on available data
         self.highest_timeframe = self.determine_highest_timeframe(dataframe)
@@ -697,49 +635,6 @@ class RiskMetrics(IStrategy):
         # Resample to higher timeframes if possible
         resampled_dfs = self.resample_to_higher_timeframes(dataframe)
         print(f"Resampled dataframes: {resampled_dfs}")
-
-        # Calculate ATR and store it for visualization
-        dataframe.loc[:, 'atr'] = self.volatility_model.calculate_atr(dataframe)
-
-        # Calculate and store volatility regime information using separated GARCH estimation
-        if len(dataframe) >= 100:  # Use fixed minimum threshold for volatility estimation
-            print("=== GARCH Volatility Estimation for Risk Management ===")
-            
-            # Calculate log returns for GARCH volatility estimation
-            log_returns = np.log(dataframe['close'].pct_change() + 1).dropna().values
-            
-            # Use a reasonable window for volatility estimation
-            volatility_window = min(len(log_returns), 500)  # Fixed window for volatility estimation
-            volatility_window = max(volatility_window, 100)   # Minimum window for reliable estimation
-            
-            # Calculate current volatility using GARCH model
-            recent_returns = log_returns[-volatility_window:]
-            
-            # Clean data and calculate volatility
-            if len(recent_returns) > 0 and not np.isnan(recent_returns).all() and not np.isinf(recent_returns).any():
-                # Use VolatilityModel's calculate_volatility method with GARCHModel
-                current_volatility = self.volatility_model.calculate_volatility(recent_returns, self.garch_model)
-                print(f"  GARCH volatility result: {current_volatility:.6f}")
-            else:
-                print(f"  Invalid data for GARCH calculation, using fallback")
-                # Fallback to simple standard deviation using VolatilityModel
-                current_volatility = self.volatility_model.calculate_volatility(recent_returns)
-                
-            regime, risk_multiplier = self.volatility_model.get_regime_and_multiplier(current_volatility)
-            
-            print(f"Current volatility regime: {regime} (volatility: {current_volatility:.6f}, risk multiplier: {risk_multiplier:.2f})")
-            
-            # Store volatility information in dataframe using proper pandas assignment
-            dataframe.loc[:, 'volatility'] = current_volatility
-            dataframe.loc[:, 'volatility_regime'] = regime
-            dataframe.loc[:, 'risk_multiplier'] = risk_multiplier
-            
-        else:
-            # Insufficient data for volatility calculation
-            dataframe.loc[:, 'volatility'] = np.nan
-            dataframe.loc[:, 'volatility_regime'] = 'insufficient_data'
-            dataframe.loc[:, 'risk_multiplier'] = 1.0
-            print(f"Insufficient data for volatility calculation. Need at least 100 candles, got {len(dataframe)}")
 
         # Initialize all required dataframe columns
         self._initialize_dataframe_columns(dataframe)
@@ -802,9 +697,7 @@ class RiskMetrics(IStrategy):
                         min_lookback_period=self.MIN_LOOKBACK_PERIOD,
                         recalc_interval_minutes=0,  # Force recalc for temporary manager
                         trendline_proximity_threshold=self.trendline_proximity_threshold.value,
-                        trend_analyzer=self.trend_analyzer,
-                        volatility_model=self.volatility_model,
-                        garch_model=self.garch_model
+                        trend_analyzer=self.trend_analyzer
                     )
                     
                     mc_results = temp_mc_manager.execute_monte_carlo_optimization(
@@ -813,6 +706,18 @@ class RiskMetrics(IStrategy):
                     
                     if mc_results:
                         last_mc_results = mc_results
+                        
+                        # Store trendline objects from this iteration
+                        resistance_trendline = mc_results.get('best_resistance_trendline')
+                        support_trendline = mc_results.get('best_support_trendline')
+                        
+                        if resistance_trendline:
+                            self.stored_trendlines.append(resistance_trendline)
+                            print(f"  Stored resistance trendline: {resistance_trendline.trendline_type} at candle {i}")
+                        
+                        if support_trendline:
+                            self.stored_trendlines.append(support_trendline)
+                            print(f"  Stored support trendline: {support_trendline.trendline_type} at candle {i}")
                         
                         # Update slopes from the new MC results
                         current_resistance_slope = mc_results.get('best_resistance_slope', 0.0)
@@ -850,10 +755,10 @@ class RiskMetrics(IStrategy):
                     dataframe.loc[pandas_index, 'MC_Optimal_Support'] = np.nan
                 
                 # Apply scores to this specific row
-                dataframe.loc[pandas_index, 'MC_Resistance_Score'] = last_mc_results.get('resistance_score', 0.0)
-                dataframe.loc[pandas_index, 'MC_Support_Score'] = last_mc_results.get('support_score', 0.0)
-                dataframe.loc[pandas_index, 'MC_Optimal_Resistance_Period'] = last_mc_results.get('optimal_resistance_period', 0.0)
-                dataframe.loc[pandas_index, 'MC_Optimal_Support_Period'] = last_mc_results.get('optimal_support_period', 0.0)
+                dataframe.loc[pandas_index, 'MC_Resistance_Score'] = last_mc_results.get('resistance_score', 0.0) if last_mc_results else 0.0
+                dataframe.loc[pandas_index, 'MC_Support_Score'] = last_mc_results.get('support_score', 0.0) if last_mc_results else 0.0
+                dataframe.loc[pandas_index, 'MC_Optimal_Resistance_Period'] = last_mc_results.get('optimal_resistance_period', 0.0) if last_mc_results else 0.0
+                dataframe.loc[pandas_index, 'MC_Optimal_Support_Period'] = last_mc_results.get('optimal_support_period', 0.0) if last_mc_results else 0.0
 
             print(f"Rolling Monte Carlo optimization completed for {metadata['pair']}")
             if last_mc_results:
@@ -934,10 +839,94 @@ class RiskMetrics(IStrategy):
             dataframe.loc[:, 'resistance_bounce_score_display'] = 0.0
             dataframe.loc[:, 'support_bounce_score_display'] = 0.0
 
-        
-        # Uncomment the line below to run GARCH examples for demonstration
-        # from risk_metrics.volatility_models import run_garch_examples
-        # run_garch_examples()
+        # === Output All Stored Trendlines ===
+        try:
+            print("\n=== STORED TRENDLINES SUMMARY ===")
+            pair = metadata.get('pair', 'UNKNOWN')
+            
+            # Count trendlines from stored_trendlines list
+            total_trendlines = len(self.stored_trendlines)
+            resistance_trendlines = sum(1 for tl in self.stored_trendlines if tl.trendline_type == 'resistance')
+            support_trendlines = sum(1 for tl in self.stored_trendlines if tl.trendline_type == 'support')
+            
+            # Count active vs expired trendlines
+            active_trendlines = 0
+            expired_trendlines = 0
+            
+            if len(dataframe) > 0:
+                latest_time = dataframe.index[-1] if hasattr(dataframe.index, 'to_pydatetime') else pd.Timestamp.now()
+                for trendline in self.stored_trendlines:
+                    if trendline.is_active_at_time(latest_time):
+                        active_trendlines += 1
+                    else:
+                        expired_trendlines += 1
+            
+            print(f"Pair: {pair}")
+            print(f"Monte Carlo Results Available: Yes")
+            
+            # Display trendline count summary
+            print(f"\n--- TRENDLINE COUNT SUMMARY ---")
+            print(f"  Total Saved Trendlines: {total_trendlines}")
+            print(f"  Resistance Trendlines: {resistance_trendlines}")
+            print(f"  Support Trendlines: {support_trendlines}")
+            print(f"  Active Trendlines: {active_trendlines}")
+            print(f"  Expired Trendlines: {expired_trendlines}")
+            
+            # Display all stored trendlines
+            if total_trendlines > 0:
+                print(f"\n--- ALL STORED TRENDLINES ---")
+                for i, trendline in enumerate(self.stored_trendlines, 1):
+                    # Check if active
+                    if len(dataframe) > 0:
+                        latest_time = dataframe.index[-1] if hasattr(dataframe.index, 'to_pydatetime') else pd.Timestamp.now()
+                        status = "ACTIVE" if trendline.is_active_at_time(latest_time) else "EXPIRED"
+                        current_price = trendline.get_price_at_time(latest_time) if trendline.is_active_at_time(latest_time) else "N/A"
+                    else:
+                        status = "UNKNOWN"
+                        current_price = "N/A"
+                    
+                    print(f"  {i}. {trendline.trendline_type.upper()} TRENDLINE")
+                    print(f"     Start Time: {trendline.start_time}")
+                    print(f"     End Time: {trendline.end_time}")
+                    print(f"     Duration: {trendline.duration_hours:.2f} hours")
+                    print(f"     Age: {trendline.age_hours:.2f} hours")
+                    print(f"     Slope: {trendline.slope:.8f}")
+                    print(f"     Start Price: {trendline.start_price:.6f}")
+                    print(f"     End Price: {trendline.end_price:.6f}")
+                    print(f"     Status: {status}")
+                    if current_price != "N/A":
+                        print(f"     Current Price: {current_price:.6f}")
+                    print("")
+            else:
+                print(f"  No trendlines stored during this execution")
+            
+            # Show current dataframe trendline values for the latest candle
+            if len(dataframe) > 0:
+                latest_candle = dataframe.iloc[-1]
+                print(f"\n--- CURRENT DATAFRAME VALUES (Latest Candle) ---")
+                print(f"  MC_Optimal_Resistance: {latest_candle.get('MC_Optimal_Resistance', np.nan):.6f}")
+                print(f"  MC_Optimal_Support: {latest_candle.get('MC_Optimal_Support', np.nan):.6f}")
+                print(f"  MC_Resistance_Score: {latest_candle.get('MC_Resistance_Score', 0.0):.6f}")
+                print(f"  MC_Support_Score: {latest_candle.get('MC_Support_Score', 0.0):.6f}")
+                print(f"  Close Price: {latest_candle.get('close', np.nan):.6f}")
+                
+                # Calculate distances to trendlines
+                resistance_price = latest_candle.get('MC_Optimal_Resistance', np.nan)
+                support_price = latest_candle.get('MC_Optimal_Support', np.nan)
+                close_price = latest_candle.get('close', np.nan)
+                
+                if not np.isnan(resistance_price) and not np.isnan(close_price):
+                    resistance_distance = ((resistance_price - close_price) / close_price) * 100
+                    print(f"  Distance to Resistance: {resistance_distance:+.3f}%")
+                
+                if not np.isnan(support_price) and not np.isnan(close_price):
+                    support_distance = ((support_price - close_price) / close_price) * 100
+                    print(f"  Distance to Support: {support_distance:+.3f}%")
+            
+            print(f"=== END TRENDLINES SUMMARY ===\n")
+            
+        except Exception as e:
+            print(f"Error outputting stored trendlines: {e}")
             
         return dataframe
 
@@ -1013,12 +1002,6 @@ class RiskMetrics(IStrategy):
         # Get the highest timeframe used
         highest_tf = current_candle.get('highest_timeframe', self.timeframe)
         
-        # Get volatility regime
-        volatility_regime = current_candle.get('volatility_regime', 'Unknown')
-        
-        # Get risk multiplier
-        risk_multiplier = current_candle.get('risk_multiplier', 1.0)
-        
         # Get linear regression angle to determine trend direction
         trend_angle = current_candle.get('linear_reg_angle', 0)
         
@@ -1041,19 +1024,14 @@ class RiskMetrics(IStrategy):
         # Get highest scored line type (support/resistance)
         strongest_level_type = current_candle.get('Highest_Line_Type', 'Unknown')
         
-        # Format the percentage of risk based on the multiplier
-        risk_percentage = risk_multiplier * 100
-        
         # Create description
         description = {
             "timeframe": f"Analysis based on {highest_tf} data",
-            "volatility": f"{volatility_regime} volatility environment",
             "trend": trend_direction,
             "important_level": f"Most significant level: {strongest_level_type}",
-            "risk_assessment": f"Recommended position size: {risk_percentage:.1f}% of maximum",
             "summary": (
-                f"Market is in a {trend_direction.lower()} with {volatility_regime.lower()} volatility. "
-                f"Position sizing set to {risk_percentage:.1f}% based on {highest_tf} analysis."
+                f"Market is in a {trend_direction.lower()}. "
+                f"Analysis based on {highest_tf} timeframe data."
             )
         }
         

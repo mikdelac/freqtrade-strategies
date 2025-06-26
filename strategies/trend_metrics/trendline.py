@@ -6,6 +6,181 @@ https://github.com/dysonance/Trendy
 
 import numpy as np
 import pandas as pd
+from datetime import datetime, timedelta
+from typing import Optional, Union, Tuple
+
+
+class Trendline:
+    """
+    A class to store and manage trendline information.
+    
+    This class encapsulates all relevant information about a trendline including
+    its type, temporal boundaries, mathematical equation parameters, and lifecycle data.
+    """
+    
+    def __init__(self, 
+                 trendline_type: str,
+                 start_time: Union[datetime, pd.Timestamp],
+                 end_time: Union[datetime, pd.Timestamp],
+                 slope: float,
+                 y_intercept: float,
+                 start_price: float,
+                 end_price: float,
+                 creation_time: Optional[Union[datetime, pd.Timestamp]] = None):
+        """
+        Initialize a Trendline object.
+        
+        Args:
+            trendline_type: Type of trendline ('support' or 'resistance')
+            start_time: Timestamp when the trendline begins
+            end_time: Timestamp when the trendline ends
+            slope: Slope of the trendline (price change per time unit)
+            y_intercept: Y-intercept of the trendline equation
+            start_price: Price at the start point
+            end_price: Price at the end point
+            creation_time: When this trendline object was created (defaults to current time)
+        """
+        self.trendline_type = trendline_type.lower()
+        self.start_time = pd.Timestamp(start_time)
+        self.end_time = pd.Timestamp(end_time)
+        self.slope = slope
+        self.y_intercept = y_intercept
+        self.start_price = start_price
+        self.end_price = end_price
+        self.creation_time = pd.Timestamp(creation_time) if creation_time else pd.Timestamp.now()
+        
+        # Validation
+        if self.trendline_type not in ['support', 'resistance']:
+            raise ValueError("trendline_type must be either 'support' or 'resistance'")
+        
+        if self.start_time >= self.end_time:
+            raise ValueError("start_time must be before end_time")
+    
+    @property
+    def duration(self) -> timedelta:
+        """
+        Calculate the duration of the trendline.
+        
+        Returns:
+            timedelta: Duration between start and end time
+        """
+        return self.end_time - self.start_time
+    
+    @property
+    def age(self) -> timedelta:
+        """
+        Calculate how long this trendline has been active since creation.
+        
+        Returns:
+            timedelta: Time since the trendline was created
+        """
+        return pd.Timestamp.now() - self.creation_time
+    
+    @property
+    def duration_hours(self) -> float:
+        """
+        Get duration in hours.
+        
+        Returns:
+            float: Duration in hours
+        """
+        return self.duration.total_seconds() / 3600
+    
+    @property
+    def age_hours(self) -> float:
+        """
+        Get age in hours.
+        
+        Returns:
+            float: Age in hours
+        """
+        return self.age.total_seconds() / 3600
+    
+    def get_price_at_time(self, timestamp: Union[datetime, pd.Timestamp]) -> float:
+        """
+        Calculate the trendline price at a specific timestamp using the linear equation.
+        
+        Args:
+            timestamp: The timestamp to calculate price for
+            
+        Returns:
+            float: Price at the given timestamp
+        """
+        timestamp = pd.Timestamp(timestamp)
+        
+        # Convert timestamp to numeric value for calculation
+        # Using timestamp as x-coordinate in the linear equation y = mx + b
+        time_numeric = timestamp.timestamp()
+        start_time_numeric = self.start_time.timestamp()
+        
+        # Calculate relative time from start
+        relative_time = time_numeric - start_time_numeric
+        
+        # Use linear equation: price = slope * relative_time + start_price
+        return self.slope * relative_time + self.start_price
+    
+    def is_active_at_time(self, timestamp: Union[datetime, pd.Timestamp]) -> bool:
+        """
+        Check if the trendline is active (valid) at a specific timestamp.
+        
+        Args:
+            timestamp: The timestamp to check
+            
+        Returns:
+            bool: True if trendline is active at the given time
+        """
+        timestamp = pd.Timestamp(timestamp)
+        return self.start_time <= timestamp <= self.end_time
+    
+    def extend_end_time(self, new_end_time: Union[datetime, pd.Timestamp]) -> None:
+        """
+        Extend the trendline's end time.
+        
+        Args:
+            new_end_time: New end time for the trendline
+        """
+        new_end_time = pd.Timestamp(new_end_time)
+        if new_end_time <= self.end_time:
+            raise ValueError("new_end_time must be after current end_time")
+        
+        self.end_time = new_end_time
+        # Update end price based on the equation
+        self.end_price = self.get_price_at_time(new_end_time)
+    
+    def to_dict(self) -> dict:
+        """
+        Convert trendline to dictionary representation.
+        
+        Returns:
+            dict: Dictionary containing all trendline information
+        """
+        return {
+            'trendline_type': self.trendline_type,
+            'start_time': self.start_time,
+            'end_time': self.end_time,
+            'slope': self.slope,
+            'y_intercept': self.y_intercept,
+            'start_price': self.start_price,
+            'end_price': self.end_price,
+            'creation_time': self.creation_time,
+            'duration_hours': self.duration_hours,
+            'age_hours': self.age_hours
+        }
+    
+    def __str__(self) -> str:
+        """String representation of the trendline."""
+        return (f"Trendline({self.trendline_type.title()}: "
+                f"{self.start_time.strftime('%Y-%m-%d %H:%M')} to "
+                f"{self.end_time.strftime('%Y-%m-%d %H:%M')}, "
+                f"slope={self.slope:.6f}, duration={self.duration_hours:.1f}h)")
+    
+    def __repr__(self) -> str:
+        """Detailed representation of the trendline."""
+        return (f"Trendline(type='{self.trendline_type}', "
+                f"start_time='{self.start_time}', end_time='{self.end_time}', "
+                f"slope={self.slope}, y_intercept={self.y_intercept}, "
+                f"start_price={self.start_price}, end_price={self.end_price})")
+
 
 def generate_bounce_conditions(close_data, level_data, direction: str, tolerance: float = 0.00005, pivot_highs=None, pivot_lows=None):
     """

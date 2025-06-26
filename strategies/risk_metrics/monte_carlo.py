@@ -6,13 +6,13 @@ import random
 import time
 from .volatility_models import GARCHModel
 
-# Import trendline functions from trend_metrics using absolute imports
+# Import trendline functions and Trendline class from trend_metrics using absolute imports
 try:
-    from trend_metrics.trendline import gentrends, rank_trendlines
+    from trend_metrics.trendline import gentrends, rank_trendlines, Trendline
 except ImportError:
     # Fallback for different import structures
     try:
-        from strategies.trend_metrics.trendline import gentrends, rank_trendlines
+        from strategies.trend_metrics.trendline import gentrends, rank_trendlines, Trendline
     except ImportError:
         print("Warning: Could not import trendline functions. Some functionality may be limited.")
         # Define dummy functions to prevent errors
@@ -20,6 +20,11 @@ except ImportError:
             return pd.DataFrame()
         def rank_trendlines(*args, **kwargs):
             return {"ranked_maxlines": {}, "ranked_minlines": {}}
+        
+        # Define dummy Trendline class
+        class Trendline:
+            def __init__(self, *args, **kwargs):
+                pass
 
 class MonteCarloSimulator:
     """
@@ -206,158 +211,12 @@ class MonteCarloSimulator:
         return np.mean(((returns - mean) / std) ** 4) - 3
 
 
-class MonteCarloCache:
-    """
-    Manages per-pair caching of Monte Carlo results with timing logic.
-    
-    This class encapsulates all caching functionality for Monte Carlo optimization results,
-    including when to recalculate, storing results per trading pair, and retrieving them.
-    """
-    
-    def __init__(self, recalc_interval_minutes: int):
-        """
-        Initialize Monte Carlo cache.
-        
-        Args:
-            recalc_interval_minutes: Interval in minutes between recalculations
-        """
-        self.recalc_interval_minutes = recalc_interval_minutes
-        self.last_mc_recalc_time_per_pair: Dict[str, Optional[datetime]] = {}
-        self.cached_mc_results_per_pair: Dict[str, Dict[str, Any]] = {}
-    
-    def should_recalculate(self, pair: str, current_time: Optional[datetime] = None) -> bool:
-        """
-        Determine if Monte Carlo results should be recalculated for a pair.
-        
-        Args:
-            pair: Trading pair name
-            current_time: Current time (uses current UTC time if None)
-            
-        Returns:
-            bool: True if recalculation is needed
-        """
-        if current_time is None:
-            current_time = datetime.now(timezone.utc)
-        
-        if pair not in self.last_mc_recalc_time_per_pair:
-            return True
-        
-        last_time = self.last_mc_recalc_time_per_pair[pair]
-        if last_time is None:
-            return True
-        
-        time_diff = (current_time - last_time).total_seconds() / 60
-        return time_diff >= self.recalc_interval_minutes
-    
-    def cache_results(self, pair: str, results: Dict[str, Any], timestamp: Optional[datetime] = None) -> None:
-        """
-        Cache Monte Carlo results for a pair.
-        
-        Args:
-            pair: Trading pair name
-            results: Monte Carlo optimization results
-            timestamp: Timestamp of the results (uses current UTC time if None)
-        """
-        if timestamp is None:
-            timestamp = datetime.now(timezone.utc)
-        
-        self.cached_mc_results_per_pair[pair] = results
-        self.last_mc_recalc_time_per_pair[pair] = timestamp
-    
-    def get_results(self, pair: str) -> Dict[str, Any]:
-        """
-        Get cached Monte Carlo results for a pair.
-        
-        Args:
-            pair: Trading pair name
-            
-        Returns:
-            Dict containing Monte Carlo results, or empty dict if not available
-        """
-        return self.cached_mc_results_per_pair.get(pair, {})
-    
-    def has_results(self, pair: str) -> bool:
-        """
-        Check if Monte Carlo results are available for a pair.
-        
-        Args:
-            pair: Trading pair name
-            
-        Returns:
-            bool: True if results are cached for the pair
-        """
-        return pair in self.cached_mc_results_per_pair and bool(self.cached_mc_results_per_pair[pair])
-    
-    def clear_cache(self, pair: str) -> None:
-        """
-        Clear Monte Carlo cache for a specific pair.
-        
-        Args:
-            pair: Trading pair name
-        """
-        if pair in self.cached_mc_results_per_pair:
-            del self.cached_mc_results_per_pair[pair]
-        if pair in self.last_mc_recalc_time_per_pair:
-            del self.last_mc_recalc_time_per_pair[pair]
-        print(f"Cleared Monte Carlo cache for {pair}")
-    
-    def get_cache_stats(self) -> Dict[str, Any]:
-        """
-        Get statistics about the Monte Carlo cache across all pairs.
-        
-        Returns:
-            Dict containing cache statistics
-        """
-        stats = {
-            'total_pairs_cached': len(self.cached_mc_results_per_pair),
-            'pairs_with_results': [],
-            'cache_ages_minutes': {},
-            'last_recalc_times': {}
-        }
-        
-        current_time = datetime.now(timezone.utc)
-        
-        for pair in self.cached_mc_results_per_pair:
-            if self.cached_mc_results_per_pair[pair]:
-                stats['pairs_with_results'].append(pair)
-                
-            if pair in self.last_mc_recalc_time_per_pair and self.last_mc_recalc_time_per_pair[pair]:
-                last_time = self.last_mc_recalc_time_per_pair[pair]
-                age_minutes = (current_time - last_time).total_seconds() / 60
-                stats['cache_ages_minutes'][pair] = age_minutes
-                stats['last_recalc_times'][pair] = last_time.isoformat()
-        
-        return stats
-    
-    def print_cache_summary(self) -> None:
-        """
-        Print a summary of the Monte Carlo cache status for all pairs.
-        """
-        stats = self.get_cache_stats()
-        
-        print("=== Monte Carlo Cache Summary ===")
-        print(f"Total pairs with cache: {stats['total_pairs_cached']}")
-        print(f"Pairs with valid results: {len(stats['pairs_with_results'])}")
-        
-        if stats['pairs_with_results']:
-            print("Pairs with cached results:")
-            for pair in stats['pairs_with_results']:
-                age = stats['cache_ages_minutes'].get(pair, 0)
-                print(f"  - {pair}: {age:.1f} minutes old")
-        
-        if len(stats['cache_ages_minutes']) != len(stats['pairs_with_results']):
-            stale_pairs = set(self.cached_mc_results_per_pair.keys()) - set(stats['pairs_with_results'])
-            if stale_pairs:
-                print(f"Pairs with stale/empty cache: {list(stale_pairs)}")
-
-
 class TrendlineMonteCarloOptimizer:
     """
     Contains the core Monte Carlo optimization logic for finding optimal trendline periods.
     
     This class handles the heavy computational work of running Monte Carlo simulations
-    to find the best lookback periods for trendline analysis, completely separate from
-    caching or how the results are used.
+    to find the best lookback periods for trendline analysis.
     """
     
     def __init__(self, mc_iterations: int, min_lookback_period: int, 
@@ -438,7 +297,7 @@ class TrendlineMonteCarloOptimizer:
             random_period: Lookback period to test
             
         Returns:
-            Dict containing trendlines and scores
+            Dict containing trendlines, scores, and Trendline objects
         """
         # Find swing points for this period with adaptive parameters
         high_swing_points = self.trend_analyzer._find_swing_points(
@@ -484,6 +343,52 @@ class TrendlineMonteCarloOptimizer:
         resistance_slope = trends['Max Slope'].iloc[-1] if 'Max Slope' in trends.columns else 0.0
         support_slope = trends['Min Slope'].iloc[-1] if 'Min Slope' in trends.columns else 0.0
         
+        # Create Trendline objects from the gentrends output
+        trendline_objects = []
+        
+        end_time = recent_data['datetime'].iloc[-1]  # Last candle in the lookback period
+        start_time = recent_data['datetime'].iloc[0]  # First candle in the lookback period
+        
+        # Create resistance trendline object (Max Line)
+        if 'Max Line' in trends.columns and not trends['Max Line'].isna().all():
+            resistance_start_price = trends['Max Line'].iloc[0]
+            resistance_end_price = trends['Max Line'].iloc[-1]
+            
+            # Calculate y-intercept for the resistance line
+            # Using the linear equation: y = mx + b, where b = y - mx
+            # We'll use the start point as reference
+            resistance_y_intercept = resistance_start_price - (resistance_slope * 0)
+            
+            resistance_trendline = Trendline(
+                trendline_type='resistance',
+                start_time=start_time,
+                end_time=end_time,
+                slope=resistance_slope,
+                y_intercept=resistance_y_intercept,
+                start_price=resistance_start_price,
+                end_price=resistance_end_price
+            )
+            trendline_objects.append(resistance_trendline)
+        
+        # Create support trendline object (Min Line)
+        if 'Min Line' in trends.columns and not trends['Min Line'].isna().all():
+            support_start_price = trends['Min Line'].iloc[0]
+            support_end_price = trends['Min Line'].iloc[-1]
+            
+            # Calculate y-intercept for the support line
+            support_y_intercept = support_start_price - (support_slope * 0)
+            
+            support_trendline = Trendline(
+                trendline_type='support',
+                start_time=start_time,
+                end_time=end_time,
+                slope=support_slope,
+                y_intercept=support_y_intercept,
+                start_price=support_start_price,
+                end_price=support_end_price
+            )
+            trendline_objects.append(support_trendline)
+        
         return {
             'trends': trends,
             'resistance_score': resistance_score,
@@ -491,7 +396,11 @@ class TrendlineMonteCarloOptimizer:
             'resistance_slope': resistance_slope,
             'support_slope': support_slope,
             'high_swing_points': high_swing_points,
-            'low_swing_points': low_swing_points
+            'low_swing_points': low_swing_points,
+            'trendline_objects': trendline_objects,  # List of Trendline objects
+            'start_time': start_time,  # Store the calculated start time
+            'end_time': end_time,      # Store the calculated end time
+            'lookback_period': random_period  # Store the period used
         }
     
     def monte_carlo_period_optimization(self, dataframe: pd.DataFrame, pair: str = "UNKNOWN") -> Dict[str, Any]:
@@ -540,6 +449,8 @@ class TrendlineMonteCarloOptimizer:
         best_support_line = np.full(len(dataframe), np.nan)
         best_resistance_slope = 0.0
         best_support_slope = 0.0
+        best_resistance_trendline = None
+        best_support_trendline = None
         
         # Store all tested periods and scores for analysis
         tested_periods = []
@@ -564,6 +475,7 @@ class TrendlineMonteCarloOptimizer:
                 current_resistance_score = trendline_results['resistance_score']
                 current_support_score = trendline_results['support_score']
                 trends = trendline_results['trends']
+                trendline_objects = trendline_results.get('trendline_objects', [])
                 
                 # Store results
                 tested_periods.append(random_period)
@@ -586,6 +498,12 @@ class TrendlineMonteCarloOptimizer:
                     
                     best_resistance_slope = trendline_results['resistance_slope']
                     
+                    # Store the best resistance trendline object
+                    for trendline_obj in trendline_objects:
+                        if trendline_obj.trendline_type == 'resistance':
+                            best_resistance_trendline = trendline_obj
+                            break
+                    
                     print(f"New best resistance found for {pair} at iteration {iteration + 1}: period {random_period}, score {current_resistance_score:.4f}")
                 
                 # Check if this is the best support line so far
@@ -603,6 +521,12 @@ class TrendlineMonteCarloOptimizer:
                     best_support_line = support_line
                     
                     best_support_slope = trendline_results['support_slope']
+                    
+                    # Store the best support trendline object
+                    for trendline_obj in trendline_objects:
+                        if trendline_obj.trendline_type == 'support':
+                            best_support_trendline = trendline_obj
+                            break
                     
                     print(f"New best support found for {pair} at iteration {iteration + 1}: period {random_period}, score {current_support_score:.4f}")
                 
@@ -644,83 +568,43 @@ class TrendlineMonteCarloOptimizer:
             'max_lookback_period': max_lookback_period,
             'period_distribution': period_counts,
             'best_resistance_slope': best_resistance_slope,
-            'best_support_slope': best_support_slope
+            'best_support_slope': best_support_slope,
+            'best_resistance_trendline': best_resistance_trendline,
+            'best_support_trendline': best_support_trendline
         }
 
 
 class MonteCarloManager:
     """
-    Coordinates Monte Carlo optimization with caching and result application.
+    Coordinates Monte Carlo optimization and result application.
     
-    This class acts as the public-facing interface that coordinates the MonteCarloCache
-    and TrendlineMonteCarloOptimizer to execute the full process: check the cache,
-    run the optimization if needed, and apply the results to the dataframe.
+    This class acts as the public-facing interface that coordinates the
+    TrendlineMonteCarloOptimizer to execute Monte Carlo optimization
+    and apply the results to the dataframe.
     """
     
     def __init__(self, mc_iterations: int, min_lookback_period: int, 
                  recalc_interval_minutes: int, trendline_proximity_threshold: float,
-                 trend_analyzer, volatility_model, garch_model):
+                 trend_analyzer):
         """
         Initialize the Monte Carlo manager.
         
         Args:
             mc_iterations: Number of Monte Carlo iterations
             min_lookback_period: Minimum lookback period
-            recalc_interval_minutes: Cache recalculation interval in minutes
+            recalc_interval_minutes: Not used anymore (kept for compatibility)
             trendline_proximity_threshold: Threshold for trendline proximity scoring
             trend_analyzer: TrendAnalysis instance
-            volatility_model: VolatilityModel instance
-            garch_model: GARCHModel instance
         """
-        self.cache = MonteCarloCache(recalc_interval_minutes)
         self.optimizer = TrendlineMonteCarloOptimizer(
             mc_iterations, min_lookback_period, 
             trendline_proximity_threshold, trend_analyzer
         )
-        self.volatility_model = volatility_model
-        self.garch_model = garch_model
-    
-    def estimate_current_volatility_regime(self, dataframe: pd.DataFrame) -> Tuple[str, float, float]:
-        """
-        Estimate current volatility regime using GARCH model for risk management purposes.
-        This is separated from lookback period generation to ensure proper use of GARCH.
-        
-        Args:
-            dataframe: DataFrame with OHLCV data
-            
-        Returns:
-            Tuple[str, float, float]: (regime, volatility, risk_multiplier)
-        """
-        # Calculate log returns for GARCH volatility estimation
-        log_returns = np.log(dataframe['close'].pct_change() + 1).dropna().values
-        
-        # Use a reasonable window for volatility estimation
-        volatility_window = min(len(log_returns), 500)  # Fixed window for volatility estimation
-        volatility_window = max(volatility_window, 100)   # Minimum window for reliable estimation
-        
-        # Calculate current volatility using GARCH model
-        recent_returns = log_returns[-volatility_window:]
-        
-        # Clean data and calculate volatility
-        if len(recent_returns) > 0 and not np.isnan(recent_returns).all() and not np.isinf(recent_returns).any():
-            # Use VolatilityModel's calculate_volatility method with GARCHModel
-            current_volatility = self.volatility_model.calculate_volatility(recent_returns, self.garch_model)
-            print(f"  GARCH volatility result: {current_volatility:.6f}")
-        else:
-            print(f"  Invalid data for GARCH calculation, using fallback")
-            # Fallback to simple standard deviation using VolatilityModel
-            current_volatility = self.volatility_model.calculate_volatility(recent_returns)
-            
-        regime, risk_multiplier = self.volatility_model.get_regime_and_multiplier(current_volatility)
-        
-        print(f"Current volatility regime: {regime} (volatility: {current_volatility:.6f}, risk multiplier: {risk_multiplier:.2f})")
-        
-        return regime, current_volatility, risk_multiplier
     
     def execute_monte_carlo_optimization(self, dataframe: pd.DataFrame, pair: str,
                                        enable_mc_optimization: bool = True) -> Dict[str, Any]:
         """
-        Execute Monte Carlo optimization with caching logic.
+        Execute Monte Carlo optimization without caching.
         
         Args:
             dataframe: DataFrame with OHLCV data
@@ -733,38 +617,13 @@ class MonteCarloManager:
         if not enable_mc_optimization:
             return {}
         
-        # Check if we need to recalculate
-        should_recalc = self.cache.should_recalculate(pair)
+        print(f"Running Monte Carlo optimization for {pair}...")
         
-        if should_recalc:
-            print(f"Running Monte Carlo optimization for {pair}...")
-            
-            # Run the optimization
-            mc_results = self.optimizer.monte_carlo_period_optimization(dataframe, pair)
-            
-            # Add volatility regime information
-            regime, current_volatility, risk_multiplier = self.estimate_current_volatility_regime(dataframe)
-            mc_results.update({
-                'volatility_regime': regime,
-                'current_volatility': current_volatility,
-                'risk_multiplier': risk_multiplier
-            })
-            
-            # Cache the results
-            self.cache.cache_results(pair, mc_results)
-            
-            print(f"Monte Carlo optimization completed and cached for {pair}")
-            return mc_results
-        else:
-            # Use cached results
-            cached_results = self.cache.get_results(pair)
-            if cached_results:
-                print(f"Using cached Monte Carlo results for {pair}")
-                return cached_results
-            else:
-                # No cached results available, run optimization
-                print(f"No cached results found for {pair}, running optimization...")
-                return self.execute_monte_carlo_optimization(dataframe, pair, enable_mc_optimization)
+        # Run the optimization
+        mc_results = self.optimizer.monte_carlo_period_optimization(dataframe, pair)
+        
+        print(f"Monte Carlo optimization completed for {pair}")
+        return mc_results
     
     def apply_monte_carlo_results(self, dataframe: pd.DataFrame, mc_results: Dict[str, Any]) -> None:
         """
@@ -856,25 +715,4 @@ class MonteCarloManager:
         # Apply scores to the specific row
         dataframe.loc[pandas_index, 'MC_Resistance_Score'] = mc_results.get('resistance_score', 0.0)
         dataframe.loc[pandas_index, 'MC_Support_Score'] = mc_results.get('support_score', 0.0)
-        dataframe.loc[pandas_index, 'MC_Optimal_Period'] = mc_results.get('optimal_resistance_period', 0.0)
-    
-    # Expose cache methods for external access
-    def get_pair_results(self, pair: str) -> Dict[str, Any]:
-        """Get Monte Carlo results for a specific pair."""
-        return self.cache.get_results(pair)
-    
-    def has_pair_results(self, pair: str) -> bool:
-        """Check if Monte Carlo results are available for a pair."""
-        return self.cache.has_results(pair)
-    
-    def clear_pair_cache(self, pair: str) -> None:
-        """Clear Monte Carlo cache for a specific pair."""
-        self.cache.clear_cache(pair)
-    
-    def get_cache_stats(self) -> Dict[str, Any]:
-        """Get statistics about the Monte Carlo cache."""
-        return self.cache.get_cache_stats()
-    
-    def print_cache_summary(self) -> None:
-        """Print a summary of the Monte Carlo cache status."""
-        self.cache.print_cache_summary() 
+        dataframe.loc[pandas_index, 'MC_Optimal_Period'] = mc_results.get('optimal_resistance_period', 0.0) 
