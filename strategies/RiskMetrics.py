@@ -348,60 +348,6 @@ class RiskMetrics(IStrategy):
         "exit": "GTC"
     }
 
-    def calculate_bounce_metrics(self, dataframe: DataFrame) -> Dict[str, float]:
-        """
-        Calculate bounce counts and related metrics for MC_Optimal_Resistance and MC_Optimal_Support.
-        
-        Args:
-            dataframe: DataFrame with OHLCV data and indicators
-            
-        Returns:
-            Dict containing bounce metrics for both resistance and support
-        """
-        metrics = {
-            'resistance_bounce_count': 0.0,
-            'support_bounce_count': 0.0,
-            'resistance_score': 0.0,
-            'support_score': 0.0
-        }
-        
-        # Check if required columns exist
-        required_columns = ['MC_Optimal_Support', 'MC_Optimal_Resistance', 
-                          'MC_Support_Score', 'MC_Resistance_Score']
-        if not all(col in dataframe.columns for col in required_columns):
-            return metrics
-        
-        # Check if pivot points are available
-        if 'all_highs' not in dataframe.columns or 'all_lows' not in dataframe.columns:
-            return metrics
-        
-        try:
-            # Calculate resistance bounces (short direction)
-            resistance_bounce_conditions = generate_bounce_conditions(
-                dataframe['close'], 
-                dataframe['MC_Optimal_Resistance'], 'short', self.trendline_proximity_threshold.value,
-                dataframe.get('all_highs'), dataframe.get('all_lows')
-            )
-            metrics['resistance_bounce_count'] = float(resistance_bounce_conditions.sum())
-            
-            # Calculate support bounces (long direction)  
-            support_bounce_conditions = generate_bounce_conditions(
-                dataframe['close'], 
-                dataframe['MC_Optimal_Support'], 'long', self.trendline_proximity_threshold.value,
-                dataframe.get('all_highs'), dataframe.get('all_lows')
-            )
-            metrics['support_bounce_count'] = float(support_bounce_conditions.sum())
-            
-            # Get the latest scores
-            if len(dataframe) > 0:
-                latest_candle = dataframe.iloc[-1]
-                metrics['resistance_score'] = float(latest_candle.get('MC_Resistance_Score', 0.0))
-                metrics['support_score'] = float(latest_candle.get('MC_Support_Score', 0.0))
-                
-        except Exception as e:
-            print(f"Error calculating bounce metrics: {e}")
-        
-        return metrics
 
     @property
     def plot_config(self):
@@ -410,10 +356,6 @@ class RiskMetrics(IStrategy):
             "main_plot": {
                 "all_highs": {"color": "red", "type": "scatter", "symbol": "triangle-down", "size": 12, "fillcolor": "red"},
                 "all_lows": {"color": "green", "type": "scatter", "symbol": "triangle-up", "size": 12, "fillcolor": "green"},
-                "Resistance Line": {"color": "red", "width": 2.0},
-                "Support Line": {"color": "green", "width": 2.0},
-                "Highest_Scored_Line": {"color": "purple", "width": 3.0},
-                "linear_reg_line": {"color": "blue", "width": 3.0},
                 "MC_Optimal_Resistance": {"color": "darkred", "width": 4.0, "dash": "dot"},
                 "MC_Optimal_Support": {"color": "darkgreen", "width": 4.0, "dash": "dot"}
             },
@@ -606,7 +548,7 @@ class RiskMetrics(IStrategy):
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
-        Adds several different TA indicators to the given DataFrame.
+        Adds several different TA indicators to the given DataFrame.resistance line
         Now implements rolling Monte Carlo optimization to eliminate lookahead bias.
         """
         if len(dataframe) == 0:
@@ -646,165 +588,10 @@ class RiskMetrics(IStrategy):
         
         # Check if rolling optimization is enabled
         if not self.enable_rolling_mc_optimization.value:
-            print("=== Using Original Monte Carlo Optimization (with potential lookahead bias) ===")
-            # Execute Monte Carlo optimization using the manager (original method)
-            mc_results = self.monte_carlo_manager.execute_monte_carlo_optimization(
-                dataframe, metadata['pair'], self.enable_mc_optimization.value
-            )
-            
-            # Apply the results to the dataframe
-            self.monte_carlo_manager.apply_monte_carlo_results(dataframe, mc_results)
-            
-            if mc_results:
-                print(f"Applied Monte Carlo results for {metadata['pair']}:")
-                print(f"  Resistance Score: {mc_results.get('resistance_score', 0.0):.6f}")
-                print(f"  Support Score: {mc_results.get('support_score', 0.0):.6f}")
-                print(f"  Optimal Periods: R={mc_results.get('optimal_resistance_period', 0)}, S={mc_results.get('optimal_support_period', 0)}")
-            else:
-                print(f"Monte Carlo results not yet available for {metadata['pair']}.")
+            self._execute_non_rolling_monte_carlo_optimization(dataframe, metadata)
         else:
-            print("=== Using Rolling Monte Carlo Optimization (eliminates lookahead bias) ===")
-            last_mc_results = None
-            print(f"=== Starting Rolling Monte Carlo Analysis for {metadata['pair']} ===")
-            print(f"Recalc interval: {recalc_interval_candles} candles ({self.mc_recalc_interval_minutes.value} minutes)")
-            print(f"Lookback window: {self.mc_lookback_window_candles.value} candles")
-            print(f"Processing ALL {len(dataframe) - min_required_candles} candles starting from minimum required data ({min_required_candles})")
+            self._execute_rolling_monte_carlo_optimization(dataframe, metadata)
 
-            # --- State variables for projecting trendlines with slopes ---
-            last_resistance_value = np.nan
-            last_support_value = np.nan
-            current_resistance_slope = 0.0
-            current_support_slope = 0.0
-
-            # Start rolling optimization from minimum required data, not startup_candles
-            for i in range(min_required_candles, len(dataframe)):
-                # Determine if it is time to recalculate
-                should_recalculate = (i == min_required_candles) or ((i - min_required_candles) % recalc_interval_candles == 0)
-
-                if should_recalculate:
-                    print(f"Recalculating MC results at candle {i}/{len(dataframe)} ({(i/len(dataframe)*100):.1f}%)")
-                    # Define the lookback window for the current candle (point-in-time data only)
-                    # Use the smaller of: lookback window or all available data up to this point
-                    lookback_start = max(0, i - self.mc_lookback_window_candles.value)
-                    current_dataframe_slice = dataframe.iloc[lookback_start:i].copy()
-
-                    print(f"  Using data slice: {lookback_start} to {i} ({len(current_dataframe_slice)} candles)")
-
-                    # Execute MC optimization on the slice of data available at this point in time
-                    # Create a temporary manager to ensure no state from future data is used
-                    temp_mc_manager = MonteCarloManager(
-                        mc_iterations=self.MC_ITERATIONS,
-                        min_lookback_period=self.MIN_LOOKBACK_PERIOD,
-                        recalc_interval_minutes=0,  # Force recalc for temporary manager
-                        trendline_proximity_threshold=self.trendline_proximity_threshold.value,
-                        trend_analyzer=self.trend_analyzer
-                    )
-                    
-                    mc_results = temp_mc_manager.execute_monte_carlo_optimization(
-                        current_dataframe_slice, metadata['pair'], self.enable_mc_optimization.value
-                    )
-                    
-                    if mc_results:
-                        last_mc_results = mc_results
-                        
-                        # Store trendline objects from this iteration
-                        resistance_trendline = mc_results.get('best_resistance_trendline')
-                        support_trendline = mc_results.get('best_support_trendline')
-                        
-                        if resistance_trendline:
-                            self.stored_trendlines.append(resistance_trendline)
-                            print(f"  Stored resistance trendline: {resistance_trendline.trendline_type} at candle {i}")
-                        
-                        if support_trendline:
-                            self.stored_trendlines.append(support_trendline)
-                            print(f"  Stored support trendline: {support_trendline.trendline_type} at candle {i}")
-                        
-                        # Update slopes from the new MC results
-                        current_resistance_slope = mc_results.get('best_resistance_slope', 0.0)
-                        current_support_slope = mc_results.get('best_support_slope', 0.0)
-                        
-                        # Get the last valid value from the calculated lines as the starting point
-                        res_line = mc_results.get('resistance_line', np.array([]))
-                        valid_res = res_line[~np.isnan(res_line)]
-                        if len(valid_res) > 0:
-                            last_resistance_value = valid_res[-1]
-
-                        sup_line = mc_results.get('support_line', np.array([]))
-                        valid_sup = sup_line[~np.isnan(sup_line)]
-                        if len(valid_sup) > 0:
-                            last_support_value = valid_sup[-1]
-                        
-                        print(f"  New MC results: R_score={mc_results.get('resistance_score', 0):.4f}, S_score={mc_results.get('support_score', 0):.4f}")
-                        print(f"  Slopes: R_slope={current_resistance_slope:.6f}, S_slope={current_support_slope:.6f}")
-
-                # Project the trendlines forward using the slope (creating continuous sloped lines)
-                pandas_index = dataframe.index[i]
-                
-                if not np.isnan(last_resistance_value):
-                    # Project resistance line forward by adding slope
-                    last_resistance_value += current_resistance_slope
-                    dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = last_resistance_value
-                else:
-                    dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = np.nan
-                
-                if not np.isnan(last_support_value):
-                    # Project support line forward by adding slope
-                    last_support_value += current_support_slope
-                    dataframe.loc[pandas_index, 'MC_Optimal_Support'] = last_support_value
-                else:
-                    dataframe.loc[pandas_index, 'MC_Optimal_Support'] = np.nan
-                
-                # Apply scores to this specific row
-                dataframe.loc[pandas_index, 'MC_Resistance_Score'] = last_mc_results.get('resistance_score', 0.0) if last_mc_results else 0.0
-                dataframe.loc[pandas_index, 'MC_Support_Score'] = last_mc_results.get('support_score', 0.0) if last_mc_results else 0.0
-                dataframe.loc[pandas_index, 'MC_Optimal_Resistance_Period'] = last_mc_results.get('optimal_resistance_period', 0.0) if last_mc_results else 0.0
-                dataframe.loc[pandas_index, 'MC_Optimal_Support_Period'] = last_mc_results.get('optimal_support_period', 0.0) if last_mc_results else 0.0
-
-            print(f"Rolling Monte Carlo optimization completed for {metadata['pair']}")
-            if last_mc_results:
-                print(f"Final results: R_score={last_mc_results.get('resistance_score', 0):.4f}, S_score={last_mc_results.get('support_score', 0):.4f}")
-                print(f"Final slopes: R_slope={current_resistance_slope:.6f}, S_slope={current_support_slope:.6f}")
-                
-            # Initialize the early candles that couldn't be processed with rolling optimization
-            for i in range(0, min_required_candles):
-                pandas_index = dataframe.index[i]
-                dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = np.nan
-                dataframe.loc[pandas_index, 'MC_Optimal_Support'] = np.nan
-                dataframe.loc[pandas_index, 'MC_Resistance_Score'] = 0.0
-                dataframe.loc[pandas_index, 'MC_Support_Score'] = 0.0
-                dataframe.loc[pandas_index, 'MC_Optimal_Resistance_Period'] = 0.0
-                dataframe.loc[pandas_index, 'MC_Optimal_Support_Period'] = 0.0
-                dataframe.loc[pandas_index, 'score_convergence_ratio'] = 0.0
-                dataframe.loc[pandas_index, 'convergence_multiplier'] = 1.0
-                dataframe.loc[pandas_index, 'trading_mode_indicator'] = 0.0
-                dataframe.loc[pandas_index, 'trading_mode'] = "INSUFFICIENT_DATA"
-
-        # Calculate linear regression trendlines using TA-Lib
-        try:
-            # Get appropriate timeperiod for linear regression
-            timeperiod = self.linearreg_timeperiod.value
-            price_field = self.linearreg_price_field.value
-            
-            # The linear regression trendline is a true straight line calculated using
-            # the least squares fit method over the specified timeperiod. Unlike the other
-            # trendlines that connect pivot points, this line represents the statistical
-            # best fit line through the price data and can help identify the trend
-            # direction and strength. A steeper slope indicates a stronger trend.
-            linearreg_data = self.trend_analyzer.calculate_talib_linearreg(
-                dataframe, 
-                timeperiod=timeperiod,
-                price_field=price_field
-            )
-            
-            # Copy the linear regression columns back to the original dataframe using proper pandas assignment
-            dataframe.loc[:, 'linear_reg'] = linearreg_data['linear_reg']
-            dataframe.loc[:, 'linear_reg_slope'] = linearreg_data['linear_reg_slope']
-            dataframe.loc[:, 'linear_reg_angle'] = linearreg_data['linear_reg_angle']
-            dataframe.loc[:, 'linear_reg_intercept'] = linearreg_data['linear_reg_intercept']
-            dataframe.loc[:, 'linear_reg_line'] = linearreg_data['linear_reg_line']
-                    
-        except Exception as e:
-            print(f"Error calculating linear regression: {e}")
 
         # Mark high and low points for visualization
         try:
@@ -814,30 +601,6 @@ class RiskMetrics(IStrategy):
         except Exception as e:
             print(f"Error finding swing points: {e}")
 
-        # === Calculate and Store Bounce Metrics for Chart Display ===
-        try:
-            print("=== Calculating Bounce Metrics for Chart Display ===")
-            bounce_metrics = self.calculate_bounce_metrics(dataframe)
-            
-            # Store bounce counts as constant values across all rows for chart display
-            dataframe.loc[:, 'resistance_bounce_count'] = bounce_metrics['resistance_bounce_count']
-            dataframe.loc[:, 'support_bounce_count'] = bounce_metrics['support_bounce_count']
-            
-            # Store normalized scores for better chart visualization (divide by 100 to fit with bounce counts)
-            dataframe.loc[:, 'resistance_bounce_score_display'] = bounce_metrics['resistance_score'] / 100.0
-            dataframe.loc[:, 'support_bounce_score_display'] = bounce_metrics['support_score'] / 100.0
-            
-            print(f"Bounce Metrics Summary:")
-            print(f"  Resistance: {bounce_metrics['resistance_bounce_count']:.0f} bounces, score: {bounce_metrics['resistance_score']:.4f}")
-            print(f"  Support: {bounce_metrics['support_bounce_count']:.0f} bounces, score: {bounce_metrics['support_score']:.4f}")
-            
-        except Exception as e:
-            print(f"Error calculating bounce metrics: {e}")
-            # Initialize with default values if calculation fails
-            dataframe.loc[:, 'resistance_bounce_count'] = 0.0
-            dataframe.loc[:, 'support_bounce_count'] = 0.0
-            dataframe.loc[:, 'resistance_bounce_score_display'] = 0.0
-            dataframe.loc[:, 'support_bounce_score_display'] = 0.0
 
         # === Output All Stored Trendlines ===
         try:
@@ -869,7 +632,7 @@ class RiskMetrics(IStrategy):
                     print(f"     Age: {trendline.age_hours:.2f} hours")
                     print(f"     Slope: {trendline.slope:.8f}")
                     print(f"     Start Price: {trendline.start_price:.6f}")
-                    print(f"     End Price: {trendline.end_price:.6f}")
+                    print(f"     Bounce Count: {trendline.bounce_count}")
                     print("")
             else:
                 print(f"  No trendlines stored during this execution")
@@ -914,31 +677,14 @@ class RiskMetrics(IStrategy):
         # Initialize marker columns for support and resistance points using proper pandas assignment
         dataframe.loc[:, 'all_highs'] = np.nan
         dataframe.loc[:, 'all_lows'] = np.nan
-        
-        # Initialize columns for main trend lines
-        dataframe.loc[:, 'Resistance Line'] = np.nan
-        dataframe.loc[:, 'Support Line'] = np.nan
-        
+                
         # Initialize Monte Carlo optimal lines
         dataframe.loc[:, 'MC_Optimal_Resistance'] = np.nan
         dataframe.loc[:, 'MC_Optimal_Support'] = np.nan
         dataframe.loc[:, 'MC_Resistance_Score'] = 0.0
         dataframe.loc[:, 'MC_Support_Score'] = 0.0
         dataframe.loc[:, 'MC_Optimal_Period'] = 0.0
-        
-        # Initialize columns for highest scored line
-        dataframe.loc[:, 'Highest_Scored_Line'] = np.nan
-        dataframe.loc[:, 'Highest_Set_Mean'] = np.nan
-        dataframe.loc[:, 'Highest_Line_Score'] = np.nan
-        dataframe.loc[:, 'Highest_Line_Type'] = ""  # Will be "Resistance" or "Support"
-        dataframe.loc[:, 'Highest_Line_Text'] = ""  # For displaying text on the chart
-        
-        # Initialize columns for individual segment trend lines
-        max_segments = 10
-        for i in range(max_segments):
-            dataframe.loc[:, f'Max_Line_{i}'] = np.nan
-            dataframe.loc[:, f'Min_Line_{i}'] = np.nan
-
+                
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
         Generate entry signals using the modular SignalGenerator.
@@ -956,58 +702,237 @@ class RiskMetrics(IStrategy):
         return self.signal_generator.generate_exit_signals(dataframe)
 
 
-    def get_market_condition_description(self, dataframe: DataFrame) -> Dict[str, str]:
+    def _execute_rolling_monte_carlo_recalculation(self, dataframe: DataFrame, i: int, metadata: dict) -> Optional[Dict]:
         """
-        Generate a human-readable description of current market conditions
-        based on the timeframe analysis.
+        Execute Monte Carlo recalculation for a specific candle index.
         
         Args:
-            dataframe: The analyzed dataframe with indicators
+            dataframe: The full dataframe
+            i: Current candle index
+            metadata: Strategy metadata
             
         Returns:
-            A dictionary containing market condition descriptions
+            Dictionary containing Monte Carlo results or None if failed
         """
-        if len(dataframe) < 10:
-            return {"error": "Not enough data for market condition analysis"}
+        # Define the lookback window for the current candle (point-in-time data only)
+        lookback_start = max(0, i - self.mc_lookback_window_candles.value)
+        current_dataframe_slice = dataframe.iloc[lookback_start:i].copy()
+
+        print(f"  Using data slice: {lookback_start} to {i} ({len(current_dataframe_slice)} candles)")
+
+        # Execute MC optimization on the slice of data available at this point in time
+        # Create a temporary manager to ensure no state from future data is used
+        temp_mc_manager = MonteCarloManager(
+            mc_iterations=self.MC_ITERATIONS,
+            min_lookback_period=self.MIN_LOOKBACK_PERIOD,
+            recalc_interval_minutes=0,  # Force recalc for temporary manager
+            trendline_proximity_threshold=self.trendline_proximity_threshold.value,
+            trend_analyzer=self.trend_analyzer
+        )
+        
+        mc_results = temp_mc_manager.execute_monte_carlo_optimization(
+            current_dataframe_slice, metadata['pair'], self.enable_mc_optimization.value
+        )
+        
+        return mc_results
+
+    def _update_slopes_and_values_from_mc_results(self, mc_results: Dict) -> Tuple[float, float, float, float]:
+        """
+        Update resistance and support slopes and values from Monte Carlo results.
+        
+        Args:
+            mc_results: Dictionary containing Monte Carlo optimization results
             
-        # Get the most recent candle
-        current_candle = dataframe.iloc[-1].squeeze()
+        Returns:
+            Tuple of (current_resistance_slope, current_support_slope, last_resistance_value, last_support_value)
+        """
+        # Update slopes from the new MC results
+        current_resistance_slope = mc_results.get('best_resistance_slope', 0.0)
+        current_support_slope = mc_results.get('best_support_slope', 0.0)
         
-        # Get the highest timeframe used
-        highest_tf = current_candle.get('highest_timeframe', self.timeframe)
+        # Get the last valid value from the calculated lines as the starting point
+        res_line = mc_results.get('resistance_line', np.array([]))
+        valid_res = res_line[~np.isnan(res_line)]
+        last_resistance_value = valid_res[-1] if len(valid_res) > 0 else np.nan
+
+        sup_line = mc_results.get('support_line', np.array([]))
+        valid_sup = sup_line[~np.isnan(sup_line)]
+        last_support_value = valid_sup[-1] if len(valid_sup) > 0 else np.nan
         
-        # Get linear regression angle to determine trend direction
-        trend_angle = current_candle.get('linear_reg_angle', 0)
+        return current_resistance_slope, current_support_slope, last_resistance_value, last_support_value
+
+    def _project_trendlines_forward(self, dataframe: DataFrame, i: int, 
+                                   last_resistance_value: float, last_support_value: float,
+                                   current_resistance_slope: float, current_support_slope: float,
+                                   last_mc_results: Optional[Dict]) -> Tuple[float, float]:
+        """
+        Project trendlines forward using slopes and apply results to dataframe.
         
-        # Determine trend direction based on angle
-        if trend_angle > 45:
-            trend_direction = "Strong uptrend"
-        elif trend_angle > 20:
-            trend_direction = "Moderate uptrend"
-        elif trend_angle > 5:
-            trend_direction = "Mild uptrend"
-        elif trend_angle > -5:
-            trend_direction = "Sideways"
-        elif trend_angle > -20:
-            trend_direction = "Mild downtrend"
-        elif trend_angle > -45:
-            trend_direction = "Moderate downtrend"
+        Args:
+            dataframe: The dataframe to update
+            i: Current candle index
+            last_resistance_value: Current resistance value
+            last_support_value: Current support value
+            current_resistance_slope: Resistance slope
+            current_support_slope: Support slope
+            last_mc_results: Latest Monte Carlo results
+            
+        Returns:
+            Tuple of updated (last_resistance_value, last_support_value)
+        """
+        pandas_index = dataframe.index[i]
+        
+        # Project resistance line forward
+        if not np.isnan(last_resistance_value):
+            last_resistance_value += current_resistance_slope
+            dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = last_resistance_value
         else:
-            trend_direction = "Strong downtrend"
+            dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = np.nan
         
-        # Get highest scored line type (support/resistance)
-        strongest_level_type = current_candle.get('Highest_Line_Type', 'Unknown')
+        # Project support line forward
+        if not np.isnan(last_support_value):
+            last_support_value += current_support_slope
+            dataframe.loc[pandas_index, 'MC_Optimal_Support'] = last_support_value
+        else:
+            dataframe.loc[pandas_index, 'MC_Optimal_Support'] = np.nan
         
-        # Create description
-        description = {
-            "timeframe": f"Analysis based on {highest_tf} data",
-            "trend": trend_direction,
-            "important_level": f"Most significant level: {strongest_level_type}",
-            "summary": (
-                f"Market is in a {trend_direction.lower()}. "
-                f"Analysis based on {highest_tf} timeframe data."
+        # Apply scores to this specific row
+        dataframe.loc[pandas_index, 'MC_Resistance_Score'] = last_mc_results.get('resistance_score', 0.0) if last_mc_results else 0.0
+        dataframe.loc[pandas_index, 'MC_Support_Score'] = last_mc_results.get('support_score', 0.0) if last_mc_results else 0.0
+        dataframe.loc[pandas_index, 'MC_Optimal_Resistance_Period'] = last_mc_results.get('optimal_resistance_period', 0.0) if last_mc_results else 0.0
+        dataframe.loc[pandas_index, 'MC_Optimal_Support_Period'] = last_mc_results.get('optimal_support_period', 0.0) if last_mc_results else 0.0
+        
+        return last_resistance_value, last_support_value
+
+    def _initialize_early_candles(self, dataframe: DataFrame, min_required_candles: int) -> None:
+        """
+        Initialize the early candles that couldn't be processed with rolling optimization.
+        
+        Args:
+            dataframe: The dataframe to initialize
+            min_required_candles: Number of candles that need initialization
+        """
+        for i in range(0, min_required_candles):
+            pandas_index = dataframe.index[i]
+            dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = np.nan
+            dataframe.loc[pandas_index, 'MC_Optimal_Support'] = np.nan
+            dataframe.loc[pandas_index, 'MC_Resistance_Score'] = 0.0
+            dataframe.loc[pandas_index, 'MC_Support_Score'] = 0.0
+            dataframe.loc[pandas_index, 'MC_Optimal_Resistance_Period'] = 0.0
+            dataframe.loc[pandas_index, 'MC_Optimal_Support_Period'] = 0.0
+            dataframe.loc[pandas_index, 'score_convergence_ratio'] = 0.0
+            dataframe.loc[pandas_index, 'convergence_multiplier'] = 1.0
+            dataframe.loc[pandas_index, 'trading_mode_indicator'] = 0.0
+            dataframe.loc[pandas_index, 'trading_mode'] = "INSUFFICIENT_DATA"
+
+    def _execute_rolling_monte_carlo_optimization(self, dataframe: DataFrame, metadata: dict) -> None:
+        """
+        Execute rolling Monte Carlo optimization to eliminate lookahead bias.
+        
+        Args:
+            dataframe: The dataframe to process
+            metadata: Strategy metadata containing pair information
+        """
+        # Calculate intervals and thresholds
+        recalc_interval_candles = self.mc_recalc_interval_minutes.value // timeframe_to_minutes(self.timeframe)
+        min_required_candles = max(self.MIN_LOOKBACK_PERIOD, 100)
+        
+        print("=== Using Rolling Monte Carlo Optimization (eliminates lookahead bias) ===")
+        print(f"=== Starting Rolling Monte Carlo Analysis for {metadata['pair']} ===")
+        print(f"Recalc interval: {recalc_interval_candles} candles ({self.mc_recalc_interval_minutes.value} minutes)")
+        print(f"Lookback window: {self.mc_lookback_window_candles.value} candles")
+        print(f"Processing ALL {len(dataframe) - min_required_candles} candles starting from minimum required data ({min_required_candles})")
+
+        # State variables for projecting trendlines with slopes
+        last_resistance_value = np.nan
+        last_support_value = np.nan
+        current_resistance_slope = 0.0
+        current_support_slope = 0.0
+        last_mc_results = None
+
+        # Main rolling optimization loop
+        for i in range(min_required_candles, len(dataframe)):
+            # Determine if it is time to recalculate
+            should_recalculate = (i == min_required_candles) or ((i - min_required_candles) % recalc_interval_candles == 0)
+
+            if should_recalculate:
+                print(f"Recalculating MC results at candle {i}/{len(dataframe)} ({(i/len(dataframe)*100):.1f}%)")
+                
+                # Execute Monte Carlo recalculation
+                mc_results = self._execute_rolling_monte_carlo_recalculation(dataframe, i, metadata)
+                
+                if mc_results:
+                    last_mc_results = mc_results
+                    
+                    # Store trendline objects from this iteration
+                    resistance_trendline = mc_results.get('best_resistance_trendline')
+                    support_trendline = mc_results.get('best_support_trendline')
+                    
+                    if resistance_trendline:
+                        self.stored_trendlines.append(resistance_trendline)
+                        print(f"  Stored resistance trendline: {resistance_trendline.trendline_type} at candle {i}")
+                    
+                    if support_trendline:
+                        self.stored_trendlines.append(support_trendline)
+                        print(f"  Stored support trendline: {support_trendline.trendline_type} at candle {i}")
+                    
+                    # Update slopes and values
+                    (current_resistance_slope, current_support_slope, 
+                     last_resistance_value, last_support_value) = self._update_slopes_and_values_from_mc_results(mc_results)
+                    
+                    print(f"  New MC results: R_score={mc_results.get('resistance_score', 0):.4f}, S_score={mc_results.get('support_score', 0):.4f}")
+                    print(f"  Slopes: R_slope={current_resistance_slope:.6f}, S_slope={current_support_slope:.6f}")
+
+            # Project trendlines forward using slopes
+            last_resistance_value, last_support_value = self._project_trendlines_forward(
+                dataframe, i, last_resistance_value, last_support_value,
+                current_resistance_slope, current_support_slope, last_mc_results
             )
-        }
+
+        # Final processing
+        print(f"Rolling Monte Carlo optimization completed for {metadata['pair']}")
+        if last_mc_results:
+            print(f"Final results: R_score={last_mc_results.get('resistance_score', 0):.4f}, S_score={last_mc_results.get('support_score', 0):.4f}")
+            print(f"Final slopes: R_slope={current_resistance_slope:.6f}, S_slope={current_support_slope:.6f}")
+            
+        # Initialize early candles
+        self._initialize_early_candles(dataframe, min_required_candles)
+
+    def _execute_non_rolling_monte_carlo_optimization(self, dataframe: DataFrame, metadata: dict) -> None:
+        """
+        Execute non-rolling Monte Carlo optimization (original method with potential lookahead bias).
         
-        return description
+        Args:
+            dataframe: The dataframe to process
+            metadata: Strategy metadata containing pair information
+        """
+        print("=== Using Original Monte Carlo Optimization (with potential lookahead bias) ===")
+        
+        # Execute Monte Carlo optimization using the manager (original method)
+        mc_results = self.monte_carlo_manager.execute_monte_carlo_optimization(
+            dataframe, metadata['pair'], self.enable_mc_optimization.value
+        )
+        
+        # Apply the results to the dataframe
+        self.monte_carlo_manager.apply_monte_carlo_results(dataframe, mc_results)
+        
+        if mc_results:
+            print(f"Applied Monte Carlo results for {metadata['pair']}:")
+            print(f"  Resistance Score: {mc_results.get('resistance_score', 0.0):.6f}")
+            print(f"  Support Score: {mc_results.get('support_score', 0.0):.6f}")
+            print(f"  Optimal Periods: R={mc_results.get('optimal_resistance_period', 0)}, S={mc_results.get('optimal_support_period', 0)}")
+            
+            # Store the best trendline objects returned by Monte Carlo optimization
+            resistance_trendline = mc_results.get('best_resistance_trendline')
+            support_trendline = mc_results.get('best_support_trendline')
+            
+            if resistance_trendline:
+                self.stored_trendlines.append(resistance_trendline)
+                print(f"  Stored best resistance trendline from Monte Carlo optimization")
+            
+            if support_trendline:
+                self.stored_trendlines.append(support_trendline)
+                print(f"  Stored best support trendline from Monte Carlo optimization")
+        else:
+            print(f"Monte Carlo results not yet available for {metadata['pair']}.")
 

@@ -8,11 +8,11 @@ from .volatility_models import GARCHModel
 
 # Import trendline functions and Trendline class from trend_metrics using absolute imports
 try:
-    from trend_metrics.trendline import gentrends, rank_trendlines, Trendline
+    from trend_metrics.trendline import gentrends, rank_trendlines, Trendline, generate_bounce_conditions
 except ImportError:
     # Fallback for different import structures
     try:
-        from strategies.trend_metrics.trendline import gentrends, rank_trendlines, Trendline
+        from strategies.trend_metrics.trendline import gentrends, rank_trendlines, Trendline, generate_bounce_conditions
     except ImportError:
         print("Warning: Could not import trendline functions. Some functionality may be limited.")
         # Define dummy functions to prevent errors
@@ -20,6 +20,8 @@ except ImportError:
             return pd.DataFrame()
         def rank_trendlines(*args, **kwargs):
             return {"ranked_maxlines": {}, "ranked_minlines": {}}
+        def generate_bounce_conditions(*args, **kwargs):
+            return pd.Series([False] * 100)  # Return dummy series
         
         # Define dummy Trendline class
         class Trendline:
@@ -290,14 +292,14 @@ class TrendlineMonteCarloOptimizer:
     
     def _generate_trendlines_for_period(self, recent_data: pd.DataFrame, random_period: int) -> Dict[str, Any]:
         """
-        Generate trendlines and calculate scores for a specific lookback period.
+        Generate trendlines and create Trendline objects for a specific lookback period.
         
         Args:
             recent_data: DataFrame with recent OHLCV data
             random_period: Lookback period to test
             
         Returns:
-            Dict containing trendlines, scores, and Trendline objects
+            Dict containing trendlines and Trendline objects (without scores)
         """
         # Find swing points for this period with adaptive parameters
         high_swing_points = self.trend_analyzer._find_swing_points(
@@ -326,24 +328,11 @@ class TrendlineMonteCarloOptimizer:
         # Generate trends for this period
         trends = gentrends(recent_data, field='close', window=1/3.0)
         
-        # Calculate scores for the main lines
-        main_lines_score = rank_trendlines(
-            trends,
-            price_field="Data", 
-            threshold=self.trendline_proximity_threshold,
-            all_highs=recent_data['all_highs'],
-            all_lows=recent_data['all_lows'],
-            pivot_bonus=10.0  # Higher bonus for MC optimization
-        )
-        
-        resistance_score = main_lines_score["ranked_maxlines"].get("Max Line", 0)
-        support_score = main_lines_score["ranked_minlines"].get("Min Line", 0)
-        
         # Extract slope from the trends dataframe - gentrends now provides these columns
         resistance_slope = trends['Max Slope'].iloc[-1] if 'Max Slope' in trends.columns else 0.0
         support_slope = trends['Min Slope'].iloc[-1] if 'Min Slope' in trends.columns else 0.0
         
-        # Create Trendline objects from the gentrends output
+        # Create Trendline objects immediately after gentrends
         trendline_objects = []
         
         end_time = recent_data['date'].iloc[-1]  # Last candle in the lookback period
@@ -351,48 +340,38 @@ class TrendlineMonteCarloOptimizer:
         
         # Create resistance trendline object (Max Line)
         if 'Max Line' in trends.columns and not trends['Max Line'].isna().all():
-            resistance_start_price = trends['Max Line'].iloc[0]
-            resistance_end_price = trends['Max Line'].iloc[-1]
-            
-            # Calculate y-intercept for the resistance line
-            # Using the linear equation: y = mx + b, where b = y - mx
-            # We'll use the start point as reference
-            resistance_y_intercept = resistance_start_price - (resistance_slope * 0)
+            # Get actual start price from dataframe at start_time
+            start_idx = recent_data[recent_data['date'] == start_time].index
+            resistance_start_price = recent_data.loc[start_idx[0], 'close']
             
             resistance_trendline = Trendline(
                 trendline_type='resistance',
                 start_time=start_time,
                 end_time=end_time,
                 slope=resistance_slope,
-                y_intercept=resistance_y_intercept,
                 start_price=resistance_start_price,
-                end_price=resistance_end_price
+                bounce_count=0
             )
             trendline_objects.append(resistance_trendline)
         
         # Create support trendline object (Min Line)
         if 'Min Line' in trends.columns and not trends['Min Line'].isna().all():
-            support_start_price = trends['Min Line'].iloc[0]
-            support_end_price = trends['Min Line'].iloc[-1]
-            
-            # Calculate y-intercept for the support line
-            support_y_intercept = support_start_price - (support_slope * 0)
+            # Get actual start price from dataframe at start_time
+            start_idx = recent_data[recent_data['date'] == start_time].index
+            support_start_price = recent_data.loc[start_idx[0], 'close']
             
             support_trendline = Trendline(
                 trendline_type='support',
                 start_time=start_time,
                 end_time=end_time,
                 slope=support_slope,
-                y_intercept=support_y_intercept,
                 start_price=support_start_price,
-                end_price=support_end_price
+                bounce_count=0
             )
             trendline_objects.append(support_trendline)
         
         return {
             'trends': trends,
-            'resistance_score': resistance_score,
-            'support_score': support_score,
             'resistance_slope': resistance_slope,
             'support_slope': support_slope,
             'high_swing_points': high_swing_points,
@@ -400,7 +379,8 @@ class TrendlineMonteCarloOptimizer:
             'trendline_objects': trendline_objects,  # List of Trendline objects
             'start_time': start_time,  # Store the calculated start time
             'end_time': end_time,      # Store the calculated end time
-            'lookback_period': random_period  # Store the period used
+            'lookback_period': random_period,  # Store the period used
+            'recent_data': recent_data  # Include the data for later use
         }
     
     def monte_carlo_period_optimization(self, dataframe: pd.DataFrame, pair: str = "UNKNOWN") -> Dict[str, Any]:
@@ -469,13 +449,67 @@ class TrendlineMonteCarloOptimizer:
                 # Test this period
                 recent_data = dataframe.tail(random_period).copy()
                 
-                # Use the helper method to generate trendlines and scores
+                # Use the helper method to generate trendlines and create Trendline objects
                 trendline_results = self._generate_trendlines_for_period(recent_data, random_period)
                 
-                current_resistance_score = trendline_results['resistance_score']
-                current_support_score = trendline_results['support_score']
                 trends = trendline_results['trends']
                 trendline_objects = trendline_results.get('trendline_objects', [])
+                recent_data = trendline_results['recent_data']
+                
+                # Generate bounce conditions and update Trendline objects with bounce counts
+                for trendline_obj in trendline_objects:
+                    if trendline_obj.trendline_type == 'resistance' and 'Max Line' in trends.columns:
+                        # Generate bounce conditions for resistance
+                        try:
+                            # Ensure indices match by reindexing the trendline data
+                            resistance_line = trends['Max Line'].copy()
+                            resistance_line.index = recent_data.index
+                            
+                            bounce_conditions = generate_bounce_conditions(
+                                close_data=recent_data['close'],
+                                level_data=resistance_line,
+                                direction='short',
+                                tolerance=self.trendline_proximity_threshold,
+                                pivot_highs=recent_data['all_highs'],
+                                pivot_lows=recent_data['all_lows']
+                            )
+                            # Store bounce count in the Trendline object
+                            trendline_obj.bounce_count = bounce_conditions.sum()
+                            print(f"  Resistance trendline bounce count: {trendline_obj.bounce_count}")
+                        except Exception as e:
+                            print(f"Error generating resistance bounce conditions: {e}")
+                            trendline_obj.bounce_count = 0
+                    
+                    elif trendline_obj.trendline_type == 'support' and 'Min Line' in trends.columns:
+                        # Generate bounce conditions for support
+                        try:
+                            # Ensure indices match by reindexing the trendline data
+                            support_line = trends['Min Line'].copy()
+                            support_line.index = recent_data.index
+                            
+                            bounce_conditions = generate_bounce_conditions(
+                                close_data=recent_data['close'],
+                                level_data=support_line,
+                                direction='long',
+                                tolerance=self.trendline_proximity_threshold,
+                                pivot_highs=recent_data['all_highs'],
+                                pivot_lows=recent_data['all_lows']
+                            )
+                            # Store bounce count in the Trendline object
+                            trendline_obj.bounce_count = bounce_conditions.sum()
+                            print(f"  Support trendline bounce count: {trendline_obj.bounce_count}")
+                        except Exception as e:
+                            print(f"Error generating support bounce conditions: {e}")
+                            trendline_obj.bounce_count = 0
+                
+                # Calculate scores using rank_trendlines - pass the trendline objects so it can use their bounce counts
+                main_lines_score = rank_trendlines(
+                    trends,
+                    trendline_objects  # Pass the trendline objects with bounce counts
+                )
+                
+                current_resistance_score = main_lines_score["ranked_maxlines"].get("Max Line", 0)
+                current_support_score = main_lines_score["ranked_minlines"].get("Min Line", 0)
                 
                 # Store results
                 tested_periods.append(random_period)
@@ -504,7 +538,7 @@ class TrendlineMonteCarloOptimizer:
                             best_resistance_trendline = trendline_obj
                             break
                     
-                    print(f"New best resistance found for {pair} at iteration {iteration + 1}: period {random_period}, score {current_resistance_score:.4f}")
+                    print(f"New best resistance found for {pair} at iteration {iteration + 1}: period {random_period}, score {current_resistance_score:.4f}, bounces {best_resistance_trendline.bounce_count if best_resistance_trendline else 'N/A'}")
                 
                 # Check if this is the best support line so far
                 if current_support_score > best_support_score:
@@ -528,7 +562,7 @@ class TrendlineMonteCarloOptimizer:
                             best_support_trendline = trendline_obj
                             break
                     
-                    print(f"New best support found for {pair} at iteration {iteration + 1}: period {random_period}, score {current_support_score:.4f}")
+                    print(f"New best support found for {pair} at iteration {iteration + 1}: period {random_period}, score {current_support_score:.4f}, bounces {best_support_trendline.bounce_count if best_support_trendline else 'N/A'}")
                 
                 # Progress reporting with more details
                 if (iteration + 1) % 100 == 0:

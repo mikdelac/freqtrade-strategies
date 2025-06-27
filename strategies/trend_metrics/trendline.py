@@ -23,9 +23,8 @@ class Trendline:
                  start_time: Union[datetime, pd.Timestamp],
                  end_time: Union[datetime, pd.Timestamp],
                  slope: float,
-                 y_intercept: float,
                  start_price: float,
-                 end_price: float,
+                 bounce_count: int = -1,
                  creation_time: Optional[Union[datetime, pd.Timestamp]] = None):
         """
         Initialize a Trendline object.
@@ -35,18 +34,16 @@ class Trendline:
             start_time: Timestamp when the trendline begins
             end_time: Timestamp when the trendline ends
             slope: Slope of the trendline (price change per time unit)
-            y_intercept: Y-intercept of the trendline equation
             start_price: Price at the start point
-            end_price: Price at the end point
+            bounce_count: Number of times price has bounced off this trendline (default: -1)
             creation_time: When this trendline object was created (defaults to current time)
         """
         self.trendline_type = trendline_type.lower()
         self.start_time = pd.Timestamp(start_time)
         self.end_time = pd.Timestamp(end_time)
         self.slope = slope
-        self.y_intercept = y_intercept
         self.start_price = start_price
-        self.end_price = end_price
+        self.bounce_count = bounce_count
         self.creation_time = pd.Timestamp(creation_time) if creation_time else pd.Timestamp.now()
         
         # Validation
@@ -144,8 +141,6 @@ class Trendline:
             raise ValueError("new_end_time must be after current end_time")
         
         self.end_time = new_end_time
-        # Update end price based on the equation
-        self.end_price = self.get_price_at_time(new_end_time)
     
     def to_dict(self) -> dict:
         """
@@ -159,9 +154,8 @@ class Trendline:
             'start_time': self.start_time,
             'end_time': self.end_time,
             'slope': self.slope,
-            'y_intercept': self.y_intercept,
             'start_price': self.start_price,
-            'end_price': self.end_price,
+            'bounce_count': self.bounce_count,
             'creation_time': self.creation_time,
             'duration_hours': self.duration_hours,
             'age_hours': self.age_hours
@@ -172,14 +166,13 @@ class Trendline:
         return (f"Trendline({self.trendline_type.title()}: "
                 f"{self.start_time.strftime('%Y-%m-%d %H:%M')} to "
                 f"{self.end_time.strftime('%Y-%m-%d %H:%M')}, "
-                f"slope={self.slope:.6f}, duration={self.duration_hours:.1f}h)")
+                f"slope={self.slope:.6f}, bounces={self.bounce_count}, duration={self.duration_hours:.1f}h)")
     
     def __repr__(self) -> str:
         """Detailed representation of the trendline."""
         return (f"Trendline(type='{self.trendline_type}', "
                 f"start_time='{self.start_time}', end_time='{self.end_time}', "
-                f"slope={self.slope}, y_intercept={self.y_intercept}, "
-                f"start_price={self.start_price}, end_price={self.end_price})")
+                f"slope={self.slope}, start_price={self.start_price}, bounce_count={self.bounce_count})")
 
 
 def generate_bounce_conditions(close_data, level_data, direction: str, tolerance: float = 0.00005, pivot_highs=None, pivot_lows=None):
@@ -398,22 +391,16 @@ def segtrends(dataframe, field="close", segments=2, charts=False):
     return trends
 
 
-def rank_trendlines(trends, price_field="Data", threshold=0.01, max_prefix="Max_Line_", min_prefix="Min_Line_", all_highs=None, all_lows=None, pivot_bonus=5.0):
+def rank_trendlines(trends, trendline_objects):
     """
-    Ranks trendlines based purely on bounce count using generate_bounce_conditions.
+    Ranks trendlines based on bounce count from Trendline objects.
     
     Simplified Scoring System:
     - Number of bounces = score (1 bounce = 1 point)
     
     Args:
         trends: DataFrame containing price data and trendlines
-        price_field: Column name for price data (default: "Data")
-        threshold: Proximity threshold as a percentage (default: 0.01 or 1%)
-        max_prefix: Prefix for maxline columns (default: "Max_Line_")
-        min_prefix: Prefix for minline columns (default: "Min_Line_")
-        all_highs: Series with high pivot points (REQUIRED)
-        all_lows: Series with low pivot points (REQUIRED)
-        pivot_bonus: Not used in this simplified version
+        trendline_objects: List of Trendline objects with pre-calculated bounce counts (REQUIRED)
         
     Returns:
         Dictionary with ranked maxlines and minlines based on bounce count
@@ -421,117 +408,49 @@ def rank_trendlines(trends, price_field="Data", threshold=0.01, max_prefix="Max_
     import pandas as pd
     import numpy as np
     
-    # Validate required inputs
-    if all_highs is None or all_lows is None:
-        print("ERROR: all_highs and all_lows pivot points are required for bounce analysis")
-        return {"ranked_maxlines": {}, "ranked_minlines": {}}
-    
     if len(trends) == 0:
         print("ERROR: Empty trends DataFrame")
         return {"ranked_maxlines": {}, "ranked_minlines": {}}
     
-    # Get price data
-    if price_field not in trends.columns:
-        print(f"ERROR: Price field '{price_field}' not found in trends DataFrame")
+    print(f"=== BOUNCE COUNT TRENDLINE RANKING ===")
+    
+    # Trendline objects are now required since bounces are always pre-calculated
+    if not trendline_objects:
+        print("ERROR: trendline_objects is required - bounces should be pre-calculated")
         return {"ranked_maxlines": {}, "ranked_minlines": {}}
     
-    price_data = trends[price_field]
-    n_points = len(price_data)
-    
-    print(f"=== BOUNCE COUNT TRENDLINE RANKING ===")
-    print(f"Analyzing {n_points} data points with threshold {threshold:.3f}")
-    
-    # Prepare pivot points as pandas Series
-    def prepare_pivot_series(pivot_points, n_points):
-        """Convert pivot points to properly indexed pandas Series"""
-        if pivot_points is None:
-            return pd.Series([np.nan] * n_points, index=price_data.index)
-        
-        # Ensure we have a pandas Series with the right index
-        if hasattr(pivot_points, 'reindex'):
-            return pivot_points.reindex(price_data.index, fill_value=np.nan)
-        else:
-            # Convert to Series if it's not already
-            series = pd.Series(pivot_points, index=price_data.index[:len(pivot_points)])
-            return series.reindex(price_data.index, fill_value=np.nan)
-    
-    pivot_highs_series = prepare_pivot_series(all_highs, n_points)
-    pivot_lows_series = prepare_pivot_series(all_lows, n_points)
+    print(f"Using pre-calculated bounce counts from {len(trendline_objects)} Trendline objects")
     
     # Define trendline categories
     trendline_categories = {
         'resistance': {
-            'columns': [col for col in trends.columns if col.startswith(max_prefix) or col == "Max Line"],
-            'scores': {},
-            'direction': 'short'  # Bounce off resistance = short signal
+            'columns': [col for col in trends.columns if col.startswith("Max_Line_") or col == "Max Line"],
+            'scores': {}
         },
         'support': {
-            'columns': [col for col in trends.columns if col.startswith(min_prefix) or col == "Min Line"],
-            'scores': {},
-            'direction': 'long'   # Bounce off support = long signal
+            'columns': [col for col in trends.columns if col.startswith("Min_Line_") or col == "Min Line"],
+            'scores': {}
         }
     }
     
-    # === BOUNCE COUNT ANALYSIS FOR EACH TRENDLINE ===
-    for trendline_type, config in trendline_categories.items():
-        columns = config['columns']
-        scores = config['scores']
-        direction = config['direction']
-        
-        print(f"\n--- Analyzing {trendline_type.upper()} Lines ---")
-        
-        for col in columns:
-            if col not in trends.columns:
-                continue
-                
-            trendline_data = trends[col]
-            
-            # Skip trendlines with all NaN values
-            if trendline_data.isna().all():
-                scores[col] = 0
-                continue
-            
-            print(f"\nEvaluating {col}:")
-            
-            # === DETECT BOUNCES ===
-            try:
-                bounce_conditions = generate_bounce_conditions(
-                    close_data=price_data,
-                    level_data=trendline_data,
-                    direction=direction,
-                    tolerance=threshold,
-                    pivot_highs=pivot_highs_series,
-                    pivot_lows=pivot_lows_series
-                )
-            except Exception as e:
-                print(f"  ERROR detecting bounces: {e}")
-                scores[col] = 0
-                continue
-            
-            # Count bounces - this is the only score that matters
-            bounce_count = bounce_conditions.sum()
-            scores[col] = bounce_count
-            
-            # === CAPTURE BOUNCE TIMESTAMPS (MINIMAL OUTPUT) ===
-            if bounce_count > 0:
-                bounce_indices = bounce_conditions[bounce_conditions].index.tolist()
-                bounce_timestamps = []
-                
-                # Get timestamps if available in the index
-                if hasattr(price_data.index, 'to_pydatetime'):
-                    bounce_timestamps = [price_data.index[i].strftime('%Y-%m-%d %H:%M') for i in range(len(price_data)) if i < len(bounce_conditions) and bounce_conditions.iloc[i]]
-                else:
-                    # Use index positions if no datetime index
-                    bounce_timestamps = [f"Index_{i}" for i in range(len(price_data)) if i < len(bounce_conditions) and bounce_conditions.iloc[i]]
-                
-                # Sort chronologically (oldest to newest)
-                bounce_timestamps.sort()
-                
-                print(f"  Bounces at: {' | '.join(bounce_timestamps)}")
-            
-            print(f"  Found {bounce_count} bounces - Score: {bounce_count}")
+    # Map trendline objects to their corresponding columns and extract bounce counts
+    for trendline_obj in trendline_objects:
+        if trendline_obj.trendline_type == 'resistance':
+            # Find the corresponding resistance column (usually "Max Line")
+            for col in trendline_categories['resistance']['columns']:
+                if col in trends.columns and not trends[col].isna().all():
+                    trendline_categories['resistance']['scores'][col] = trendline_obj.bounce_count
+                    print(f"Resistance line '{col}': {trendline_obj.bounce_count} bounces (from Trendline object)")
+                    break
+        elif trendline_obj.trendline_type == 'support':
+            # Find the corresponding support column (usually "Min Line")
+            for col in trendline_categories['support']['columns']:
+                if col in trends.columns and not trends[col].isna().all():
+                    trendline_categories['support']['scores'][col] = trendline_obj.bounce_count
+                    print(f"Support line '{col}': {trendline_obj.bounce_count} bounces (from Trendline object)")
+                    break
     
-    # === SORT AND RETURN RESULTS ===
+    # Sort and return results
     ranked_results = {
         "ranked_maxlines": {k: v for k, v in sorted(trendline_categories['resistance']['scores'].items(), 
                                                    key=lambda item: item[1], 
