@@ -346,8 +346,8 @@ class TrendlineMonteCarloOptimizer:
         # Create Trendline objects from the gentrends output
         trendline_objects = []
         
-        end_time = recent_data['datetime'].iloc[-1]  # Last candle in the lookback period
-        start_time = recent_data['datetime'].iloc[0]  # First candle in the lookback period
+        end_time = recent_data['date'].iloc[-1]  # Last candle in the lookback period
+        start_time = recent_data['date'].iloc[0]  # First candle in the lookback period
         
         # Create resistance trendline object (Max Line)
         if 'Max Line' in trends.columns and not trends['Max Line'].isna().all():

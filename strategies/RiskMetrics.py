@@ -612,14 +612,14 @@ class RiskMetrics(IStrategy):
         if len(dataframe) == 0:
             return dataframe
         
-        # Add datetime column if not present (required for trendline timestamps)
-        if 'datetime' not in dataframe.columns:
+        # Add date column if not present (required for trendline timestamps)
+        if 'date' not in dataframe.columns:
             if hasattr(dataframe.index, 'to_pydatetime'):
-                dataframe['datetime'] = dataframe.index
+                dataframe['date'] = dataframe.index
             else:
-                # Fallback: create datetime column based on row count (assuming 5min candles)
+                # Fallback: create date column based on row count (assuming 5min candles)
                 base_time = pd.Timestamp.now() - pd.Timedelta(minutes=len(dataframe) * 5)
-                dataframe['datetime'] = pd.date_range(start=base_time, periods=len(dataframe), freq='5min')
+                dataframe['date'] = pd.date_range(start=base_time, periods=len(dataframe), freq='5min')
         
         # Clear stored trendlines from previous runs
         self.stored_trendlines.clear()
@@ -849,18 +849,6 @@ class RiskMetrics(IStrategy):
             resistance_trendlines = sum(1 for tl in self.stored_trendlines if tl.trendline_type == 'resistance')
             support_trendlines = sum(1 for tl in self.stored_trendlines if tl.trendline_type == 'support')
             
-            # Count active vs expired trendlines
-            active_trendlines = 0
-            expired_trendlines = 0
-            
-            if len(dataframe) > 0:
-                latest_time = dataframe.index[-1] if hasattr(dataframe.index, 'to_pydatetime') else pd.Timestamp.now()
-                for trendline in self.stored_trendlines:
-                    if trendline.is_active_at_time(latest_time):
-                        active_trendlines += 1
-                    else:
-                        expired_trendlines += 1
-            
             print(f"Pair: {pair}")
             print(f"Monte Carlo Results Available: Yes")
             
@@ -869,22 +857,11 @@ class RiskMetrics(IStrategy):
             print(f"  Total Saved Trendlines: {total_trendlines}")
             print(f"  Resistance Trendlines: {resistance_trendlines}")
             print(f"  Support Trendlines: {support_trendlines}")
-            print(f"  Active Trendlines: {active_trendlines}")
-            print(f"  Expired Trendlines: {expired_trendlines}")
             
             # Display all stored trendlines
             if total_trendlines > 0:
                 print(f"\n--- ALL STORED TRENDLINES ---")
                 for i, trendline in enumerate(self.stored_trendlines, 1):
-                    # Check if active
-                    if len(dataframe) > 0:
-                        latest_time = dataframe.index[-1] if hasattr(dataframe.index, 'to_pydatetime') else pd.Timestamp.now()
-                        status = "ACTIVE" if trendline.is_active_at_time(latest_time) else "EXPIRED"
-                        current_price = trendline.get_price_at_time(latest_time) if trendline.is_active_at_time(latest_time) else "N/A"
-                    else:
-                        status = "UNKNOWN"
-                        current_price = "N/A"
-                    
                     print(f"  {i}. {trendline.trendline_type.upper()} TRENDLINE")
                     print(f"     Start Time: {trendline.start_time}")
                     print(f"     End Time: {trendline.end_time}")
@@ -893,9 +870,6 @@ class RiskMetrics(IStrategy):
                     print(f"     Slope: {trendline.slope:.8f}")
                     print(f"     Start Price: {trendline.start_price:.6f}")
                     print(f"     End Price: {trendline.end_price:.6f}")
-                    print(f"     Status: {status}")
-                    if current_price != "N/A":
-                        print(f"     Current Price: {current_price:.6f}")
                     print("")
             else:
                 print(f"  No trendlines stored during this execution")
