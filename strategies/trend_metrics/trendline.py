@@ -409,17 +409,17 @@ def rank_trendlines(trends, trendline_objects):
     import numpy as np
     
     if len(trends) == 0:
-        print("ERROR: Empty trends DataFrame")
+        # print("ERROR: Empty trends DataFrame")
         return {"ranked_maxlines": {}, "ranked_minlines": {}}
     
-    print(f"=== BOUNCE COUNT TRENDLINE RANKING ===")
+    # print(f"=== BOUNCE COUNT TRENDLINE RANKING ===")
     
     # Trendline objects are now required since bounces are always pre-calculated
     if not trendline_objects:
-        print("ERROR: trendline_objects is required - bounces should be pre-calculated")
+        # print("ERROR: trendline_objects is required - bounces should be pre-calculated")
         return {"ranked_maxlines": {}, "ranked_minlines": {}}
     
-    print(f"Using pre-calculated bounce counts from {len(trendline_objects)} Trendline objects")
+    # print(f"Using pre-calculated bounce counts from {len(trendline_objects)} Trendline objects")
     
     # Define trendline categories
     trendline_categories = {
@@ -440,14 +440,14 @@ def rank_trendlines(trends, trendline_objects):
             for col in trendline_categories['resistance']['columns']:
                 if col in trends.columns and not trends[col].isna().all():
                     trendline_categories['resistance']['scores'][col] = trendline_obj.bounce_count
-                    print(f"Resistance line '{col}': {trendline_obj.bounce_count} bounces (from Trendline object)")
+                    # print(f"Resistance line '{col}': {trendline_obj.bounce_count} bounces (from Trendline object)")
                     break
         elif trendline_obj.trendline_type == 'support':
             # Find the corresponding support column (usually "Min Line")
             for col in trendline_categories['support']['columns']:
                 if col in trends.columns and not trends[col].isna().all():
                     trendline_categories['support']['scores'][col] = trendline_obj.bounce_count
-                    print(f"Support line '{col}': {trendline_obj.bounce_count} bounces (from Trendline object)")
+                    # print(f"Support line '{col}': {trendline_obj.bounce_count} bounces (from Trendline object)")
                     break
     
     # Sort and return results
@@ -461,16 +461,16 @@ def rank_trendlines(trends, trendline_objects):
     }
     
     # Print final rankings
-    print(f"\n=== FINAL RANKINGS ===")
-    print("RESISTANCE LINES:")
-    for i, (line, score) in enumerate(ranked_results["ranked_maxlines"].items(), 1):
-        if score > 0:
-            print(f"  {i}. {line}: {score} bounces")
+    # print(f"\n=== FINAL RANKINGS ===")
+    # print("RESISTANCE LINES:")
+    # for i, (line, score) in enumerate(ranked_results["ranked_maxlines"].items(), 1):
+    #     if score > 0:
+    #         print(f"  {i}. {line}: {score} bounces")
     
-    print("SUPPORT LINES:")
-    for i, (line, score) in enumerate(ranked_results["ranked_minlines"].items(), 1):
-        if score > 0:
-            print(f"  {i}. {line}: {score} bounces")
+    # print("SUPPORT LINES:")
+    # for i, (line, score) in enumerate(ranked_results["ranked_minlines"].items(), 1):
+    #     if score > 0:
+    #         print(f"  {i}. {line}: {score} bounces")
     
     return ranked_results
 

@@ -237,59 +237,6 @@ class TrendlineMonteCarloOptimizer:
         self.trendline_proximity_threshold = trendline_proximity_threshold
         self.trend_analyzer = trend_analyzer
     
-    def generate_fixed_lookback_periods(self, dataframe: pd.DataFrame) -> List[int]:
-        """
-        Generate fixed lookback periods for Monte Carlo optimization.
-        This replaces the volatility-based period generation to properly separate 
-        GARCH volatility estimation from lookback period selection.
-        
-        Args:
-            dataframe: DataFrame with OHLCV data
-            
-        Returns:
-            List[int]: List of fixed lookback periods for testing
-        """
-        total_candles = len(dataframe)
-        max_lookback_period = total_candles  # Use all available data
-        min_lookback_period = max(self.min_lookback_period, 50)  # Use fixed min
-        
-        # Define core fixed periods that cover different time horizons
-        core_periods = [50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 800, 900, 1000]
-        
-        # Filter periods based on available data
-        valid_core_periods = [p for p in core_periods if min_lookback_period <= p <= max_lookback_period]
-        
-        # Generate additional random periods to reach MC_ITERATIONS
-        remaining_iterations = self.mc_iterations - len(valid_core_periods)
-        random_periods = []
-        
-        if remaining_iterations > 0:
-            # Generate random periods to fill the remaining iterations
-            for _ in range(remaining_iterations):
-                random_period = random.randint(min_lookback_period, max_lookback_period)
-                random_periods.append(random_period)
-        
-        # Combine core periods with random periods
-        all_periods = valid_core_periods + random_periods
-        
-        # Ensure we have exactly MC_ITERATIONS periods
-        if len(all_periods) > self.mc_iterations:
-            all_periods = all_periods[:self.mc_iterations]
-        elif len(all_periods) < self.mc_iterations:
-            # Pad with repeated core periods if needed
-            while len(all_periods) < self.mc_iterations:
-                all_periods.extend(valid_core_periods[:self.mc_iterations - len(all_periods)])
-        
-        # Shuffle to randomize the order
-        random.shuffle(all_periods)
-        
-        print(f"Generated {len(all_periods)} fixed lookback periods:")
-        print(f"  Range: {min(all_periods)} to {max(all_periods)} candles")
-        print(f"  Mean: {np.mean(all_periods):.1f}, Std: {np.std(all_periods):.1f}")
-        print(f"  Core periods included: {valid_core_periods}")
-        
-        return all_periods
-    
     def _generate_trendlines_for_period(self, recent_data: pd.DataFrame, random_period: int) -> Dict[str, Any]:
         """
         Generate trendlines and create Trendline objects for a specific lookback period.
@@ -387,7 +334,7 @@ class TrendlineMonteCarloOptimizer:
         """
         Use Monte Carlo simulation to test different lookback periods and find
         the ones that produce the highest scoring resistance and support lines.
-        Now uses fixed lookback periods
+        Now uses core periods based on dividing total candles
         
         Args:
             dataframe: DataFrame with OHLCV data
@@ -414,9 +361,49 @@ class TrendlineMonteCarloOptimizer:
         # Seed random number generator for reproducible results with some variability
         random.seed(int(time.time() * 1000) % 10000)  # Use current time for seed
         
-        # Generate fixed lookback periods
-        print(f"=== Monte Carlo Period Optimization with Fixed Periods for {pair} ===")
-        lookback_periods = self.generate_fixed_lookback_periods(dataframe)
+        # Create core periods by dividing total candles
+        print(f"=== Monte Carlo Period Optimization with Core Periods for {pair} ===")
+        
+        # Generate core periods by dividing total_candles into segments
+        min_lookback_period = max(self.min_lookback_period, 50)
+        core_periods = []
+        
+        # Create divisions of total_candles
+        for divisor in [1.1, 1.2, 1.4, 1.6, 1.8, 2, 3, 4, 5, 6, 8]:
+            period = int(total_candles // divisor)
+            if period >= min_lookback_period:
+                core_periods.append(period)
+        
+        # Remove duplicates and sort
+        core_periods = sorted(list(set(core_periods)))
+        
+        # Generate additional random periods to reach mc_iterations
+        remaining_iterations = self.mc_iterations - len(core_periods)
+        random_periods = []
+        
+        if remaining_iterations > 0:
+            for _ in range(remaining_iterations):
+                random_period = random.randint(min_lookback_period, max_lookback_period)
+                random_periods.append(random_period)
+        
+        # Combine core periods with random periods
+        lookback_periods = core_periods + random_periods
+        
+        # Ensure we have exactly mc_iterations periods
+        if len(lookback_periods) > self.mc_iterations:
+            lookback_periods = lookback_periods[:self.mc_iterations]
+        elif len(lookback_periods) < self.mc_iterations:
+            # Pad with repeated core periods if needed
+            while len(lookback_periods) < self.mc_iterations:
+                lookback_periods.extend(core_periods[:self.mc_iterations - len(lookback_periods)])
+        
+        # Shuffle to randomize the order
+        random.shuffle(lookback_periods)
+        
+        print(f"Generated {len(lookback_periods)} lookback periods by dividing total candles ({total_candles}):")
+        print(f"  Range: {min(lookback_periods)} to {max(lookback_periods)} candles")
+        print(f"  Mean: {np.mean(lookback_periods):.1f}, Std: {np.std(lookback_periods):.1f}")
+        print(f"  Core periods from divisions: {core_periods}")
         
         print(f"Starting Monte Carlo period optimization for {pair} with {len(lookback_periods)} iterations...")
         print(f"Testing periods from {min(lookback_periods)} to {max(lookback_periods)} candles (total data: {total_candles})")
@@ -475,7 +462,7 @@ class TrendlineMonteCarloOptimizer:
                             )
                             # Store bounce count in the Trendline object
                             trendline_obj.bounce_count = bounce_conditions.sum()
-                            print(f"  Resistance trendline bounce count: {trendline_obj.bounce_count}")
+                            #print(f"  Resistance trendline bounce count: {trendline_obj.bounce_count}")
                         except Exception as e:
                             print(f"Error generating resistance bounce conditions: {e}")
                             trendline_obj.bounce_count = 0
@@ -497,7 +484,7 @@ class TrendlineMonteCarloOptimizer:
                             )
                             # Store bounce count in the Trendline object
                             trendline_obj.bounce_count = bounce_conditions.sum()
-                            print(f"  Support trendline bounce count: {trendline_obj.bounce_count}")
+                            #print(f"  Support trendline bounce count: {trendline_obj.bounce_count}")
                         except Exception as e:
                             print(f"Error generating support bounce conditions: {e}")
                             trendline_obj.bounce_count = 0
@@ -574,7 +561,7 @@ class TrendlineMonteCarloOptimizer:
                 print(f"Error in Monte Carlo iteration {iteration} for {pair}: {e}")
                 continue
         
-        print(f"Fixed-period Monte Carlo optimization completed for {pair}!")
+        print(f"Core-period Monte Carlo optimization completed for {pair}!")
         print(f"Optimal resistance period: {best_resistance_period} (score: {best_resistance_score:.4f})")
         print(f"Optimal support period: {best_support_period} (score: {best_support_score:.4f})")
         print(f"Tested periods range: {min(tested_periods) if tested_periods else 'N/A'} to {max(tested_periods) if tested_periods else 'N/A'} candles")

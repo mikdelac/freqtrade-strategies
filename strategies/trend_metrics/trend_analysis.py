@@ -110,7 +110,8 @@ class TrendAnalysis:
                     prices: np.ndarray, 
                     price_type: str = 'high',
                     min_points: int = 2,
-                    distance: int = 5) -> List[Tuple[int, float]]:
+                    distance: int = 5,
+                    max_recursion_depth: int = 5) -> List[Tuple[int, float]]:
         """
         Find swing high or low points in the price array using scipy.signal.find_peaks.
         
@@ -120,12 +121,18 @@ class TrendAnalysis:
             price_type: Type of price to examine ('high' or 'low')
             min_points: Minimum number of points to identify, used only for recursive calls
             distance: Minimum horizontal distance between peaks (if None, derived from window)
+            max_recursion_depth: Maximum recursion depth to prevent infinite loops
             atr_values: Array of ATR values corresponding to each price point for significance filtering
 
         Returns:
             List of tuples containing (index, price) of swing points
         """
         from scipy.signal import find_peaks
+        
+        # Prevent infinite recursion
+        if max_recursion_depth <= 0:
+            print(f"Warning: Maximum recursion depth reached in _find_swing_points")
+            return []
                 
         # Calculate prominence as a percentage of price range
         price_range = np.max(prices) - np.min(prices)
@@ -143,7 +150,7 @@ class TrendAnalysis:
         # If we don't have enough points, try with smaller distance
         if len(swing_points) < min_points and distance > 1:
             smaller_distance = max(1, distance - 1)
-            return self._find_swing_points(prices, price_type)
+            return self._find_swing_points(prices, price_type, min_points, smaller_distance, max_recursion_depth - 1)
                     
         # Sort points by time index
         return sorted(swing_points, key=lambda x: x[0])

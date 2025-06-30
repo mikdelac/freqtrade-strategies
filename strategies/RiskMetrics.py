@@ -269,9 +269,9 @@ class RiskMetrics(IStrategy):
     INTERFACE_VERSION = 3
 
     # Timeframe settings
-    timeframe = "5m"
+    timeframe = "1m"
     MINUTES_IN_DAY = 24 * 60
-    MINUTES_PER_CANDLE = 5
+    MINUTES_PER_CANDLE = 1
     CANDLES_PER_DAY = MINUTES_IN_DAY // MINUTES_PER_CANDLE  # 288 5-min candles per day
     
     # Monte Carlo period optimization settings
