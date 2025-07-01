@@ -420,6 +420,11 @@ class RiskMetrics(IStrategy):
         # Initialize trendline storage for all iterations
         self.stored_trendlines = []  # List to store all Trendline objects from each Monte Carlo iteration
         
+        # Initialize heartbeat tracking for live trading mode
+        self.last_recalculation_time = None  # Track when we last recalculated
+        self.strategy_start_time = pd.Timestamp.now()  # Track when strategy started
+        self.monte_carlo_executed = False  # Track if Monte Carlo has been executed at least once
+        
         # Initialize Monte Carlo Manager with required parameters
         self.monte_carlo_manager = MonteCarloManager(
             mc_iterations=self.MC_ITERATIONS,
@@ -435,6 +440,7 @@ class RiskMetrics(IStrategy):
         print(f"  Signal generator: Initialized for modular signal generation")
         print(f"  Monte Carlo Manager: Initialized with {self.mc_recalc_interval_minutes.value}min recalc interval")
         print(f"  Rolling Monte Carlo optimization: {'ENABLED' if self.enable_rolling_mc_optimization.value else 'DISABLED'}")
+        print(f"  Heartbeat tracking: Initialized at {self.strategy_start_time}")
         if self.enable_rolling_mc_optimization.value:
             print(f"    - Eliminates lookahead bias for realistic backtesting")
             print(f"    - Uses {self.mc_lookback_window_candles.value} candle lookback window")
@@ -548,8 +554,11 @@ class RiskMetrics(IStrategy):
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
-        Adds several different TA indicators to the given DataFrame.resistance line
-        Now implements rolling Monte Carlo optimization to eliminate lookahead bias.
+        Adds several different TA indicators to the given DataFrame.
+        
+        Dual-mode operation:
+        1. Initial launch (backtest): Rolling Monte Carlo on all historical data
+        2. Live trading (heartbeat): Non-rolling Monte Carlo only when recalc interval is reached
         """
         if len(dataframe) == 0:
             return dataframe
@@ -559,13 +568,62 @@ class RiskMetrics(IStrategy):
             if hasattr(dataframe.index, 'to_pydatetime'):
                 dataframe['date'] = dataframe.index
             else:
-                # Fallback: create date column based on row count (assuming 5min candles)
-                base_time = pd.Timestamp.now() - pd.Timedelta(minutes=len(dataframe) * 5)
-                dataframe['date'] = pd.date_range(start=base_time, periods=len(dataframe), freq='5min')
+                # Fallback: create date column based on row count (assuming 1min candles)
+                base_time = pd.Timestamp.now() - pd.Timedelta(minutes=len(dataframe))
+                dataframe['date'] = pd.date_range(start=base_time, periods=len(dataframe), freq='1min')
         
-        # Clear stored trendlines from previous runs
-        self.stored_trendlines.clear()
-        print(f"Cleared previous trendline storage for new analysis of {metadata.get('pair', 'UNKNOWN')}")
+        # Determine if this is initial launch (backtest) or live trading (heartbeat)
+        current_time = pd.Timestamp.now()
+        latest_candle_time = dataframe['date'].iloc[-1]
+        
+        # Ensure both timestamps have consistent timezone handling
+        if latest_candle_time.tz is not None and current_time.tz is None:
+            # latest_candle_time is timezone-aware, current_time is naive
+            current_time = current_time.tz_localize('UTC')
+        elif latest_candle_time.tz is None and current_time.tz is not None:
+            # latest_candle_time is naive, current_time is timezone-aware
+            latest_candle_time = latest_candle_time.tz_localize('UTC')
+        elif latest_candle_time.tz is not None and current_time.tz is not None:
+            # Both are timezone-aware, ensure they're in the same timezone
+            if latest_candle_time.tz != current_time.tz:
+                latest_candle_time = latest_candle_time.tz_convert('UTC')
+                current_time = current_time.tz_convert('UTC')
+        
+        # Check if this is likely a backtest (historical data) or live trading (recent data)
+        time_diff_minutes = (current_time - latest_candle_time).total_seconds() / 60
+        
+        # Multiple criteria for backtest detection:
+        # 1. Data is more than 5 minutes old (historical data)
+        # 2. Large amount of data (typical backtest has lots of historical candles)
+        # 3. No stored trendlines yet (first run)
+        # 4. Monte Carlo has never been executed (safety check)
+        is_backtest_mode = (
+            time_diff_minutes > 5 or  # Data is older than 5 minutes
+            len(dataframe) > 10000 or  # Large dataset typical of backtests
+            len(self.stored_trendlines) == 0 or  # No trendlines stored yet (first run)
+            not self.monte_carlo_executed  # Monte Carlo has never been executed
+        )
+        
+        print(f"=== MODE DETECTION ===")
+        print(f"Current time: {current_time}")
+        print(f"Latest candle: {latest_candle_time}")
+        print(f"Time difference: {time_diff_minutes:.1f} minutes")
+        print(f"Dataframe length: {len(dataframe)} candles")
+        print(f"Stored trendlines: {len(self.stored_trendlines)}")
+        print(f"Monte Carlo executed: {self.monte_carlo_executed}")
+        print(f"Backtest criteria:")
+        print(f"  - Data age > 5 min: {time_diff_minutes > 5}")
+        print(f"  - Large dataset (>10k): {len(dataframe) > 10000}")
+        print(f"  - No stored trendlines: {len(self.stored_trendlines) == 0}")
+        print(f"  - Monte Carlo never executed: {not self.monte_carlo_executed}")
+        print(f"Mode: {'BACKTEST (Rolling Monte Carlo)' if is_backtest_mode else 'LIVE TRADING (Heartbeat-based)'}")
+        
+        # Clear stored trendlines from previous runs only in backtest mode
+        if is_backtest_mode:
+            self.stored_trendlines.clear()
+            print(f"Cleared previous trendline storage for backtest analysis of {metadata.get('pair', 'UNKNOWN')}")
+        else:
+            print(f"Keeping existing trendlines for live trading of {metadata.get('pair', 'UNKNOWN')} ({len(self.stored_trendlines)} stored)")
             
         # Determine the highest timeframe we can use based on available data
         self.highest_timeframe = self.determine_highest_timeframe(dataframe)
@@ -574,6 +632,7 @@ class RiskMetrics(IStrategy):
         dataframe.loc[:, 'highest_timeframe_indicator'] = 1.0
         dataframe.loc[:, 'highest_timeframe'] = self.highest_timeframe
         print(f"Highest timeframe: {self.highest_timeframe}")
+        
         # Resample to higher timeframes if possible
         resampled_dfs = self.resample_to_higher_timeframes(dataframe)
         print(f"Resampled dataframes: {resampled_dfs}")
@@ -581,17 +640,43 @@ class RiskMetrics(IStrategy):
         # Initialize all required dataframe columns
         self._initialize_dataframe_columns(dataframe)
 
-        # === Rolling Monte Carlo Optimization Logic (Eliminates Lookahead Bias) ===
-        recalc_interval_candles = self.mc_recalc_interval_minutes.value // timeframe_to_minutes(self.timeframe)
-        startup_candles = self.mc_lookback_window_candles.value
-        min_required_candles = max(self.MIN_LOOKBACK_PERIOD, 100)  # Use minimum required data instead of large startup window
-        
-        # Check if rolling optimization is enabled
-        if not self.enable_rolling_mc_optimization.value:
-            self._execute_non_rolling_monte_carlo_optimization(dataframe, metadata)
+        if is_backtest_mode:
+            # === BACKTEST MODE: Rolling Monte Carlo ===
+            print("=== EXECUTING BACKTEST MODE ===")
+            
+            # In backtest mode, always run Monte Carlo optimization since we cleared stored trendlines
+            # Execute rolling Monte Carlo optimization for backtest
+            if self.enable_rolling_mc_optimization.value:
+                self._execute_rolling_monte_carlo_optimization(dataframe, metadata)
+                self._update_last_recalculation_time(latest_candle_time)
+            else:
+                self._execute_non_rolling_monte_carlo_optimization(dataframe, metadata)
+            
+            # Mark that Monte Carlo has been executed
+            self.monte_carlo_executed = True
         else:
-            self._execute_rolling_monte_carlo_optimization(dataframe, metadata)
-
+            # === LIVE TRADING MODE: Heartbeat-based Monte Carlo ===
+            print("=== EXECUTING LIVE TRADING MODE ===")
+            
+            # Check if we need to recalculate based on time interval
+            should_recalculate = self._should_recalculate_for_heartbeat(latest_candle_time)
+            
+            if should_recalculate:
+                print(f"Recalculation interval reached - executing non-rolling Monte Carlo")
+                self._execute_non_rolling_monte_carlo_optimization(dataframe, metadata)
+                # Update last recalculation time
+                self._update_last_recalculation_time(latest_candle_time)
+                # Mark that Monte Carlo has been executed
+                self.monte_carlo_executed = True
+            else:
+                print(f"Using existing trendlines - no recalculation needed")
+                # Try to populate from existing trendlines
+                if not self._populate_from_existing_trendlines(dataframe, metadata):
+                    print(f"No existing trendlines found - forcing recalculation")
+                    self._execute_non_rolling_monte_carlo_optimization(dataframe, metadata)
+                    self._update_last_recalculation_time(latest_candle_time)
+                    # Mark that Monte Carlo has been executed
+                    self.monte_carlo_executed = True
 
         # Mark high and low points for visualization
         try:
@@ -600,7 +685,6 @@ class RiskMetrics(IStrategy):
             
         except Exception as e:
             print(f"Error finding swing points: {e}")
-
 
         # === Output All Stored Trendlines ===
         try:
@@ -685,6 +769,106 @@ class RiskMetrics(IStrategy):
         dataframe.loc[:, 'MC_Support_Score'] = 0.0
         dataframe.loc[:, 'MC_Optimal_Period'] = 0.0
                 
+    def _populate_from_existing_trendlines(self, dataframe: DataFrame, metadata: dict) -> bool:
+        """
+        Draw every stored trendline during their exact start/end time periods.
+        
+        Args:
+            dataframe: DataFrame to populate with existing trendline data
+            metadata: Strategy metadata containing pair information
+            
+        Returns:
+            bool: True if any trendlines were drawn, False otherwise
+        """
+        if not self.stored_trendlines:
+            return False
+        
+        pair = metadata.get('pair', 'UNKNOWN')
+        print(f"Drawing {len(self.stored_trendlines)} stored trendlines for {pair}")
+        
+        # Initialize all columns with NaN
+        dataframe.loc[:, 'MC_Optimal_Resistance'] = np.nan
+        dataframe.loc[:, 'MC_Optimal_Support'] = np.nan
+        dataframe.loc[:, 'MC_Resistance_Score'] = 0.0
+        dataframe.loc[:, 'MC_Support_Score'] = 0.0
+        
+        trendlines_drawn = False
+        
+        # Draw each stored trendline during its exact time period
+        for trendline in self.stored_trendlines:
+            for j, timestamp in enumerate(dataframe['date']):
+                pandas_index = dataframe.index[j]
+                
+                # Only draw trendline if timestamp is within its exact active period
+                if trendline.is_active_at_time(timestamp):
+                    price = trendline.get_price_at_time(timestamp)
+                    
+                    if trendline.trendline_type == 'resistance':
+                        dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = price
+                        dataframe.loc[pandas_index, 'MC_Resistance_Score'] = float(trendline.bounce_count)
+                    elif trendline.trendline_type == 'support':
+                        dataframe.loc[pandas_index, 'MC_Optimal_Support'] = price
+                        dataframe.loc[pandas_index, 'MC_Support_Score'] = float(trendline.bounce_count)
+                    
+                    trendlines_drawn = True
+        
+        if trendlines_drawn:
+            print(f"Successfully drew stored trendlines for {pair}")
+        else:
+            print(f"No trendlines were active during dataframe period for {pair}")
+        
+        return trendlines_drawn
+
+    def _apply_trendline_to_dataframe(self, dataframe: DataFrame, trendline: Optional[Trendline], trendline_type: str) -> None:
+        """
+        Apply a single trendline to the dataframe by calculating its price at each timestamp.
+        
+        Args:
+            dataframe: DataFrame to populate
+            trendline: Trendline object to apply (can be None)
+            trendline_type: Either 'resistance' or 'support'
+        """
+        if trendline is None:
+            # Set columns to NaN if no trendline available
+            if trendline_type == 'resistance':
+                dataframe.loc[:, 'MC_Optimal_Resistance'] = np.nan
+                dataframe.loc[:, 'MC_Resistance_Score'] = 0.0
+                dataframe.loc[:, 'MC_Optimal_Resistance_Period'] = 0.0
+            else:  # support
+                dataframe.loc[:, 'MC_Optimal_Support'] = np.nan
+                dataframe.loc[:, 'MC_Support_Score'] = 0.0
+                dataframe.loc[:, 'MC_Optimal_Support_Period'] = 0.0
+            return
+        
+        # Calculate trendline price at each dataframe timestamp
+        trendline_prices = []
+        for timestamp in dataframe['date']:
+            if trendline.is_active_at_time(timestamp):
+                price = trendline.get_price_at_time(timestamp)
+                trendline_prices.append(price)
+            else:
+                # Extend trendline beyond its original range using the slope
+                price = trendline.get_price_at_time(timestamp)
+                trendline_prices.append(price)
+        
+        # Apply to appropriate columns
+        if trendline_type == 'resistance':
+            dataframe.loc[:, 'MC_Optimal_Resistance'] = trendline_prices
+            dataframe.loc[:, 'MC_Resistance_Score'] = float(trendline.bounce_count)
+            # Calculate period from trendline duration (convert to number of candles)
+            duration_minutes = trendline.duration_hours * 60
+            timeframe_minutes = timeframe_to_minutes(self.timeframe)
+            estimated_period = int(duration_minutes / timeframe_minutes) if timeframe_minutes > 0 else 0
+            dataframe.loc[:, 'MC_Optimal_Resistance_Period'] = float(estimated_period)
+        else:  # support
+            dataframe.loc[:, 'MC_Optimal_Support'] = trendline_prices
+            dataframe.loc[:, 'MC_Support_Score'] = float(trendline.bounce_count)
+            # Calculate period from trendline duration (convert to number of candles)
+            duration_minutes = trendline.duration_hours * 60
+            timeframe_minutes = timeframe_to_minutes(self.timeframe)
+            estimated_period = int(duration_minutes / timeframe_minutes) if timeframe_minutes > 0 else 0
+            dataframe.loc[:, 'MC_Optimal_Support_Period'] = float(estimated_period)
+
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
         Generate entry signals using the modular SignalGenerator.
@@ -731,7 +915,8 @@ class RiskMetrics(IStrategy):
         )
         
         mc_results = temp_mc_manager.execute_monte_carlo_optimization(
-            current_dataframe_slice, metadata['pair'], self.enable_mc_optimization.value
+            current_dataframe_slice, metadata['pair'], self.enable_mc_optimization.value,
+            actual_recalc_interval_minutes=self.mc_recalc_interval_minutes.value
         )
         
         return mc_results
@@ -828,6 +1013,7 @@ class RiskMetrics(IStrategy):
     def _execute_rolling_monte_carlo_optimization(self, dataframe: DataFrame, metadata: dict) -> None:
         """
         Execute rolling Monte Carlo optimization to eliminate lookahead bias.
+        Skip simulations where valid trendlines already exist for the time period.
         
         Args:
             dataframe: The dataframe to process
@@ -852,36 +1038,124 @@ class RiskMetrics(IStrategy):
 
         # Main rolling optimization loop
         for i in range(min_required_candles, len(dataframe)):
+            current_time = dataframe['date'].iloc[i]  # Current timestamp being processed
+            
             # Determine if it is time to recalculate
             should_recalculate = (i == min_required_candles) or ((i - min_required_candles) % recalc_interval_candles == 0)
 
             if should_recalculate:
-                print(f"Recalculating MC results at candle {i}/{len(dataframe)} ({(i/len(dataframe)*100):.1f}%)")
+                # Check if we already have valid trendlines for this time period
+                has_valid_resistance = False
+                has_valid_support = False
                 
-                # Execute Monte Carlo recalculation
-                mc_results = self._execute_rolling_monte_carlo_recalculation(dataframe, i, metadata)
+                for trendline in self.stored_trendlines:
+                    if trendline.is_active_at_time(current_time):
+                        if trendline.trendline_type == 'resistance':
+                            has_valid_resistance = True
+                        elif trendline.trendline_type == 'support':
+                            has_valid_support = True
+                        
+                        # If we have both types, we can skip this simulation
+                        if has_valid_resistance and has_valid_support:
+                            break
                 
-                if mc_results:
-                    last_mc_results = mc_results
+                # If we don't have active trendlines, look for the closest future trendlines
+                if not (has_valid_resistance and has_valid_support):
+                    print(f"Looking for closest future trendlines for time {current_time}")
                     
-                    # Store trendline objects from this iteration
-                    resistance_trendline = mc_results.get('best_resistance_trendline')
-                    support_trendline = mc_results.get('best_support_trendline')
+                    # Find closest future resistance trendline (end_time > current_time)
+                    closest_future_resistance = None
+                    min_resistance_time_diff = None
                     
-                    if resistance_trendline:
-                        self.stored_trendlines.append(resistance_trendline)
-                        print(f"  Stored resistance trendline: {resistance_trendline.trendline_type} at candle {i}")
+                    # Find closest future support trendline (end_time > current_time)
+                    closest_future_support = None
+                    min_support_time_diff = None
                     
-                    if support_trendline:
-                        self.stored_trendlines.append(support_trendline)
-                        print(f"  Stored support trendline: {support_trendline.trendline_type} at candle {i}")
+                    for trendline in self.stored_trendlines:
+                        # Only consider trendlines that end after current time
+                        if trendline.end_time > current_time:
+                            time_diff = (trendline.end_time - current_time).total_seconds()
+                            
+                            if trendline.trendline_type == 'resistance' and not has_valid_resistance:
+                                if min_resistance_time_diff is None or time_diff < min_resistance_time_diff:
+                                    closest_future_resistance = trendline
+                                    min_resistance_time_diff = time_diff
+                                    print(f"    Found future resistance candidate: end_time={trendline.end_time}, time_diff={time_diff/60:.1f}min")
+                            elif trendline.trendline_type == 'support' and not has_valid_support:
+                                if min_support_time_diff is None or time_diff < min_support_time_diff:
+                                    closest_future_support = trendline
+                                    min_support_time_diff = time_diff
+                                    print(f"    Found future support candidate: end_time={trendline.end_time}, time_diff={time_diff/60:.1f}min")
                     
-                    # Update slopes and values
-                    (current_resistance_slope, current_support_slope, 
-                     last_resistance_value, last_support_value) = self._update_slopes_and_values_from_mc_results(mc_results)
+                    # Assign closest future trendlines if found
+                    if closest_future_resistance and not has_valid_resistance:
+                        last_resistance_value = closest_future_resistance.get_price_at_time(current_time)
+                        current_resistance_slope = closest_future_resistance.slope
+                        has_valid_resistance = True
+                        print(f"  ✓ Assigned closest future resistance: end_time={closest_future_resistance.end_time}, price={last_resistance_value:.6f}, slope={current_resistance_slope:.6f}")
                     
-                    print(f"  New MC results: R_score={mc_results.get('resistance_score', 0):.4f}, S_score={mc_results.get('support_score', 0):.4f}")
-                    print(f"  Slopes: R_slope={current_resistance_slope:.6f}, S_slope={current_support_slope:.6f}")
+                    if closest_future_support and not has_valid_support:
+                        last_support_value = closest_future_support.get_price_at_time(current_time)
+                        current_support_slope = closest_future_support.slope
+                        has_valid_support = True
+                        print(f"  ✓ Assigned closest future support: end_time={closest_future_support.end_time}, price={last_support_value:.6f}, slope={current_support_slope:.6f}")
+                    
+                    # Debug: Show what we found vs what we were looking for
+                    if not has_valid_resistance:
+                        print(f"  ✗ No future resistance found for time {current_time}")
+                    if not has_valid_support:
+                        print(f"  ✗ No future support found for time {current_time}")
+                
+                # Skip simulation if we now have both resistance and support trendlines
+                if has_valid_resistance and has_valid_support:
+                    print(f"Skipping MC simulation at candle {i}/{len(dataframe)} - using stored/assigned trendlines for time {current_time}")
+                    
+                    # Use existing trendlines to update state variables (only if not already set above)
+                    for trendline in self.stored_trendlines:
+                        if trendline.is_active_at_time(current_time):
+                            if trendline.trendline_type == 'resistance' and np.isnan(last_resistance_value):
+                                last_resistance_value = trendline.get_price_at_time(current_time)
+                                current_resistance_slope = trendline.slope
+                                print(f"  Using existing active resistance: price={last_resistance_value:.6f}, slope={current_resistance_slope:.6f}")
+                            elif trendline.trendline_type == 'support' and np.isnan(last_support_value):
+                                last_support_value = trendline.get_price_at_time(current_time)
+                                current_support_slope = trendline.slope
+                                print(f"  Using existing active support: price={last_support_value:.6f}, slope={current_support_slope:.6f}")
+                else:
+                    # Execute Monte Carlo recalculation only if we still don't have valid trendlines
+                    print(f"Recalculating MC results at candle {i}/{len(dataframe)} ({(i/len(dataframe)*100):.1f}%) - missing trendlines for time {current_time}")
+                    
+                    # Debug: List all stored trendlines before recalculation
+                    print(f"=== DEBUG: All Stored Trendlines at {current_time} ===")
+                    print(f"Total stored trendlines: {len(self.stored_trendlines)}")
+                    for idx, tl in enumerate(self.stored_trendlines, 1):
+                        is_active = tl.is_active_at_time(current_time)
+                        print(f"  {idx}. {tl.trendline_type.upper()} - Start: {tl.start_time}, End: {tl.end_time}, Active: {is_active}")
+                    print(f"=== END DEBUG ===")
+                    
+                    mc_results = self._execute_rolling_monte_carlo_recalculation(dataframe, i, metadata)
+                    
+                    if mc_results:
+                        last_mc_results = mc_results
+                        
+                        # Store trendline objects from this iteration
+                        resistance_trendline = mc_results.get('best_resistance_trendline')
+                        support_trendline = mc_results.get('best_support_trendline')
+                        
+                        if resistance_trendline:
+                            self.stored_trendlines.append(resistance_trendline)
+                            print(f"  Stored resistance trendline: {resistance_trendline.trendline_type} at candle {i}")
+                        
+                        if support_trendline:
+                            self.stored_trendlines.append(support_trendline)
+                            print(f"  Stored support trendline: {support_trendline.trendline_type} at candle {i}")
+                        
+                        # Update slopes and values
+                        (current_resistance_slope, current_support_slope, 
+                         last_resistance_value, last_support_value) = self._update_slopes_and_values_from_mc_results(mc_results)
+                        
+                        print(f"  New MC results: R_score={mc_results.get('resistance_score', 0):.4f}, S_score={mc_results.get('support_score', 0):.4f}")
+                        print(f"  Slopes: R_slope={current_resistance_slope:.6f}, S_slope={current_support_slope:.6f}")
 
             # Project trendlines forward using slopes
             last_resistance_value, last_support_value = self._project_trendlines_forward(
@@ -910,7 +1184,8 @@ class RiskMetrics(IStrategy):
         
         # Execute Monte Carlo optimization using the manager (original method)
         mc_results = self.monte_carlo_manager.execute_monte_carlo_optimization(
-            dataframe, metadata['pair'], self.enable_mc_optimization.value
+            dataframe, metadata['pair'], self.enable_mc_optimization.value,
+            actual_recalc_interval_minutes=self.mc_recalc_interval_minutes.value
         )
         
         # Apply the results to the dataframe
@@ -935,4 +1210,48 @@ class RiskMetrics(IStrategy):
                 print(f"  Stored best support trendline from Monte Carlo optimization")
         else:
             print(f"Monte Carlo results not yet available for {metadata['pair']}.")
+
+    def _should_recalculate_for_heartbeat(self, current_candle_time: pd.Timestamp) -> bool:
+        """
+        Determine if we should recalculate Monte Carlo based on heartbeat interval.
+        
+        Uses modulo logic to check if enough time has passed since strategy start
+        or last recalculation.
+        
+        Args:
+            current_candle_time: Current candle timestamp
+            
+        Returns:
+            bool: True if recalculation is needed
+        """
+        recalc_interval_minutes = self.mc_recalc_interval_minutes.value
+        
+        # Ensure consistent timezone handling
+        last_recalc_time = self.last_recalculation_time
+        current_time = current_candle_time
+                
+        # Calculate minutes since last recalculation
+        minutes_since_last_recalc = (current_time - last_recalc_time).total_seconds() / 60
+        
+        # Check if we've reached the recalc interval using modulo logic
+        should_recalc = minutes_since_last_recalc % recalc_interval_minutes == 0
+        
+        print(f"=== HEARTBEAT RECALCULATION CHECK ===")
+        print(f"Current candle time: {current_time}")
+        print(f"Last recalculation: {last_recalc_time}")
+        print(f"Minutes since last recalc: {minutes_since_last_recalc:.1f}")
+        print(f"Recalc interval: {recalc_interval_minutes} minutes")
+        print(f"Should recalculate: {should_recalc}")
+        
+        return should_recalc
+    
+    def _update_last_recalculation_time(self, current_candle_time: pd.Timestamp) -> None:
+        """
+        Update the last recalculation time to the current candle time.
+        
+        Args:
+            current_candle_time: Current candle timestamp
+        """
+        self.last_recalculation_time = current_candle_time
+        print(f"Updated last recalculation time to: {self.last_recalculation_time}")
 

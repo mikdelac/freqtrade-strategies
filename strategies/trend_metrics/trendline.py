@@ -97,6 +97,9 @@ class Trendline:
         """
         Calculate the trendline price at a specific timestamp using the linear equation.
         
+        The slope is in units of price change per candle period, so we need to convert
+        time differences to candle periods for proper calculation.
+        
         Args:
             timestamp: The timestamp to calculate price for
             
@@ -105,16 +108,16 @@ class Trendline:
         """
         timestamp = pd.Timestamp(timestamp)
         
-        # Convert timestamp to numeric value for calculation
-        # Using timestamp as x-coordinate in the linear equation y = mx + b
-        time_numeric = timestamp.timestamp()
-        start_time_numeric = self.start_time.timestamp()
+        # Calculate time difference in seconds
+        time_diff_seconds = (timestamp - self.start_time).total_seconds()
         
-        # Calculate relative time from start
-        relative_time = time_numeric - start_time_numeric
+        # Assume 1-minute candles for time period conversion (most common timeframe)
+        # This converts time difference to number of candles since start_time
+        candle_periods = time_diff_seconds / 60.0  # 60 seconds per 1-minute candle
         
-        # Use linear equation: price = slope * relative_time + start_price
-        return self.slope * relative_time + self.start_price
+        # Use linear equation: price = slope * candle_periods + start_price
+        # where slope is price change per candle period
+        return self.slope * candle_periods + self.start_price
     
     def is_active_at_time(self, timestamp: Union[datetime, pd.Timestamp]) -> bool:
         """

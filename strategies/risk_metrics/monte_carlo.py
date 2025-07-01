@@ -237,13 +237,15 @@ class TrendlineMonteCarloOptimizer:
         self.trendline_proximity_threshold = trendline_proximity_threshold
         self.trend_analyzer = trend_analyzer
     
-    def _generate_trendlines_for_period(self, recent_data: pd.DataFrame, random_period: int) -> Dict[str, Any]:
+    def _generate_trendlines_for_period(self, recent_data: pd.DataFrame, random_period: int, 
+                                       mc_recalc_interval_minutes: int) -> Dict[str, Any]:
         """
         Generate trendlines and create Trendline objects for a specific lookback period.
         
         Args:
             recent_data: DataFrame with recent OHLCV data
             random_period: Lookback period to test
+            mc_recalc_interval_minutes: Monte Carlo recalculation interval in minutes
             
         Returns:
             Dict containing trendlines and Trendline objects (without scores)
@@ -282,14 +284,18 @@ class TrendlineMonteCarloOptimizer:
         # Create Trendline objects immediately after gentrends
         trendline_objects = []
         
-        end_time = recent_data['date'].iloc[-1]  # Last candle in the lookback period
-        start_time = recent_data['date'].iloc[0]  # First candle in the lookback period
+        # Set start_time as the last candle in the lookback period (when the trendline becomes active)
+        start_time = recent_data['date'].iloc[-1]  # Last candle in the lookback period
+        # Set end_time as start_time plus the Monte Carlo recalculation interval
+        # Ensure minimum duration of at least 1 minute to avoid start_time == end_time errors
+        min_duration_minutes = mc_recalc_interval_minutes
+        end_time = start_time + pd.Timedelta(minutes=min_duration_minutes)
+        
         
         # Create resistance trendline object (Max Line)
         if 'Max Line' in trends.columns and not trends['Max Line'].isna().all():
-            # Get actual start price from dataframe at start_time
-            start_idx = recent_data[recent_data['date'] == start_time].index
-            resistance_start_price = recent_data.loc[start_idx[0], 'close']
+            # Get the resistance price at the start_time (last candle)
+            resistance_start_price = trends['Max Line'].iloc[-1]
             
             resistance_trendline = Trendline(
                 trendline_type='resistance',
@@ -303,9 +309,8 @@ class TrendlineMonteCarloOptimizer:
         
         # Create support trendline object (Min Line)
         if 'Min Line' in trends.columns and not trends['Min Line'].isna().all():
-            # Get actual start price from dataframe at start_time
-            start_idx = recent_data[recent_data['date'] == start_time].index
-            support_start_price = recent_data.loc[start_idx[0], 'close']
+            # Get the support price at the start_time (last candle)
+            support_start_price = trends['Min Line'].iloc[-1]
             
             support_trendline = Trendline(
                 trendline_type='support',
@@ -330,7 +335,8 @@ class TrendlineMonteCarloOptimizer:
             'recent_data': recent_data  # Include the data for later use
         }
     
-    def monte_carlo_period_optimization(self, dataframe: pd.DataFrame, pair: str = "UNKNOWN") -> Dict[str, Any]:
+    def monte_carlo_period_optimization(self, dataframe: pd.DataFrame, pair: str = "UNKNOWN",
+                                       recalc_interval_minutes: int = 120) -> Dict[str, Any]:
         """
         Use Monte Carlo simulation to test different lookback periods and find
         the ones that produce the highest scoring resistance and support lines.
@@ -339,6 +345,7 @@ class TrendlineMonteCarloOptimizer:
         Args:
             dataframe: DataFrame with OHLCV data
             pair: Trading pair name for logging
+            recalc_interval_minutes: Override recalc interval (from RiskMetrics strategy)
             
         Returns:
             Dict containing optimal periods and their scores
@@ -437,7 +444,7 @@ class TrendlineMonteCarloOptimizer:
                 recent_data = dataframe.tail(random_period).copy()
                 
                 # Use the helper method to generate trendlines and create Trendline objects
-                trendline_results = self._generate_trendlines_for_period(recent_data, random_period)
+                trendline_results = self._generate_trendlines_for_period(recent_data, random_period, recalc_interval_minutes)
                 
                 trends = trendline_results['trends']
                 trendline_objects = trendline_results.get('trendline_objects', [])
@@ -613,7 +620,7 @@ class MonteCarloManager:
         Args:
             mc_iterations: Number of Monte Carlo iterations
             min_lookback_period: Minimum lookback period
-            recalc_interval_minutes: Not used anymore (kept for compatibility)
+            recalc_interval_minutes: Monte Carlo recalculation interval in minutes
             trendline_proximity_threshold: Threshold for trendline proximity scoring
             trend_analyzer: TrendAnalysis instance
         """
@@ -623,7 +630,8 @@ class MonteCarloManager:
         )
     
     def execute_monte_carlo_optimization(self, dataframe: pd.DataFrame, pair: str,
-                                       enable_mc_optimization: bool = True) -> Dict[str, Any]:
+                                       enable_mc_optimization: bool = True,
+                                       actual_recalc_interval_minutes: Optional[int] = None) -> Dict[str, Any]:
         """
         Execute Monte Carlo optimization without caching.
         
@@ -631,6 +639,7 @@ class MonteCarloManager:
             dataframe: DataFrame with OHLCV data
             pair: Trading pair name
             enable_mc_optimization: Whether MC optimization is enabled
+            actual_recalc_interval_minutes: Override recalc interval (from RiskMetrics strategy)
             
         Returns:
             Dict containing Monte Carlo results
@@ -640,8 +649,11 @@ class MonteCarloManager:
         
         print(f"Running Monte Carlo optimization for {pair}...")
         
-        # Run the optimization
-        mc_results = self.optimizer.monte_carlo_period_optimization(dataframe, pair)
+        # Use the actual recalc interval from RiskMetrics if provided
+        recalc_interval = actual_recalc_interval_minutes if actual_recalc_interval_minutes is not None else 120
+        
+        # Run the optimization with the correct recalc interval
+        mc_results = self.optimizer.monte_carlo_period_optimization(dataframe, pair, recalc_interval)
         
         print(f"Monte Carlo optimization completed for {pair}")
         return mc_results
