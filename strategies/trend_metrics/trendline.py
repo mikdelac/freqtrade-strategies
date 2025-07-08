@@ -25,7 +25,8 @@ class Trendline:
                  slope: float,
                  start_price: float,
                  bounce_count: int = -1,
-                 creation_time: Optional[Union[datetime, pd.Timestamp]] = None):
+                 creation_time: Optional[Union[datetime, pd.Timestamp]] = None,
+                 bounce_timestamps: Optional[list] = None):
         """
         Initialize a Trendline object.
         
@@ -37,6 +38,7 @@ class Trendline:
             start_price: Price at the start point
             bounce_count: Number of times price has bounced off this trendline (default: -1)
             creation_time: When this trendline object was created (defaults to current time)
+            bounce_timestamps: List of timestamps where bounces occurred (defaults to empty list)
         """
         self.trendline_type = trendline_type.lower()
         self.start_time = pd.Timestamp(start_time)
@@ -45,6 +47,7 @@ class Trendline:
         self.start_price = start_price
         self.bounce_count = bounce_count
         self.creation_time = pd.Timestamp(creation_time) if creation_time else pd.Timestamp.now()
+        self.bounce_timestamps = bounce_timestamps or []
         
         # Validation
         if self.trendline_type not in ['support', 'resistance']:
@@ -161,7 +164,8 @@ class Trendline:
             'bounce_count': self.bounce_count,
             'creation_time': self.creation_time,
             'duration_hours': self.duration_hours,
-            'age_hours': self.age_hours
+            'age_hours': self.age_hours,
+            'bounce_timestamps': self.bounce_timestamps
         }
     
     def __str__(self) -> str:

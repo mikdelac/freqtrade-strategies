@@ -469,10 +469,16 @@ class TrendlineMonteCarloOptimizer:
                             )
                             # Store bounce count in the Trendline object
                             trendline_obj.bounce_count = bounce_conditions.sum()
+                            
+                            # Capture bounce timestamps
+                            bounce_indices = bounce_conditions[bounce_conditions].index
+                            trendline_obj.bounce_timestamps = recent_data.loc[bounce_indices, 'date'].tolist()
+                            
                             #print(f"  Resistance trendline bounce count: {trendline_obj.bounce_count}")
                         except Exception as e:
                             print(f"Error generating resistance bounce conditions: {e}")
                             trendline_obj.bounce_count = 0
+                            trendline_obj.bounce_timestamps = []
                     
                     elif trendline_obj.trendline_type == 'support' and 'Min Line' in trends.columns:
                         # Generate bounce conditions for support
@@ -491,10 +497,16 @@ class TrendlineMonteCarloOptimizer:
                             )
                             # Store bounce count in the Trendline object
                             trendline_obj.bounce_count = bounce_conditions.sum()
+                            
+                            # Capture bounce timestamps
+                            bounce_indices = bounce_conditions[bounce_conditions].index
+                            trendline_obj.bounce_timestamps = recent_data.loc[bounce_indices, 'date'].tolist()
+                            
                             #print(f"  Support trendline bounce count: {trendline_obj.bounce_count}")
                         except Exception as e:
                             print(f"Error generating support bounce conditions: {e}")
                             trendline_obj.bounce_count = 0
+                            trendline_obj.bounce_timestamps = []
                 
                 # Calculate scores using rank_trendlines - pass the trendline objects so it can use their bounce counts
                 main_lines_score = rank_trendlines(

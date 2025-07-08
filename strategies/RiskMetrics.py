@@ -717,6 +717,15 @@ class RiskMetrics(IStrategy):
                     print(f"     Slope: {trendline.slope:.8f}")
                     print(f"     Start Price: {trendline.start_price:.6f}")
                     print(f"     Bounce Count: {trendline.bounce_count}")
+                    
+                    # Display bounce timestamps if available
+                    if hasattr(trendline, 'bounce_timestamps') and trendline.bounce_timestamps:
+                        print(f"     Bounce Timestamps ({len(trendline.bounce_timestamps)}):")
+                        for j, timestamp in enumerate(trendline.bounce_timestamps, 1):
+                            print(f"       {j}. {timestamp}")
+                    else:
+                        print(f"     Bounce Timestamps: None")
+                    
                     print("")
             else:
                 print(f"  No trendlines stored during this execution")
