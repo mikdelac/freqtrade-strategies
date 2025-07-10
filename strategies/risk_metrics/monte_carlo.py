@@ -8,11 +8,11 @@ from .volatility_models import GARCHModel
 
 # Import trendline functions and Trendline class from trend_metrics using absolute imports
 try:
-    from trend_metrics.trendline import gentrends, rank_trendlines, Trendline, generate_bounce_conditions
+    from trend_metrics.trendline import gentrends, rank_trendlines, Trendline, generate_bounce_conditions, calculate_r_squared
 except ImportError:
     # Fallback for different import structures
     try:
-        from strategies.trend_metrics.trendline import gentrends, rank_trendlines, Trendline, generate_bounce_conditions
+        from strategies.trend_metrics.trendline import gentrends, rank_trendlines, Trendline, generate_bounce_conditions, calculate_r_squared
     except ImportError:
         print("Warning: Could not import trendline functions. Some functionality may be limited.")
         # Define dummy functions to prevent errors
@@ -22,6 +22,8 @@ except ImportError:
             return {"ranked_maxlines": {}, "ranked_minlines": {}}
         def generate_bounce_conditions(*args, **kwargs):
             return pd.Series([False] * 100)  # Return dummy series
+        def calculate_r_squared(*args, **kwargs):
+            return 0.0  # Return dummy R-squared
         
         # Define dummy Trendline class
         class Trendline:
@@ -297,12 +299,19 @@ class TrendlineMonteCarloOptimizer:
             # Get the resistance price at the start_time (last candle)
             resistance_start_price = trends['Max Line'].iloc[-1]
             
+            # Calculate R-squared for resistance trendline
+            resistance_r_squared = calculate_r_squared(
+                price_series=recent_data['high'],
+                trendline_series=trends['Max Line']
+            )
+            
             resistance_trendline = Trendline(
                 trendline_type='resistance',
                 start_time=start_time,
                 end_time=end_time,
                 slope=resistance_slope,
                 start_price=resistance_start_price,
+                r_squared=resistance_r_squared,
                 bounce_count=0
             )
             trendline_objects.append(resistance_trendline)
@@ -312,12 +321,19 @@ class TrendlineMonteCarloOptimizer:
             # Get the support price at the start_time (last candle)
             support_start_price = trends['Min Line'].iloc[-1]
             
+            # Calculate R-squared for support trendline
+            support_r_squared = calculate_r_squared(
+                price_series=recent_data['low'],
+                trendline_series=trends['Min Line']
+            )
+            
             support_trendline = Trendline(
                 trendline_type='support',
                 start_time=start_time,
                 end_time=end_time,
                 slope=support_slope,
                 start_price=support_start_price,
+                r_squared=support_r_squared,
                 bounce_count=0
             )
             trendline_objects.append(support_trendline)

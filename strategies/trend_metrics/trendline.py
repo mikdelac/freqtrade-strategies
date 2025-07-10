@@ -10,6 +10,98 @@ from datetime import datetime, timedelta
 from typing import Optional, Union, Tuple
 
 
+def calculate_r_squared(price_series: Union[pd.Series, np.ndarray], 
+                       trendline_series: Union[pd.Series, np.ndarray]) -> float:
+    """
+    Calculate the R-squared value for a trendline fit to price data.
+    
+    For trendline analysis, this measures how well the trendline captures the 
+    overall trend direction and strength, rather than point-by-point accuracy.
+    
+    The calculation uses a hybrid approach:
+    1. Correlation-based R² for trend direction strength
+    2. Adjusted for trendline-specific characteristics
+    3. Weighted by trend consistency
+    
+    Args:
+        price_series: Actual price values (e.g., high or low prices)
+        trendline_series: Calculated trendline values
+        
+    Returns:
+        float: R-squared value (0.0 to 1.0). Returns 0.0 if calculation fails.
+    """
+    try:
+        # Convert to numpy arrays for consistent handling
+        y_actual = np.array(price_series)
+        y_predicted = np.array(trendline_series)
+        
+        # Remove any NaN values
+        valid_mask = ~(np.isnan(y_actual) | np.isnan(y_predicted))
+        if not np.any(valid_mask):
+            return 0.0
+            
+        y_actual = y_actual[valid_mask]
+        y_predicted = y_predicted[valid_mask]
+        
+        # Need at least 3 data points for meaningful trendline analysis
+        if len(y_actual) < 3:
+            return 0.0
+        
+        # Method 1: Correlation-based R-squared (measures trend direction alignment)
+        correlation_matrix = np.corrcoef(y_actual, y_predicted)
+        correlation_r_squared = 0.0
+        
+        if correlation_matrix.shape == (2, 2):
+            correlation = correlation_matrix[0, 1]
+            if not np.isnan(correlation) and abs(correlation) > 0.01:  # Avoid near-zero correlations
+                correlation_r_squared = correlation ** 2
+        
+        # Method 2: Trend consistency measure
+        # Calculate how consistently the actual data follows the trendline direction
+        actual_changes = np.diff(y_actual)
+        predicted_changes = np.diff(y_predicted)
+        
+        # Count how many times actual and predicted changes have the same direction
+        same_direction_count = np.sum(np.sign(actual_changes) == np.sign(predicted_changes))
+        trend_consistency = same_direction_count / len(actual_changes) if len(actual_changes) > 0 else 0.0
+        
+        # Method 3: Relative error measure (how far off is the trendline on average)
+        price_range = np.max(y_actual) - np.min(y_actual)
+        if price_range > 0:
+            relative_errors = np.abs(y_actual - y_predicted) / price_range
+            avg_relative_error = np.mean(relative_errors)
+            # Convert to R-squared like metric (lower error = higher R-squared)
+            error_r_squared = max(0.0, 1.0 - (avg_relative_error * 4))  # Scale factor of 4
+        else:
+            error_r_squared = 1.0  # Perfect fit if no price variation
+        
+        # Combine the three methods with weights
+        # Correlation is most important for trend direction
+        # Trend consistency ensures the trendline follows the general direction
+        # Error measure ensures the trendline isn't too far from actual prices
+        final_r_squared = (
+            correlation_r_squared * 0.5 +      # 50% weight on correlation
+            trend_consistency * 0.3 +          # 30% weight on trend consistency  
+            error_r_squared * 0.2              # 20% weight on relative error
+        )
+        
+        return max(0.0, min(1.0, final_r_squared))
+        
+    except Exception as e:
+        # Fallback: return a minimal R-squared based on basic correlation if possible
+        try:
+            if len(y_actual) >= 2 and len(y_predicted) >= 2:
+                correlation_matrix = np.corrcoef(y_actual, y_predicted)
+                if correlation_matrix.shape == (2, 2):
+                    correlation = correlation_matrix[0, 1]
+                    if not np.isnan(correlation):
+                        return max(0.0, min(1.0, correlation ** 2))
+        except:
+            pass
+        
+        return 0.0
+
+
 class Trendline:
     """
     A class to store and manage trendline information.
@@ -24,6 +116,7 @@ class Trendline:
                  end_time: Union[datetime, pd.Timestamp],
                  slope: float,
                  start_price: float,
+                 r_squared: float,
                  bounce_count: int = -1,
                  creation_time: Optional[Union[datetime, pd.Timestamp]] = None,
                  bounce_timestamps: Optional[list] = None):
@@ -36,6 +129,7 @@ class Trendline:
             end_time: Timestamp when the trendline ends
             slope: Slope of the trendline (price change per time unit)
             start_price: Price at the start point
+            r_squared: R-squared coefficient indicating trendline fit quality (0.0 to 1.0)
             bounce_count: Number of times price has bounced off this trendline (default: -1)
             creation_time: When this trendline object was created (defaults to current time)
             bounce_timestamps: List of timestamps where bounces occurred (defaults to empty list)
@@ -45,6 +139,7 @@ class Trendline:
         self.end_time = pd.Timestamp(end_time)
         self.slope = slope
         self.start_price = start_price
+        self.r_squared = r_squared
         self.bounce_count = bounce_count
         self.creation_time = pd.Timestamp(creation_time) if creation_time else pd.Timestamp.now()
         self.bounce_timestamps = bounce_timestamps or []
@@ -55,6 +150,9 @@ class Trendline:
         
         if self.start_time >= self.end_time:
             raise ValueError("start_time must be before end_time")
+            
+        if self.r_squared < 0.0 or self.r_squared > 1.0:
+            raise ValueError("r_squared must be between 0.0 and 1.0")
     
     @property
     def duration(self) -> timedelta:
@@ -165,7 +263,8 @@ class Trendline:
             'creation_time': self.creation_time,
             'duration_hours': self.duration_hours,
             'age_hours': self.age_hours,
-            'bounce_timestamps': self.bounce_timestamps
+            'bounce_timestamps': self.bounce_timestamps,
+            'r_squared': self.r_squared
         }
     
     def __str__(self) -> str:
@@ -173,13 +272,15 @@ class Trendline:
         return (f"Trendline({self.trendline_type.title()}: "
                 f"{self.start_time.strftime('%Y-%m-%d %H:%M')} to "
                 f"{self.end_time.strftime('%Y-%m-%d %H:%M')}, "
-                f"slope={self.slope:.6f}, bounces={self.bounce_count}, duration={self.duration_hours:.1f}h)")
+                f"slope={self.slope:.6f}, bounces={self.bounce_count}, "
+                f"duration={self.duration_hours:.1f}h, R²={self.r_squared:.3f})")
     
     def __repr__(self) -> str:
         """Detailed representation of the trendline."""
         return (f"Trendline(type='{self.trendline_type}', "
                 f"start_time='{self.start_time}', end_time='{self.end_time}', "
-                f"slope={self.slope}, start_price={self.start_price}, bounce_count={self.bounce_count})")
+                f"slope={self.slope}, start_price={self.start_price}, "
+                f"bounce_count={self.bounce_count}, r_squared={self.r_squared})")
 
 
 def generate_bounce_conditions(close_data, level_data, direction: str, tolerance: float = 0.00005, pivot_highs=None, pivot_lows=None):
@@ -400,17 +501,18 @@ def segtrends(dataframe, field="close", segments=2, charts=False):
 
 def rank_trendlines(trends, trendline_objects):
     """
-    Ranks trendlines based on bounce count from Trendline objects.
+    Ranks trendlines based on bounce count from Trendline objects, with R-squared as tiebreaker.
     
-    Simplified Scoring System:
-    - Number of bounces = score (1 bounce = 1 point)
+    Ranking System:
+    1. Primary: Number of bounces (higher is better)
+    2. Tiebreaker: R-squared value (higher is better)
     
     Args:
         trends: DataFrame containing price data and trendlines
         trendline_objects: List of Trendline objects with pre-calculated bounce counts (REQUIRED)
         
     Returns:
-        Dictionary with ranked maxlines and minlines based on bounce count
+        Dictionary with ranked maxlines and minlines based on bounce count and R-squared
     """
     import pandas as pd
     import numpy as np
@@ -419,65 +521,80 @@ def rank_trendlines(trends, trendline_objects):
         # print("ERROR: Empty trends DataFrame")
         return {"ranked_maxlines": {}, "ranked_minlines": {}}
     
-    # print(f"=== BOUNCE COUNT TRENDLINE RANKING ===")
+    # print(f"=== BOUNCE COUNT + R-SQUARED TRENDLINE RANKING ===")
     
     # Trendline objects are now required since bounces are always pre-calculated
     if not trendline_objects:
         # print("ERROR: trendline_objects is required - bounces should be pre-calculated")
         return {"ranked_maxlines": {}, "ranked_minlines": {}}
     
-    # print(f"Using pre-calculated bounce counts from {len(trendline_objects)} Trendline objects")
+    # print(f"Using pre-calculated bounce counts and R-squared from {len(trendline_objects)} Trendline objects")
     
-    # Define trendline categories
+    # Define trendline categories with enhanced scoring
     trendline_categories = {
         'resistance': {
             'columns': [col for col in trends.columns if col.startswith("Max_Line_") or col == "Max Line"],
-            'scores': {}
+            'trendlines': []  # Store (column, bounce_count, r_squared, trendline_obj)
         },
         'support': {
             'columns': [col for col in trends.columns if col.startswith("Min_Line_") or col == "Min Line"],
-            'scores': {}
+            'trendlines': []  # Store (column, bounce_count, r_squared, trendline_obj)
         }
     }
     
-    # Map trendline objects to their corresponding columns and extract bounce counts
+    # Map trendline objects to their corresponding columns and extract bounce counts + R-squared
     for trendline_obj in trendline_objects:
         if trendline_obj.trendline_type == 'resistance':
             # Find the corresponding resistance column (usually "Max Line")
             for col in trendline_categories['resistance']['columns']:
                 if col in trends.columns and not trends[col].isna().all():
-                    trendline_categories['resistance']['scores'][col] = trendline_obj.bounce_count
-                    # print(f"Resistance line '{col}': {trendline_obj.bounce_count} bounces (from Trendline object)")
+                    trendline_categories['resistance']['trendlines'].append((
+                        col, 
+                        trendline_obj.bounce_count, 
+                        trendline_obj.r_squared,
+                        trendline_obj
+                    ))
+                    # print(f"Resistance line '{col}': {trendline_obj.bounce_count} bounces, R²={trendline_obj.r_squared:.3f}")
                     break
         elif trendline_obj.trendline_type == 'support':
             # Find the corresponding support column (usually "Min Line")
             for col in trendline_categories['support']['columns']:
                 if col in trends.columns and not trends[col].isna().all():
-                    trendline_categories['support']['scores'][col] = trendline_obj.bounce_count
-                    # print(f"Support line '{col}': {trendline_obj.bounce_count} bounces (from Trendline object)")
+                    trendline_categories['support']['trendlines'].append((
+                        col, 
+                        trendline_obj.bounce_count, 
+                        trendline_obj.r_squared,
+                        trendline_obj
+                    ))
+                    # print(f"Support line '{col}': {trendline_obj.bounce_count} bounces, R²={trendline_obj.r_squared:.3f}")
                     break
     
-    # Sort and return results
+    # Sort trendlines by bounce count (descending), then by R-squared (descending)
+    def sort_key(trendline_tuple):
+        col, bounce_count, r_squared, trendline_obj = trendline_tuple
+        return (-bounce_count, -r_squared)  # Negative for descending order
+    
+    # Sort and create ranked results
+    resistance_sorted = sorted(trendline_categories['resistance']['trendlines'], key=sort_key)
+    support_sorted = sorted(trendline_categories['support']['trendlines'], key=sort_key)
+    
+    # Create the ranked results dictionary with bounce counts as scores (for backward compatibility)
     ranked_results = {
-        "ranked_maxlines": {k: v for k, v in sorted(trendline_categories['resistance']['scores'].items(), 
-                                                   key=lambda item: item[1], 
-                                                   reverse=True)},
-        "ranked_minlines": {k: v for k, v in sorted(trendline_categories['support']['scores'].items(), 
-                                                   key=lambda item: item[1], 
-                                                   reverse=True)}
+        "ranked_maxlines": {col: bounce_count for col, bounce_count, r_squared, trendline_obj in resistance_sorted},
+        "ranked_minlines": {col: bounce_count for col, bounce_count, r_squared, trendline_obj in support_sorted}
     }
     
-    # Print final rankings
-    # print(f"\n=== FINAL RANKINGS ===")
+    # Print final rankings with enhanced information
+    # print(f"\n=== FINAL RANKINGS (Bounce Count + R-squared Tiebreaker) ===")
     # print("RESISTANCE LINES:")
-    # for i, (line, score) in enumerate(ranked_results["ranked_maxlines"].items(), 1):
-    #     if score > 0:
-    #         print(f"  {i}. {line}: {score} bounces")
+    # for i, (col, bounce_count, r_squared, trendline_obj) in enumerate(resistance_sorted, 1):
+    #     if bounce_count > 0:
+    #         print(f"  {i}. {col}: {bounce_count} bounces, R²={r_squared:.3f}")
     
     # print("SUPPORT LINES:")
-    # for i, (line, score) in enumerate(ranked_results["ranked_minlines"].items(), 1):
-    #     if score > 0:
-    #         print(f"  {i}. {line}: {score} bounces")
+    # for i, (col, bounce_count, r_squared, trendline_obj) in enumerate(support_sorted, 1):
+    #     if bounce_count > 0:
+    #         print(f"  {i}. {col}: {bounce_count} bounces, R²={r_squared:.3f}")
     
     return ranked_results
 
