@@ -109,7 +109,7 @@ class TrendAnalysis:
     def _find_swing_points(self, 
                     prices: np.ndarray, 
                     price_type: str = 'high',
-                    distance: int = 5,
+                    distance: int = 10,
                     prominence: float = 0.1) -> List[Tuple[int, float]]:
         """
         Find swing high or low points in the price array using scipy.signal.find_peaks.
@@ -118,7 +118,7 @@ class TrendAnalysis:
             prices: Array of price values
             price_type: Type of price to examine ('high' or 'low')
             distance: Minimum horizontal distance between peaks
-            prominence: Minimum prominence for peaks (if None, calculated as 2% of price range)
+            prominence: Minimum prominence pourcentage for peaks
 
         Returns:
             List of tuples containing (index, price) of swing points
