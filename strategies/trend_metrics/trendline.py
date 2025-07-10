@@ -309,6 +309,8 @@ def generate_bounce_conditions(close_data, level_data, direction: str, tolerance
             (close_data > level_data) &
             # Previous candle had a pivot low (swing low extrema)
             (~pivot_lows.shift(1).isna()) &
+            # Pivot low must be above or at the support level
+            (pivot_lows.shift(1) >= level_data.shift(1)) &
             # Current close is higher than previous close (upward movement)
             (close_data > close_data.shift(1)) 
         )
@@ -322,6 +324,8 @@ def generate_bounce_conditions(close_data, level_data, direction: str, tolerance
             (close_data < level_data) &
             # Previous candle had a pivot high (swing high extrema)
             (~pivot_highs.shift(1).isna()) &
+            # Pivot high must be below or at the resistance level
+            (pivot_highs.shift(1) <= level_data.shift(1)) &
             # Current close is lower than previous close (downward movement)
             (close_data < close_data.shift(1)) 
         )

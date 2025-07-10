@@ -295,7 +295,7 @@ class RiskMetrics(IStrategy):
     can_short: bool = False
     
     # Trendline parameters
-    trendline_proximity_threshold = DecimalParameter(0.005, 0.02, default=0.0005, space="buy", optimize=True)
+    trendline_proximity_threshold = DecimalParameter(0.005, 0.02, default=0.01, space="buy", optimize=True)
     
     # Linear Regression parameters
     linearreg_timeperiod = IntParameter(10, 500, default=200, space="buy", optimize=True)
@@ -912,6 +912,29 @@ class RiskMetrics(IStrategy):
         lookback_start = max(0, i - self.mc_lookback_window_candles.value)
         current_dataframe_slice = dataframe.iloc[lookback_start:i].copy()
 
+        # Find and map swing points for the current slice
+        high_swing_points = self.trend_analyzer._find_swing_points(
+            prices=dataframe['high'].values,
+            price_type='high'
+        )
+        low_swing_points = self.trend_analyzer._find_swing_points(
+            prices=dataframe['low'].values,
+            price_type='low'
+        )
+
+        current_dataframe_slice.loc[:, 'all_highs'] = np.nan
+        current_dataframe_slice.loc[:, 'all_lows'] = np.nan
+
+        for idx, price in high_swing_points:
+            if lookback_start <= idx < i:
+                slice_idx = idx - lookback_start
+                current_dataframe_slice.iloc[slice_idx, current_dataframe_slice.columns.get_loc('all_highs')] = price
+        
+        for idx, price in low_swing_points:
+            if lookback_start <= idx < i:
+                slice_idx = idx - lookback_start
+                current_dataframe_slice.iloc[slice_idx, current_dataframe_slice.columns.get_loc('all_lows')] = price
+
         print(f"  Using data slice: {lookback_start} to {i} ({len(current_dataframe_slice)} candles)")
 
         # Execute MC optimization on the slice of data available at this point in time
@@ -1192,6 +1215,27 @@ class RiskMetrics(IStrategy):
         """
         print("=== Using Original Monte Carlo Optimization (with potential lookahead bias) ===")
         
+        # Find and map swing points
+        high_swing_points = self.trend_analyzer._find_swing_points(
+            prices=dataframe['high'].values,
+            price_type='high'
+        )
+        low_swing_points = self.trend_analyzer._find_swing_points(
+            prices=dataframe['low'].values,
+            price_type='low'
+        )
+
+        dataframe.loc[:, 'all_highs'] = np.nan
+        dataframe.loc[:, 'all_lows'] = np.nan
+
+        for idx, price in high_swing_points:
+            if idx < len(dataframe):
+                dataframe.iloc[idx, dataframe.columns.get_loc('all_highs')] = price
+        
+        for idx, price in low_swing_points:
+            if idx < len(dataframe):
+                dataframe.iloc[idx, dataframe.columns.get_loc('all_lows')] = price
+
         # Execute Monte Carlo optimization using the manager (original method)
         mc_results = self.monte_carlo_manager.execute_monte_carlo_optimization(
             dataframe, metadata['pair'], self.enable_mc_optimization.value,

@@ -433,30 +433,6 @@ class TrendlineMonteCarloOptimizer:
                 # Test this period
                 recent_data = dataframe.tail(random_period).copy()
                 
-                # Find swing points for this period
-                high_swing_points = self.trend_analyzer._find_swing_points(
-                    prices=recent_data['high'].values,
-                    price_type='high'
-                )
-                
-                low_swing_points = self.trend_analyzer._find_swing_points(
-                    prices=recent_data['low'].values,
-                    price_type='low'
-                )
-                
-                # Initialize swing point columns
-                recent_data['all_highs'] = np.nan
-                recent_data['all_lows'] = np.nan
-                
-                # Map swing points
-                for idx, price in high_swing_points:
-                    if idx < len(recent_data):
-                        recent_data.iloc[idx, recent_data.columns.get_loc('all_highs')] = price
-                
-                for idx, price in low_swing_points:
-                    if idx < len(recent_data):
-                        recent_data.iloc[idx, recent_data.columns.get_loc('all_lows')] = price
-                
                 # Use the helper method to generate trendlines and create Trendline objects
                 trendline_results = self._generate_trendlines_for_period(recent_data, random_period, recalc_interval_minutes)
                 
