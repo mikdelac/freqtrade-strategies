@@ -8,11 +8,11 @@ from .volatility_models import GARCHModel
 
 # Import trendline functions and Trendline class from trend_metrics using absolute imports
 try:
-    from trend_metrics.trendline import gentrends, rank_trendlines, Trendline, generate_bounce_conditions, calculate_r_squared
+    from trend_metrics.trendline import gentrends, rank_trendlines, Trendline, generate_bounce_conditions, calculate_r_squared, generate_trendlines_for_period, apply_monte_carlo_results
 except ImportError:
     # Fallback for different import structures
     try:
-        from strategies.trend_metrics.trendline import gentrends, rank_trendlines, Trendline, generate_bounce_conditions, calculate_r_squared
+        from strategies.trend_metrics.trendline import gentrends, rank_trendlines, Trendline, generate_bounce_conditions, calculate_r_squared, generate_trendlines_for_period, apply_monte_carlo_results
     except ImportError:
         print("Warning: Could not import trendline functions. Some functionality may be limited.")
         # Define dummy functions to prevent errors
@@ -237,107 +237,8 @@ class TrendlineMonteCarloOptimizer:
         self.min_lookback_period = min_lookback_period
         self.trendline_proximity_threshold = trendline_proximity_threshold
     
-    def _generate_trendlines_for_period(self, recent_data: pd.DataFrame, random_period: int, 
-                                       mc_recalc_interval_minutes: int) -> Dict[str, Any]:
-        """
-        Generate trendlines and create Trendline objects for a specific lookback period.
-        
-        Args:
-            recent_data: DataFrame with recent OHLCV data (must already have all_highs and all_lows columns)
-            random_period: Lookback period to test
-            mc_recalc_interval_minutes: Monte Carlo recalculation interval in minutes
-            
-        Returns:
-            Dict containing trendlines and Trendline objects (without scores)
-        """
-        # Generate trends for this period
-        trends = gentrends(recent_data, field='close', window=1/3.0) # Changed from 1/3.0 to 1
-        
-        # Extract slope from the trends dataframe - gentrends now provides these columns
-        resistance_slope = trends['Max Slope'].iloc[-1] if 'Max Slope' in trends.columns else 0.0
-        support_slope = trends['Min Slope'].iloc[-1] if 'Min Slope' in trends.columns else 0.0
-        
-        # Create Trendline objects immediately after gentrends
-        trendline_objects = []
-        
-        # Set start_time as the last candle in the lookback period (when the trendline becomes active)
-        start_time = recent_data['date'].iloc[-1]  # Last candle in the lookback period
-        # Set end_time as start_time plus the Monte Carlo recalculation interval
-        # Ensure minimum duration of at least 1 minute to avoid start_time == end_time errors
-        min_duration_minutes = mc_recalc_interval_minutes
-        end_time = start_time + pd.Timedelta(minutes=min_duration_minutes)
-        
-        
-        # Create resistance trendline object (Max Line)
-        if 'Max Line' in trends.columns and not trends['Max Line'].isna().all():
-            # Get the resistance price at the start_time (last candle)
-            resistance_start_price = trends['Max Line'].iloc[-1]
-            
-            # Calculate R-squared for resistance trendline
-            resistance_r_squared = calculate_r_squared(
-                price_series=recent_data['high'],
-                trendline_series=trends['Max Line']
-            )
-            
-            resistance_trendline = Trendline(
-                trendline_type='resistance',
-                start_time=start_time,
-                end_time=end_time,
-                slope=resistance_slope,
-                start_price=resistance_start_price,
-                r_squared=resistance_r_squared,
-                bounce_count=0
-            )
-            trendline_objects.append(resistance_trendline)
-        
-        # Create support trendline object (Min Line)
-        if 'Min Line' in trends.columns and not trends['Min Line'].isna().all():
-            # Get the support price at the start_time (last candle)
-            support_start_price = trends['Min Line'].iloc[-1]
-            
-            # Calculate R-squared for support trendline
-            support_r_squared = calculate_r_squared(
-                price_series=recent_data['low'],
-                trendline_series=trends['Min Line']
-            )
-            
-            support_trendline = Trendline(
-                trendline_type='support',
-                start_time=start_time,
-                end_time=end_time,
-                slope=support_slope,
-                start_price=support_start_price,
-                r_squared=support_r_squared,
-                bounce_count=0
-            )
-            trendline_objects.append(support_trendline)
-        
-        return {
-            'trends': trends,
-            'resistance_slope': resistance_slope,
-            'support_slope': support_slope,
-            'trendline_objects': trendline_objects,  # List of Trendline objects
-            'start_time': start_time,  # Store the calculated start time
-            'end_time': end_time,      # Store the calculated end time
-            'lookback_period': random_period,  # Store the period used
-            'recent_data': recent_data  # Include the data for later use
-        }
-    
     def monte_carlo_period_optimization(self, dataframe: pd.DataFrame, pair: str = "UNKNOWN",
-                                       recalc_interval_minutes: int = 120) -> Dict[str, Any]:
-        """
-        Use Monte Carlo simulation to test different lookback periods and find
-        the ones that produce the highest scoring resistance and support lines.
-        Now uses core periods based on dividing total candles
-        
-        Args:
-            dataframe: DataFrame with OHLCV data
-            pair: Trading pair name for logging
-            recalc_interval_minutes: Override recalc interval (from RiskMetrics strategy)
-            
-        Returns:
-            Dict containing optimal periods and their scores
-        """
+                                       recalc_interval_minutes: int = 120):
         # Set MAX_LOOKBACK_PERIOD dynamically based on available data
         total_candles = len(dataframe)
         max_lookback_period = total_candles
@@ -432,7 +333,12 @@ class TrendlineMonteCarloOptimizer:
                 recent_data = dataframe.tail(random_period).copy()
                 
                 # Use the helper method to generate trendlines and create Trendline objects
-                trendline_results = self._generate_trendlines_for_period(recent_data, random_period, recalc_interval_minutes)
+                trendline_results = generate_trendlines_for_period(
+                    recent_data=recent_data,
+                    random_period=random_period,
+                    mc_recalc_interval_minutes=recalc_interval_minutes,
+                    trendline_proximity_threshold=self.trendline_proximity_threshold
+                )
                 
                 trends = trendline_results['trends']
                 trendline_objects = trendline_results.get('trendline_objects', [])
@@ -462,7 +368,6 @@ class TrendlineMonteCarloOptimizer:
                             bounce_indices = bounce_conditions[bounce_conditions].index
                             trendline_obj.bounce_timestamps = recent_data.loc[bounce_indices, 'date'].tolist()
                             
-                            #print(f"  Resistance trendline bounce count: {trendline_obj.bounce_count}")
                         except Exception as e:
                             print(f"Error generating resistance bounce conditions: {e}")
                             trendline_obj.bounce_count = 0
@@ -490,7 +395,6 @@ class TrendlineMonteCarloOptimizer:
                             bounce_indices = bounce_conditions[bounce_conditions].index
                             trendline_obj.bounce_timestamps = recent_data.loc[bounce_indices, 'date'].tolist()
                             
-                            #print(f"  Support trendline bounce count: {trendline_obj.bounce_count}")
                         except Exception as e:
                             print(f"Error generating support bounce conditions: {e}")
                             trendline_obj.bounce_count = 0
@@ -560,7 +464,7 @@ class TrendlineMonteCarloOptimizer:
                 
                 # Progress reporting with more details
                 if (iteration + 1) % 100 == 0:
-                    print(f"Monte Carlo progress for {pair}: {iteration + 1}/{len(lookback_periods)} iterations completed")
+                    print(f"Monte Carlo progress for {pair}: {iteration + 1}/{len(lookback_periods)} completed")
                     print(f"Current best - Resistance: {best_resistance_score:.4f} (period {best_resistance_period}), Support: {best_support_score:.4f} (period {best_support_period})")
                     print(f"Last 5 tested periods: {tested_periods[-5:] if len(tested_periods) >= 5 else tested_periods}")
                 
@@ -600,150 +504,3 @@ class TrendlineMonteCarloOptimizer:
             'best_resistance_trendline': best_resistance_trendline,
             'best_support_trendline': best_support_trendline
         }
-
-
-class MonteCarloManager:
-    """
-    Coordinates Monte Carlo optimization and result application.
-    
-    This class acts as the public-facing interface that coordinates the
-    TrendlineMonteCarloOptimizer to execute Monte Carlo optimization
-    and apply the results to the dataframe.
-    """
-    
-    def __init__(self, mc_iterations: int, min_lookback_period: int, 
-                 recalc_interval_minutes: int, trendline_proximity_threshold: float):
-        """
-        Initialize the Monte Carlo manager.
-        
-        Args:
-            mc_iterations: Number of Monte Carlo iterations
-            min_lookback_period: Minimum lookback period
-            recalc_interval_minutes: Monte Carlo recalculation interval in minutes
-            trendline_proximity_threshold: Threshold for trendline proximity scoring
-        """
-        self.optimizer = TrendlineMonteCarloOptimizer(
-            mc_iterations, min_lookback_period, 
-            trendline_proximity_threshold
-        )
-    
-    def execute_monte_carlo_optimization(self, dataframe: pd.DataFrame, pair: str,
-                                       enable_mc_optimization: bool = True,
-                                       actual_recalc_interval_minutes: Optional[int] = None) -> Dict[str, Any]:
-        """
-        Execute Monte Carlo optimization without caching.
-        
-        Args:
-            dataframe: DataFrame with OHLCV data
-            pair: Trading pair name
-            enable_mc_optimization: Whether MC optimization is enabled
-            actual_recalc_interval_minutes: Override recalc interval (from RiskMetrics strategy)
-            
-        Returns:
-            Dict containing Monte Carlo results
-        """
-        if not enable_mc_optimization:
-            return {}
-        
-        print(f"Running Monte Carlo optimization for {pair}...")
-        
-        # Use the actual recalc interval from RiskMetrics if provided
-        recalc_interval = actual_recalc_interval_minutes if actual_recalc_interval_minutes is not None else 120
-        
-        # Run the optimization with the correct recalc interval
-        mc_results = self.optimizer.monte_carlo_period_optimization(dataframe, pair, recalc_interval)
-        
-        print(f"Monte Carlo optimization completed for {pair}")
-        return mc_results
-    
-    def apply_monte_carlo_results(self, dataframe: pd.DataFrame, mc_results: Dict[str, Any]) -> None:
-        """
-        Apply Monte Carlo results to the dataframe.
-        
-        Args:
-            dataframe: DataFrame to apply results to
-            mc_results: Monte Carlo optimization results
-        """
-        if not mc_results:
-            return
-        
-        # Apply the optimal lines to the dataframe using proper pandas assignment
-        # Handle potential length mismatches when new candles appear
-        if 'resistance_line' in mc_results:
-            resistance_line = mc_results['resistance_line']
-            if len(resistance_line) != len(dataframe):
-                # Handle length mismatch - resize the array to match current dataframe length
-                if len(resistance_line) < len(dataframe):
-                    # Dataframe grew (new candles added) - extend the array with NaN values
-                    extended_line = np.full(len(dataframe), np.nan)
-                    extended_line[:len(resistance_line)] = resistance_line
-                    resistance_line = extended_line
-                else:
-                    # Dataframe shrunk (unlikely but handle it) - truncate the array
-                    resistance_line = resistance_line[:len(dataframe)]
-            dataframe.loc[:, 'MC_Optimal_Resistance'] = resistance_line
-            
-        if 'support_line' in mc_results:
-            support_line = mc_results['support_line']
-            if len(support_line) != len(dataframe):
-                # Handle length mismatch - resize the array to match current dataframe length
-                if len(support_line) < len(dataframe):
-                    # Dataframe grew (new candles added) - extend the array with NaN values
-                    extended_line = np.full(len(dataframe), np.nan)
-                    extended_line[:len(support_line)] = support_line
-                    support_line = extended_line
-                else:
-                    # Dataframe shrunk (unlikely but handle it) - truncate the array
-                    support_line = support_line[:len(dataframe)]
-            dataframe.loc[:, 'MC_Optimal_Support'] = support_line
-        
-        # Apply scores using proper pandas assignment
-        dataframe.loc[:, 'MC_Resistance_Score'] = mc_results.get('resistance_score', 0.0)
-        dataframe.loc[:, 'MC_Support_Score'] = mc_results.get('support_score', 0.0)
-        dataframe.loc[:, 'MC_Optimal_Period'] = mc_results.get('optimal_resistance_period', 0.0)
-    
-    def apply_monte_carlo_results_to_row(self, dataframe: pd.DataFrame, row_index: int, mc_results: Dict[str, Any]) -> None:
-        """
-        Apply Monte Carlo results to a specific row of the dataframe for rolling analysis.
-        This method is used during historical backtesting to apply trendlines calculated
-        with point-in-time data only.
-        
-        Args:
-            dataframe: DataFrame to apply results to
-            row_index: Specific row index to update
-            mc_results: Monte Carlo optimization results
-        """
-        if not mc_results or row_index >= len(dataframe):
-            return
-        
-        # Get the actual pandas index for the row
-        pandas_index = dataframe.index[row_index]
-        
-        # Apply resistance line value if available
-        if 'resistance_line' in mc_results:
-            resistance_line = mc_results['resistance_line']
-            # Get the last valid value from the resistance line (most recent trendline value)
-            resistance_value = np.nan
-            if len(resistance_line) > 0:
-                # Find the last non-NaN value in the resistance line
-                valid_resistance = resistance_line[~np.isnan(resistance_line)]
-                if len(valid_resistance) > 0:
-                    resistance_value = valid_resistance[-1]
-            dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = resistance_value
-            
-        # Apply support line value if available
-        if 'support_line' in mc_results:
-            support_line = mc_results['support_line']
-            # Get the last valid value from the support line (most recent trendline value)
-            support_value = np.nan
-            if len(support_line) > 0:
-                # Find the last non-NaN value in the support line
-                valid_support = support_line[~np.isnan(support_line)]
-                if len(valid_support) > 0:
-                    support_value = valid_support[-1]
-            dataframe.loc[pandas_index, 'MC_Optimal_Support'] = support_value
-        
-        # Apply scores to the specific row
-        dataframe.loc[pandas_index, 'MC_Resistance_Score'] = mc_results.get('resistance_score', 0.0)
-        dataframe.loc[pandas_index, 'MC_Support_Score'] = mc_results.get('support_score', 0.0)
-        dataframe.loc[pandas_index, 'MC_Optimal_Period'] = mc_results.get('optimal_resistance_period', 0.0) 

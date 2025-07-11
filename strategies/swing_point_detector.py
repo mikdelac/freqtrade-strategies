@@ -21,7 +21,7 @@ class SwingPointDetector:
     configurable parameters for distance and prominence.
     """
     
-    def __init__(self, distance: int = 10, prominence: float = 0.04):
+    def __init__(self, distance: int = 10, prominence: float = 0.12):
         """
         Initialize SwingPointDetector with default parameters.
         
@@ -38,7 +38,10 @@ class SwingPointDetector:
                          distance: int = None,
                          prominence: float = None) -> List[Tuple[int, float]]:
         """
-        Find swing high or low points in the price array using scipy.signal.find_peaks.
+        Find swing high or low points based on price changes using scipy.signal.find_peaks.
+        
+        This method detects abrupt price movements by analyzing the differences between
+        consecutive prices rather than the raw price values.
         
         Args:
             prices: Array of price values
@@ -53,17 +56,29 @@ class SwingPointDetector:
         distance = distance if distance is not None else self.distance
         prominence = prominence if prominence is not None else self.prominence
         
-        price_range = np.max(prices) - np.min(prices)
-        prominence_value = price_range * prominence
+        # Calculate price changes (differences)
+        price_changes = np.diff(prices)
+        
+        # Handle edge case where we have less than 2 prices
+        if len(price_changes) == 0:
+            return []
+        
+        # Calculate prominence based on the range of price changes
+        change_range = np.max(price_changes) - np.min(price_changes)
+        prominence_value = change_range * prominence
         
         if price_type == 'high':
-            # Find peaks (local maxima)
-            peaks, _ = find_peaks(prices, distance=distance, prominence=prominence_value)
-            swing_points = [(int(idx), float(prices[idx])) for idx in peaks]
+            # Find peaks in positive price changes (abrupt upward movements)
+            peaks, _ = find_peaks(price_changes, distance=distance, prominence=prominence_value)
+            # Add 1 to peak indices because price_changes is one element shorter than prices
+            # The peak at index i in price_changes corresponds to the candle at index i+1 in prices
+            swing_points = [(int(idx + 1), float(prices[idx + 1])) for idx in peaks if idx + 1 < len(prices)]
         else:  # For 'low' prices
-            # For valleys (local minima), invert the signal but keep original price values
-            peaks, _ = find_peaks(-prices, distance=distance, prominence=prominence_value)
-            swing_points = [(int(idx), float(prices[idx])) for idx in peaks]
+            # Find peaks in negative price changes (abrupt downward movements)
+            # Invert the price changes to find valleys as peaks
+            peaks, _ = find_peaks(-price_changes, distance=distance, prominence=prominence_value)
+            # Add 1 to peak indices because price_changes is one element shorter than prices
+            swing_points = [(int(idx + 1), float(prices[idx + 1])) for idx in peaks if idx + 1 < len(prices)]
                     
         # Sort points by time index
         return sorted(swing_points, key=lambda x: x[0])
@@ -118,35 +133,3 @@ class SwingPointDetector:
         
         return mapped_highs, mapped_lows
     
-    def get_swing_highs_lows_series(self, dataframe: pd.DataFrame,
-                                   distance: int = None,
-                                   prominence: float = None) -> Tuple[pd.Series, pd.Series]:
-        """
-        Get swing points as pandas Series for easy use with other functions.
-        
-        Args:
-            dataframe: DataFrame with OHLCV data
-            distance: Minimum horizontal distance between peaks (overrides default)
-            prominence: Minimum prominence percentage for peaks (overrides default)
-            
-        Returns:
-            Tuple[pd.Series, pd.Series]: (swing_highs_series, swing_lows_series)
-        """
-        # Find swing points
-        highs = self.find_swing_points(dataframe['high'].values, 'high', distance, prominence)
-        lows = self.find_swing_points(dataframe['low'].values, 'low', distance, prominence)
-        
-        # Create series with NaN values
-        swing_highs = pd.Series(index=dataframe.index, dtype=float)
-        swing_lows = pd.Series(index=dataframe.index, dtype=float)
-        
-        # Fill in swing points
-        for idx, price in highs:
-            if 0 <= idx < len(dataframe):
-                swing_highs.iloc[idx] = price
-        
-        for idx, price in lows:
-            if 0 <= idx < len(dataframe):
-                swing_lows.iloc[idx] = price
-        
-        return swing_highs, swing_lows 

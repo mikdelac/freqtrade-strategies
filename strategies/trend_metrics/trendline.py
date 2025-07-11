@@ -7,99 +7,8 @@ https://github.com/dysonance/Trendy
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Optional, Union, Tuple
-
-
-def calculate_r_squared(price_series: Union[pd.Series, np.ndarray], 
-                       trendline_series: Union[pd.Series, np.ndarray]) -> float:
-    """
-    Calculate the R-squared value for a trendline fit to price data.
-    
-    For trendline analysis, this measures how well the trendline captures the 
-    overall trend direction and strength, rather than point-by-point accuracy.
-    
-    The calculation uses a hybrid approach:
-    1. Correlation-based R² for trend direction strength
-    2. Adjusted for trendline-specific characteristics
-    3. Weighted by trend consistency
-    
-    Args:
-        price_series: Actual price values (e.g., high or low prices)
-        trendline_series: Calculated trendline values
-        
-    Returns:
-        float: R-squared value (0.0 to 1.0). Returns 0.0 if calculation fails.
-    """
-    try:
-        # Convert to numpy arrays for consistent handling
-        y_actual = np.array(price_series)
-        y_predicted = np.array(trendline_series)
-        
-        # Remove any NaN values
-        valid_mask = ~(np.isnan(y_actual) | np.isnan(y_predicted))
-        if not np.any(valid_mask):
-            return 0.0
-            
-        y_actual = y_actual[valid_mask]
-        y_predicted = y_predicted[valid_mask]
-        
-        # Need at least 3 data points for meaningful trendline analysis
-        if len(y_actual) < 3:
-            return 0.0
-        
-        # Method 1: Correlation-based R-squared (measures trend direction alignment)
-        correlation_matrix = np.corrcoef(y_actual, y_predicted)
-        correlation_r_squared = 0.0
-        
-        if correlation_matrix.shape == (2, 2):
-            correlation = correlation_matrix[0, 1]
-            if not np.isnan(correlation) and abs(correlation) > 0.01:  # Avoid near-zero correlations
-                correlation_r_squared = correlation ** 2
-        
-        # Method 2: Trend consistency measure
-        # Calculate how consistently the actual data follows the trendline direction
-        actual_changes = np.diff(y_actual)
-        predicted_changes = np.diff(y_predicted)
-        
-        # Count how many times actual and predicted changes have the same direction
-        same_direction_count = np.sum(np.sign(actual_changes) == np.sign(predicted_changes))
-        trend_consistency = same_direction_count / len(actual_changes) if len(actual_changes) > 0 else 0.0
-        
-        # Method 3: Relative error measure (how far off is the trendline on average)
-        price_range = np.max(y_actual) - np.min(y_actual)
-        if price_range > 0:
-            relative_errors = np.abs(y_actual - y_predicted) / price_range
-            avg_relative_error = np.mean(relative_errors)
-            # Convert to R-squared like metric (lower error = higher R-squared)
-            error_r_squared = max(0.0, 1.0 - (avg_relative_error * 4))  # Scale factor of 4
-        else:
-            error_r_squared = 1.0  # Perfect fit if no price variation
-        
-        # Combine the three methods with weights
-        # Correlation is most important for trend direction
-        # Trend consistency ensures the trendline follows the general direction
-        # Error measure ensures the trendline isn't too far from actual prices
-        final_r_squared = (
-            correlation_r_squared * 0.5 +      # 50% weight on correlation
-            trend_consistency * 0.3 +          # 30% weight on trend consistency  
-            error_r_squared * 0.2              # 20% weight on relative error
-        )
-        
-        return max(0.0, min(1.0, final_r_squared))
-        
-    except Exception as e:
-        # Fallback: return a minimal R-squared based on basic correlation if possible
-        try:
-            if len(y_actual) >= 2 and len(y_predicted) >= 2:
-                correlation_matrix = np.corrcoef(y_actual, y_predicted)
-                if correlation_matrix.shape == (2, 2):
-                    correlation = correlation_matrix[0, 1]
-                    if not np.isnan(correlation):
-                        return max(0.0, min(1.0, correlation ** 2))
-        except:
-            pass
-        
-        return 0.0
+from typing import Optional, Union, Tuple, Dict, Any
+from scipy import stats
 
 
 class Trendline:
@@ -601,3 +510,180 @@ def rank_trendlines(trends, trendline_objects):
     #         print(f"  {i}. {col}: {bounce_count} bounces, R²={r_squared:.3f}")
     
     return ranked_results
+
+
+def generate_trendlines_for_period(recent_data: pd.DataFrame, random_period: int, 
+                                 mc_recalc_interval_minutes: int, 
+                                 trendline_proximity_threshold: float) -> Dict[str, Any]:
+    """
+    Generate trendlines and create Trendline objects for a specific lookback period.
+    
+    Args:
+        recent_data: DataFrame with recent OHLCV data (must already have all_highs and all_lows columns)
+        random_period: Lookback period to test
+        mc_recalc_interval_minutes: Monte Carlo recalculation interval in minutes
+        trendline_proximity_threshold: Threshold for trendline proximity scoring
+            
+    Returns:
+        Dict containing trendlines and Trendline objects (without scores)
+    """
+    # Generate trends for this period
+    trends = gentrends(recent_data, field='close', window=1/3.0)
+    
+    # Extract slope from the trends dataframe - gentrends now provides these columns
+    resistance_slope = trends['Max Slope'].iloc[-1] if 'Max Slope' in trends.columns else 0.0
+    support_slope = trends['Min Slope'].iloc[-1] if 'Min Slope' in trends.columns else 0.0
+    
+    # Create Trendline objects immediately after gentrends
+    trendline_objects = []
+    
+    # Set start_time as the last candle in the lookback period (when the trendline becomes active)
+    start_time = recent_data['date'].iloc[-1]  # Last candle in the lookback period
+    # Set end_time as start_time plus the Monte Carlo recalculation interval
+    # Ensure minimum duration of at least 1 minute to avoid start_time == end_time errors
+    min_duration_minutes = mc_recalc_interval_minutes
+    end_time = start_time + pd.Timedelta(minutes=min_duration_minutes)
+    
+    # Create resistance trendline object (Max Line)
+    if 'Max Line' in trends.columns and not trends['Max Line'].isna().all():
+        # Get the resistance price at the start_time (last candle)
+        resistance_start_price = trends['Max Line'].iloc[-1]
+        
+        # Calculate R-squared for resistance trendline
+        resistance_r_squared = calculate_r_squared(
+            price_series=recent_data['high'],
+            trendline_series=trends['Max Line']
+        )
+        
+        resistance_trendline = Trendline(
+            trendline_type='resistance',
+            start_time=start_time,
+            end_time=end_time,
+            slope=resistance_slope,
+            start_price=resistance_start_price,
+            r_squared=resistance_r_squared,
+            bounce_count=0
+        )
+        trendline_objects.append(resistance_trendline)
+    
+    # Create support trendline object (Min Line)
+    if 'Min Line' in trends.columns and not trends['Min Line'].isna().all():
+        # Get the support price at the start_time (last candle)
+        support_start_price = trends['Min Line'].iloc[-1]
+        
+        # Calculate R-squared for support trendline
+        support_r_squared = calculate_r_squared(
+            price_series=recent_data['low'],
+            trendline_series=trends['Min Line']
+        )
+        
+        support_trendline = Trendline(
+            trendline_type='support',
+            start_time=start_time,
+            end_time=end_time,
+            slope=support_slope,
+            start_price=support_start_price,
+            r_squared=support_r_squared,
+            bounce_count=0
+        )
+        trendline_objects.append(support_trendline)
+    
+    return {
+        'trends': trends,
+        'resistance_slope': resistance_slope,
+        'support_slope': support_slope,
+        'trendline_objects': trendline_objects,  # List of Trendline objects
+        'start_time': start_time,  # Store the calculated start time
+        'end_time': end_time,      # Store the calculated end time
+        'lookback_period': random_period,  # Store the period used
+        'recent_data': recent_data  # Include the data for later use
+    }
+
+
+def apply_monte_carlo_results(dataframe: pd.DataFrame, mc_results: Dict[str, Any]) -> None:
+    """
+    Apply Monte Carlo results to the dataframe.
+    
+    Args:
+        dataframe: DataFrame to apply results to
+        mc_results: Monte Carlo optimization results
+    """
+    if not mc_results:
+        return
+    
+    # Apply the optimal lines to the dataframe using proper pandas assignment
+    # Handle potential length mismatches when new candles appear
+    if 'resistance_line' in mc_results:
+        resistance_line = mc_results['resistance_line']
+        if len(resistance_line) != len(dataframe):
+            # Handle length mismatch - resize the array to match current dataframe length
+            if len(resistance_line) < len(dataframe):
+                # Dataframe grew (new candles added) - extend the array with NaN values
+                extended_line = np.full(len(dataframe), np.nan)
+                extended_line[:len(resistance_line)] = resistance_line
+                resistance_line = extended_line
+            else:
+                # Dataframe shrunk (unlikely but handle it) - truncate the array
+                resistance_line = resistance_line[:len(dataframe)]
+        dataframe.loc[:, 'MC_Optimal_Resistance'] = resistance_line
+        
+    if 'support_line' in mc_results:
+        support_line = mc_results['support_line']
+        if len(support_line) != len(dataframe):
+            # Handle length mismatch - resize the array to match current dataframe length
+            if len(support_line) < len(dataframe):
+                # Dataframe grew (new candles added) - extend the array with NaN values
+                extended_line = np.full(len(dataframe), np.nan)
+                extended_line[:len(support_line)] = support_line
+                support_line = extended_line
+            else:
+                # Dataframe shrunk (unlikely but handle it) - truncate the array
+                support_line = support_line[:len(dataframe)]
+        dataframe.loc[:, 'MC_Optimal_Support'] = support_line
+    
+    # Apply scores using proper pandas assignment
+    dataframe.loc[:, 'MC_Resistance_Score'] = mc_results.get('resistance_score', 0.0)
+    dataframe.loc[:, 'MC_Support_Score'] = mc_results.get('support_score', 0.0)
+    dataframe.loc[:, 'MC_Optimal_Period'] = mc_results.get('optimal_resistance_period', 0.0)
+
+def calculate_r_squared(price_series: Union[pd.Series, np.ndarray], 
+                       trendline_series: Union[pd.Series, np.ndarray]) -> float:
+    """
+    Calculate the R-squared value for a trendline fit to price data using scipy.stats.linregress.
+    
+    Args:
+        price_series: Actual price values (e.g., high or low prices)
+        trendline_series: Calculated trendline values
+        
+    Returns:
+        float: R-squared value (0.0 to 1.0). Returns 0.0 if calculation fails.
+    """
+    try:
+        # Convert to numpy arrays for consistent handling
+        y_actual = np.array(price_series)
+        y_predicted = np.array(trendline_series)
+        
+        # Remove any NaN values
+        valid_mask = ~(np.isnan(y_actual) | np.isnan(y_predicted))
+        if not np.any(valid_mask):
+            return 0.0
+            
+        y_actual = y_actual[valid_mask]
+        y_predicted = y_predicted[valid_mask]
+        
+        # Need at least 2 data points for linear regression
+        if len(y_actual) < 2:
+            return 0.0
+            
+        # Create x values as indices (time points)
+        x = np.arange(len(y_actual))
+        
+        # Calculate linear regression
+        slope, intercept, r_value, p_value, std_err = stats.linregress(x, y_actual)
+        
+        # Return R-squared value (square of correlation coefficient)
+        return max(0.0, min(1.0, r_value * r_value))
+        
+    except Exception as e:
+        return 0.0
+

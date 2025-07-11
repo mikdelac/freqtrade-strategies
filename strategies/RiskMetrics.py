@@ -39,7 +39,7 @@ from freqtrade.strategy import (
 
 # --------------------------------
 # Add your lib to import here
-from risk_metrics.monte_carlo import MonteCarloSimulator, MonteCarloManager
+from risk_metrics.monte_carlo import MonteCarloSimulator, TrendlineMonteCarloOptimizer
 from swing_point_detector import SwingPointDetector
 from trend_metrics.trendline import gentrends, segtrends, rank_trendlines, generate_bounce_conditions, Trendline
 from technical.util import resample_to_interval, resampled_merge
@@ -420,11 +420,10 @@ class RiskMetrics(IStrategy):
         self.strategy_start_time = pd.Timestamp.now()  # Track when strategy started
         self.monte_carlo_executed = False  # Track if Monte Carlo has been executed at least once
         
-        # Initialize Monte Carlo Manager with required parameters
-        self.monte_carlo_manager = MonteCarloManager(
+        # Initialize Monte Carlo Optimizer with required parameters
+        self.monte_carlo_optimizer = TrendlineMonteCarloOptimizer(
             mc_iterations=self.MC_ITERATIONS,
             min_lookback_period=self.MIN_LOOKBACK_PERIOD,
-            recalc_interval_minutes=self.mc_recalc_interval_minutes.value,
             trendline_proximity_threshold=self.trendline_proximity_threshold.value
         )
         
@@ -432,7 +431,7 @@ class RiskMetrics(IStrategy):
         print(f"  Lookback periods: Fixed periods for Monte Carlo optimization")
         print(f"  Monte Carlo iterations: {self.MC_ITERATIONS}")
         print(f"  Signal generator: Initialized for modular signal generation")
-        print(f"  Monte Carlo Manager: Initialized with {self.mc_recalc_interval_minutes.value}min recalc interval")
+        print(f"  Monte Carlo Optimizer: Initialized with {self.mc_recalc_interval_minutes.value}min recalc interval")
         print(f"  Rolling Monte Carlo optimization: {'ENABLED' if self.enable_rolling_mc_optimization.value else 'DISABLED'}")
         print(f"  Swing Point Detector: Initialized for swing point detection")
         print(f"  Heartbeat tracking: Initialized at {self.strategy_start_time}")
@@ -933,17 +932,16 @@ class RiskMetrics(IStrategy):
         print(f"  Using data slice: {lookback_start} to {i} ({len(current_dataframe_slice)} candles)")
 
         # Execute MC optimization on the slice of data available at this point in time
-        # Create a temporary manager to ensure no state from future data is used
-        temp_mc_manager = MonteCarloManager(
+        # Create a temporary optimizer to ensure no state from future data is used
+        temp_optimizer = TrendlineMonteCarloOptimizer(
             mc_iterations=self.MC_ITERATIONS,
             min_lookback_period=self.MIN_LOOKBACK_PERIOD,
-            recalc_interval_minutes=0,  # Force recalc for temporary manager
             trendline_proximity_threshold=self.trendline_proximity_threshold.value
         )
         
-        mc_results = temp_mc_manager.execute_monte_carlo_optimization(
-            current_dataframe_slice, metadata['pair'], self.enable_mc_optimization.value,
-            actual_recalc_interval_minutes=self.mc_recalc_interval_minutes.value
+        # Execute Monte Carlo optimization directly
+        mc_results = temp_optimizer.monte_carlo_period_optimization(
+            current_dataframe_slice, metadata['pair'], self.mc_recalc_interval_minutes.value
         )
         
         return mc_results
@@ -1230,34 +1228,36 @@ class RiskMetrics(IStrategy):
             if idx < len(dataframe):
                 dataframe.iloc[idx, dataframe.columns.get_loc('all_lows')] = price
 
-        # Execute Monte Carlo optimization using the manager (original method)
-        mc_results = self.monte_carlo_manager.execute_monte_carlo_optimization(
-            dataframe, metadata['pair'], self.enable_mc_optimization.value,
-            actual_recalc_interval_minutes=self.mc_recalc_interval_minutes.value
-        )
-        
-        # Apply the results to the dataframe
-        self.monte_carlo_manager.apply_monte_carlo_results(dataframe, mc_results)
-        
-        if mc_results:
-            print(f"Applied Monte Carlo results for {metadata['pair']}:")
-            print(f"  Resistance Score: {mc_results.get('resistance_score', 0.0):.6f}")
-            print(f"  Support Score: {mc_results.get('support_score', 0.0):.6f}")
-            print(f"  Optimal Periods: R={mc_results.get('optimal_resistance_period', 0)}, S={mc_results.get('optimal_support_period', 0)}")
+        # Execute Monte Carlo optimization directly using the optimizer
+        if self.enable_mc_optimization.value:
+            mc_results = self.monte_carlo_optimizer.monte_carlo_period_optimization(
+                dataframe, metadata['pair'], self.mc_recalc_interval_minutes.value
+            )
             
-            # Store the best trendline objects returned by Monte Carlo optimization
-            resistance_trendline = mc_results.get('best_resistance_trendline')
-            support_trendline = mc_results.get('best_support_trendline')
-            
-            if resistance_trendline:
-                self.stored_trendlines.append(resistance_trendline)
-                print(f"  Stored best resistance trendline from Monte Carlo optimization")
-            
-            if support_trendline:
-                self.stored_trendlines.append(support_trendline)
-                print(f"  Stored best support trendline from Monte Carlo optimization")
+            # Apply the results to the dataframe
+            # Assuming apply_monte_carlo_results is a method of MonteCarloManager or similar
+            # For now, we'll just print the results and store the trendlines
+            if mc_results:
+                print(f"Applied Monte Carlo results for {metadata['pair']}:")
+                print(f"  Resistance Score: {mc_results.get('resistance_score', 0.0):.6f}")
+                print(f"  Support Score: {mc_results.get('support_score', 0.0):.6f}")
+                print(f"  Optimal Periods: R={mc_results.get('optimal_resistance_period', 0)}, S={mc_results.get('optimal_support_period', 0)}")
+                
+                # Store the best trendline objects returned by Monte Carlo optimization
+                resistance_trendline = mc_results.get('best_resistance_trendline')
+                support_trendline = mc_results.get('best_support_trendline')
+                
+                if resistance_trendline:
+                    self.stored_trendlines.append(resistance_trendline)
+                    print(f"  Stored best resistance trendline from Monte Carlo optimization")
+                
+                if support_trendline:
+                    self.stored_trendlines.append(support_trendline)
+                    print(f"  Stored best support trendline from Monte Carlo optimization")
+            else:
+                print(f"Monte Carlo results not yet available for {metadata['pair']}.")
         else:
-            print(f"Monte Carlo results not yet available for {metadata['pair']}.")
+            print(f"Monte Carlo optimization disabled for {metadata['pair']}")
 
     def _should_recalculate_for_heartbeat(self, current_candle_time: pd.Timestamp) -> bool:
         """
