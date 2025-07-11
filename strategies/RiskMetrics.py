@@ -40,7 +40,7 @@ from freqtrade.strategy import (
 # --------------------------------
 # Add your lib to import here
 from risk_metrics.monte_carlo import MonteCarloSimulator, MonteCarloManager
-from trend_metrics.trend_analysis import TrendAnalysis
+from swing_point_detector import SwingPointDetector
 from trend_metrics.trendline import gentrends, segtrends, rank_trendlines, generate_bounce_conditions, Trendline
 from technical.util import resample_to_interval, resampled_merge
 
@@ -295,7 +295,7 @@ class RiskMetrics(IStrategy):
     can_short: bool = False
     
     # Trendline parameters
-    trendline_proximity_threshold = DecimalParameter(0.005, 0.02, default=0.01, space="buy", optimize=True)
+    trendline_proximity_threshold = DecimalParameter(0.005, 0.02, default=0.007, space="buy", optimize=True)
     
     # Linear Regression parameters
     linearreg_timeperiod = IntParameter(10, 500, default=200, space="buy", optimize=True)
@@ -403,12 +403,7 @@ class RiskMetrics(IStrategy):
     def __init__(self, config: dict) -> None:
         super().__init__(config)
         
-        self.trend_analyzer = TrendAnalysis(
-            min_points=2,  # Reduced minimum points
-            min_slope=0.00001,  # Reduced minimum slope
-            min_strength=0.2,  # Reduced strength requirement
-            angle_threshold=90  # Increased angle threshold
-        )
+        self.swing_detector = SwingPointDetector()
         
         # Initialize highest timeframe as None - will be determined dynamically
         self.highest_timeframe = None
@@ -430,8 +425,7 @@ class RiskMetrics(IStrategy):
             mc_iterations=self.MC_ITERATIONS,
             min_lookback_period=self.MIN_LOOKBACK_PERIOD,
             recalc_interval_minutes=self.mc_recalc_interval_minutes.value,
-            trendline_proximity_threshold=self.trendline_proximity_threshold.value,
-            trend_analyzer=self.trend_analyzer
+            trendline_proximity_threshold=self.trendline_proximity_threshold.value
         )
         
         print(f"RiskMetrics strategy initialized with Monte Carlo architecture:")
@@ -440,6 +434,7 @@ class RiskMetrics(IStrategy):
         print(f"  Signal generator: Initialized for modular signal generation")
         print(f"  Monte Carlo Manager: Initialized with {self.mc_recalc_interval_minutes.value}min recalc interval")
         print(f"  Rolling Monte Carlo optimization: {'ENABLED' if self.enable_rolling_mc_optimization.value else 'DISABLED'}")
+        print(f"  Swing Point Detector: Initialized for swing point detection")
         print(f"  Heartbeat tracking: Initialized at {self.strategy_start_time}")
         if self.enable_rolling_mc_optimization.value:
             print(f"    - Eliminates lookahead bias for realistic backtesting")
@@ -680,8 +675,8 @@ class RiskMetrics(IStrategy):
 
         # Mark high and low points for visualization
         try:
-            # Find and map swing points to both dataframes using TrendAnalysis method
-            self.trend_analyzer.find_and_map_swing_points(dataframe, dataframe)
+            # Find and map swing points to both dataframes using SwingPointDetector
+            self.swing_detector.find_and_map_swing_points(dataframe, dataframe)
             
         except Exception as e:
             print(f"Error finding swing points: {e}")
@@ -913,11 +908,11 @@ class RiskMetrics(IStrategy):
         current_dataframe_slice = dataframe.iloc[lookback_start:i].copy()
 
         # Find and map swing points for the current slice
-        high_swing_points = self.trend_analyzer._find_swing_points(
+        high_swing_points = self.swing_detector.find_swing_points(
             prices=dataframe['high'].values,
             price_type='high'
         )
-        low_swing_points = self.trend_analyzer._find_swing_points(
+        low_swing_points = self.swing_detector.find_swing_points(
             prices=dataframe['low'].values,
             price_type='low'
         )
@@ -943,8 +938,7 @@ class RiskMetrics(IStrategy):
             mc_iterations=self.MC_ITERATIONS,
             min_lookback_period=self.MIN_LOOKBACK_PERIOD,
             recalc_interval_minutes=0,  # Force recalc for temporary manager
-            trendline_proximity_threshold=self.trendline_proximity_threshold.value,
-            trend_analyzer=self.trend_analyzer
+            trendline_proximity_threshold=self.trendline_proximity_threshold.value
         )
         
         mc_results = temp_mc_manager.execute_monte_carlo_optimization(
@@ -1216,11 +1210,11 @@ class RiskMetrics(IStrategy):
         print("=== Using Original Monte Carlo Optimization (with potential lookahead bias) ===")
         
         # Find and map swing points
-        high_swing_points = self.trend_analyzer._find_swing_points(
+        high_swing_points = self.swing_detector.find_swing_points(
             prices=dataframe['high'].values,
             price_type='high'
         )
-        low_swing_points = self.trend_analyzer._find_swing_points(
+        low_swing_points = self.swing_detector.find_swing_points(
             prices=dataframe['low'].values,
             price_type='low'
         )

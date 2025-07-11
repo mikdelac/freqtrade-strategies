@@ -224,7 +224,7 @@ class TrendlineMonteCarloOptimizer:
     """
     
     def __init__(self, mc_iterations: int, min_lookback_period: int, 
-                 trendline_proximity_threshold: float, trend_analyzer):
+                 trendline_proximity_threshold: float):
         """
         Initialize the Monte Carlo optimizer.
         
@@ -232,12 +232,10 @@ class TrendlineMonteCarloOptimizer:
             mc_iterations: Number of Monte Carlo iterations to run
             min_lookback_period: Minimum lookback period to test
             trendline_proximity_threshold: Threshold for trendline proximity scoring
-            trend_analyzer: TrendAnalysis instance for swing point detection
         """
         self.mc_iterations = mc_iterations
         self.min_lookback_period = min_lookback_period
         self.trendline_proximity_threshold = trendline_proximity_threshold
-        self.trend_analyzer = trend_analyzer
     
     def _generate_trendlines_for_period(self, recent_data: pd.DataFrame, random_period: int, 
                                        mc_recalc_interval_minutes: int) -> Dict[str, Any]:
@@ -253,7 +251,7 @@ class TrendlineMonteCarloOptimizer:
             Dict containing trendlines and Trendline objects (without scores)
         """
         # Generate trends for this period
-        trends = gentrends(recent_data, field='close', window=1/3.0)
+        trends = gentrends(recent_data, field='close', window=1/3.0) # Changed from 1/3.0 to 1
         
         # Extract slope from the trends dataframe - gentrends now provides these columns
         resistance_slope = trends['Max Slope'].iloc[-1] if 'Max Slope' in trends.columns else 0.0
@@ -614,8 +612,7 @@ class MonteCarloManager:
     """
     
     def __init__(self, mc_iterations: int, min_lookback_period: int, 
-                 recalc_interval_minutes: int, trendline_proximity_threshold: float,
-                 trend_analyzer):
+                 recalc_interval_minutes: int, trendline_proximity_threshold: float):
         """
         Initialize the Monte Carlo manager.
         
@@ -624,11 +621,10 @@ class MonteCarloManager:
             min_lookback_period: Minimum lookback period
             recalc_interval_minutes: Monte Carlo recalculation interval in minutes
             trendline_proximity_threshold: Threshold for trendline proximity scoring
-            trend_analyzer: TrendAnalysis instance
         """
         self.optimizer = TrendlineMonteCarloOptimizer(
             mc_iterations, min_lookback_period, 
-            trendline_proximity_threshold, trend_analyzer
+            trendline_proximity_threshold
         )
     
     def execute_monte_carlo_optimization(self, dataframe: pd.DataFrame, pair: str,
