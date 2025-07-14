@@ -9,7 +9,7 @@ from pandas import DataFrame
 from typing import Dict, Optional, Union, Tuple, List
 from functools import reduce
 import random
-
+import talib.abstract as ta
 
 import sys
 import os
@@ -385,19 +385,7 @@ class RiskMetrics(IStrategy):
                 }
             }
         }
-        
-        # Dynamically add higher timeframe plots based on available timeframes
-        if hasattr(self, 'highest_timeframe') and self.highest_timeframe != self.timeframe:
-            suffix = f"_{self.highest_timeframe}"
-            
-            # Add higher timeframe price data to main plot with semi-transparent color
-            for field in ['open', 'high', 'low', 'close']:
-                field_name = f"{field}{suffix}"
-                plot_config["main_plot"][field_name] = {
-                    "color": "rgba(100, 100, 255, 0.3)",  # Semi-transparent blue
-                    "width": 1.0
-                }
-        
+                
         return plot_config
     
     def __init__(self, config: dict) -> None:
@@ -406,7 +394,6 @@ class RiskMetrics(IStrategy):
         self.swing_detector = SwingPointDetector()
         
         # Initialize highest timeframe as None - will be determined dynamically
-        self.highest_timeframe = None
         self.available_timeframes = []
         
         # Initialize signal generator
@@ -442,40 +429,6 @@ class RiskMetrics(IStrategy):
         else:
             print(f"    - Using original method (faster but with potential lookahead bias)")
 
-    def determine_highest_timeframe(self, dataframe: DataFrame) -> str:
-        """
-        Determine the highest possible timeframe based on available data length.
-        
-        Args:
-            dataframe: DataFrame with current timeframe's OHLCV data
-            
-        Returns:
-            str: The highest timeframe that can be used ('1M', '1w', '3d', '1d' or base timeframe)
-        """
-        data_length = len(dataframe)
-        returned_tf = []
-
-        # Log available data
-        print(f"Available data: {data_length} candles at {self.timeframe} timeframe")
-                
-        # Check each higher timeframe from highest to lowest
-        for tf in self.HIGHER_TIMEFRAMES:
-            threshold = self.TIMEFRAME_THRESHOLDS.get(tf, 0)
-            print(f"Threshold for {tf}: {threshold}")
-            if data_length >= threshold:
-                # Add to available timeframes
-                self.available_timeframes.append(tf)
-                
-                if returned_tf == []:
-                    # Return the highest timeframe (first one that matches)
-                    returned_tf = tf
-        
-        if returned_tf == []:
-            # If no higher timeframe has enough data, return the base timeframe
-            print(f"Not enough data for higher timeframes. Using base timeframe: {self.timeframe}")
-            return self.timeframe
-        else:
-            return returned_tf
 
     def resample_to_higher_timeframes(self, dataframe: DataFrame) -> Dict[str, DataFrame]:
         """
@@ -546,6 +499,15 @@ class RiskMetrics(IStrategy):
         'monthly': 12
     }
 
+    @informative('1d')
+    def populate_indicators_1d(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        print("Populating indicators 1d", dataframe)
+        
+        
+
+        return dataframe
+
+
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
         Adds several different TA indicators to the given DataFrame.
@@ -554,60 +516,27 @@ class RiskMetrics(IStrategy):
         1. Initial launch (backtest): Rolling Monte Carlo on all historical data
         2. Live trading (heartbeat): Non-rolling Monte Carlo only when recalc interval is reached
         """
+        print("Populating indicators", dataframe)
         if len(dataframe) == 0:
             return dataframe
-        
-        # Add date column if not present (required for trendline timestamps)
-        if 'date' not in dataframe.columns:
-            if hasattr(dataframe.index, 'to_pydatetime'):
-                dataframe['date'] = dataframe.index
-            else:
-                # Fallback: create date column based on row count (assuming 1min candles)
-                base_time = pd.Timestamp.now() - pd.Timedelta(minutes=len(dataframe))
-                dataframe['date'] = pd.date_range(start=base_time, periods=len(dataframe), freq='1min')
-        
-        # Determine if this is initial launch (backtest) or live trading (heartbeat)
-        current_time = pd.Timestamp.now()
-        latest_candle_time = dataframe['date'].iloc[-1]
-        
-        # Ensure both timestamps have consistent timezone handling
-        if latest_candle_time.tz is not None and current_time.tz is None:
-            # latest_candle_time is timezone-aware, current_time is naive
-            current_time = current_time.tz_localize('UTC')
-        elif latest_candle_time.tz is None and current_time.tz is not None:
-            # latest_candle_time is naive, current_time is timezone-aware
-            latest_candle_time = latest_candle_time.tz_localize('UTC')
-        elif latest_candle_time.tz is not None and current_time.tz is not None:
-            # Both are timezone-aware, ensure they're in the same timezone
-            if latest_candle_time.tz != current_time.tz:
-                latest_candle_time = latest_candle_time.tz_convert('UTC')
-                current_time = current_time.tz_convert('UTC')
-        
-        # Check if this is likely a backtest (historical data) or live trading (recent data)
-        time_diff_minutes = (current_time - latest_candle_time).total_seconds() / 60
-        
+                
+                        
         # Multiple criteria for backtest detection:
-        # 1. Data is more than 5 minutes old (historical data)
-        # 2. Large amount of data (typical backtest has lots of historical candles)
-        # 3. No stored trendlines yet (first run)
-        # 4. Monte Carlo has never been executed (safety check)
+        # 1. No stored trendlines yet (first run)
+        # 2. Monte Carlo has never been executed (safety check)
         is_backtest_mode = (
-            time_diff_minutes > 5 or  # Data is older than 5 minutes
-            len(dataframe) > 10000 or  # Large dataset typical of backtests
             len(self.stored_trendlines) == 0 or  # No trendlines stored yet (first run)
             not self.monte_carlo_executed  # Monte Carlo has never been executed
         )
         
+        latest_candle_time = dataframe['date'].iloc[-1]
+
         print(f"=== MODE DETECTION ===")
-        print(f"Current time: {current_time}")
         print(f"Latest candle: {latest_candle_time}")
-        print(f"Time difference: {time_diff_minutes:.1f} minutes")
         print(f"Dataframe length: {len(dataframe)} candles")
         print(f"Stored trendlines: {len(self.stored_trendlines)}")
         print(f"Monte Carlo executed: {self.monte_carlo_executed}")
         print(f"Backtest criteria:")
-        print(f"  - Data age > 5 min: {time_diff_minutes > 5}")
-        print(f"  - Large dataset (>10k): {len(dataframe) > 10000}")
         print(f"  - No stored trendlines: {len(self.stored_trendlines) == 0}")
         print(f"  - Monte Carlo never executed: {not self.monte_carlo_executed}")
         print(f"Mode: {'BACKTEST (Rolling Monte Carlo)' if is_backtest_mode else 'LIVE TRADING (Heartbeat-based)'}")
@@ -619,21 +548,14 @@ class RiskMetrics(IStrategy):
         else:
             print(f"Keeping existing trendlines for live trading of {metadata.get('pair', 'UNKNOWN')} ({len(self.stored_trendlines)} stored)")
             
-        # Determine the highest timeframe we can use based on available data
-        self.highest_timeframe = self.determine_highest_timeframe(dataframe)
-        
-        # Add an indicator showing which highest timeframe was selected
-        dataframe.loc[:, 'highest_timeframe_indicator'] = 1.0
-        dataframe.loc[:, 'highest_timeframe'] = self.highest_timeframe
-        print(f"Highest timeframe: {self.highest_timeframe}")
-        
+                
         # Resample to higher timeframes if possible
         resampled_dfs = self.resample_to_higher_timeframes(dataframe)
         print(f"Resampled dataframes: {resampled_dfs}")
 
         # Initialize all required dataframe columns
         self._initialize_dataframe_columns(dataframe)
-
+        
         if is_backtest_mode:
             # === BACKTEST MODE: Rolling Monte Carlo ===
             print("=== EXECUTING BACKTEST MODE ===")
@@ -823,26 +745,15 @@ class RiskMetrics(IStrategy):
         
         return trendlines_drawn
 
-    def _apply_trendline_to_dataframe(self, dataframe: DataFrame, trendline: Optional[Trendline], trendline_type: str) -> None:
+    def _apply_trendline_to_dataframe(self, dataframe: DataFrame, trendline: Trendline, trendline_type: str) -> None:
         """
         Apply a single trendline to the dataframe by calculating its price at each timestamp.
         
         Args:
             dataframe: DataFrame to populate
-            trendline: Trendline object to apply (can be None)
+            trendline: Trendline object to apply
             trendline_type: Either 'resistance' or 'support'
         """
-        if trendline is None:
-            # Set columns to NaN if no trendline available
-            if trendline_type == 'resistance':
-                dataframe.loc[:, 'MC_Optimal_Resistance'] = np.nan
-                dataframe.loc[:, 'MC_Resistance_Score'] = 0.0
-                dataframe.loc[:, 'MC_Optimal_Resistance_Period'] = 0.0
-            else:  # support
-                dataframe.loc[:, 'MC_Optimal_Support'] = np.nan
-                dataframe.loc[:, 'MC_Support_Score'] = 0.0
-                dataframe.loc[:, 'MC_Optimal_Support_Period'] = 0.0
-            return
         
         # Calculate trendline price at each dataframe timestamp
         trendline_prices = []
