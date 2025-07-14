@@ -739,7 +739,10 @@ class RiskMetrics(IStrategy):
             trendline: Trendline object to apply
             trendline_type: Either 'resistance' or 'support'
         """
-                    
+
+        # Create boolean mask for active timestamps (vectorized)
+        active_mask = dataframe['date'].apply(lambda ts: trendline.is_active_at_time(ts))
+
         # Calculate prices for all active timestamps at once (vectorized)
         active_timestamps = dataframe.loc[active_mask, 'date']
         prices = active_timestamps.apply(lambda ts: trendline.get_price_at_time(ts))
