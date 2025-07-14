@@ -718,32 +718,17 @@ class RiskMetrics(IStrategy):
         dataframe.loc[:, 'MC_Resistance_Score'] = 0.0
         dataframe.loc[:, 'MC_Support_Score'] = 0.0
         
-        trendlines_drawn = False
-        
-        # Draw each stored trendline during its exact time period
+        # Use vectorized operations instead of nested loops
         for trendline in self.stored_trendlines:
-            for j, timestamp in enumerate(dataframe['date']):
-                pandas_index = dataframe.index[j]
-                
-                # Only draw trendline if timestamp is within its exact active period
-                if trendline.is_active_at_time(timestamp):
-                    price = trendline.get_price_at_time(timestamp)
-                    
-                    if trendline.trendline_type == 'resistance':
-                        dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = price
-                        dataframe.loc[pandas_index, 'MC_Resistance_Score'] = float(trendline.bounce_count)
-                    elif trendline.trendline_type == 'support':
-                        dataframe.loc[pandas_index, 'MC_Optimal_Support'] = price
-                        dataframe.loc[pandas_index, 'MC_Support_Score'] = float(trendline.bounce_count)
-                    
-                    trendlines_drawn = True
-        
-        if trendlines_drawn:
-            print(f"Successfully drew stored trendlines for {pair}")
-        else:
-            print(f"No trendlines were active during dataframe period for {pair}")
-        
-        return trendlines_drawn
+            # Create boolean mask for active timestamps (vectorized)
+            active_mask = dataframe['date'].apply(lambda ts: trendline.is_active_at_time(ts))
+            
+            if not active_mask.any():
+                continue  # Skip if no active timestamps
+
+            self._apply_trendline_to_dataframe(dataframe, trendline, trendline.trendline_type)
+
+        return True
 
     def _apply_trendline_to_dataframe(self, dataframe: DataFrame, trendline: Trendline, trendline_type: str) -> None:
         """
@@ -754,35 +739,18 @@ class RiskMetrics(IStrategy):
             trendline: Trendline object to apply
             trendline_type: Either 'resistance' or 'support'
         """
+                    
+        # Calculate prices for all active timestamps at once (vectorized)
+        active_timestamps = dataframe.loc[active_mask, 'date']
+        prices = active_timestamps.apply(lambda ts: trendline.get_price_at_time(ts))
         
-        # Calculate trendline price at each dataframe timestamp
-        trendline_prices = []
-        for timestamp in dataframe['date']:
-            if trendline.is_active_at_time(timestamp):
-                price = trendline.get_price_at_time(timestamp)
-                trendline_prices.append(price)
-            else:
-                # Extend trendline beyond its original range using the slope
-                price = trendline.get_price_at_time(timestamp)
-                trendline_prices.append(price)
-        
-        # Apply to appropriate columns
-        if trendline_type == 'resistance':
-            dataframe.loc[:, 'MC_Optimal_Resistance'] = trendline_prices
-            dataframe.loc[:, 'MC_Resistance_Score'] = float(trendline.bounce_count)
-            # Calculate period from trendline duration (convert to number of candles)
-            duration_minutes = trendline.duration_hours * 60
-            timeframe_minutes = timeframe_to_minutes(self.timeframe)
-            estimated_period = int(duration_minutes / timeframe_minutes) if timeframe_minutes > 0 else 0
-            dataframe.loc[:, 'MC_Optimal_Resistance_Period'] = float(estimated_period)
-        else:  # support
-            dataframe.loc[:, 'MC_Optimal_Support'] = trendline_prices
-            dataframe.loc[:, 'MC_Support_Score'] = float(trendline.bounce_count)
-            # Calculate period from trendline duration (convert to number of candles)
-            duration_minutes = trendline.duration_hours * 60
-            timeframe_minutes = timeframe_to_minutes(self.timeframe)
-            estimated_period = int(duration_minutes / timeframe_minutes) if timeframe_minutes > 0 else 0
-            dataframe.loc[:, 'MC_Optimal_Support_Period'] = float(estimated_period)
+        # Apply to appropriate columns using vectorized assignment
+        if trendline.trendline_type == 'resistance':
+            dataframe.loc[active_mask, 'MC_Optimal_Resistance'] = prices
+            dataframe.loc[active_mask, 'MC_Resistance_Score'] = float(trendline.bounce_count)
+        elif trendline.trendline_type == 'support':
+            dataframe.loc[active_mask, 'MC_Optimal_Support'] = prices
+            dataframe.loc[active_mask, 'MC_Support_Score'] = float(trendline.bounce_count)
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
