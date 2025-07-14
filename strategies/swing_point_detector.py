@@ -21,27 +21,32 @@ class SwingPointDetector:
     configurable parameters for distance and prominence.
     """
     
-    def __init__(self, distance: int = 10, prominence: float = 0.12):
+    def __init__(self, distance: int = 10, prominence: float = 0.05, wlen: int = None, width: int = None):
         """
         Initialize SwingPointDetector with default parameters.
         
         Args:
             distance: Minimum horizontal distance between peaks
             prominence: Minimum prominence percentage for peaks
+            wlen: Minimum width of peaks
+            width: Minimum width of peaks
         """
         self.distance = distance
         self.prominence = prominence
-    
+        self.wlen = wlen
+        self.width = width
+
     def find_swing_points(self, 
                          prices: np.ndarray, 
                          price_type: str = 'high',
                          distance: int = None,
-                         prominence: float = None) -> List[Tuple[int, float]]:
+                         prominence: float = None,
+                         width: int = None,
+                         wlen: int = None) -> List[Tuple[int, float]]:
         """
-        Find swing high or low points based on price changes using scipy.signal.find_peaks.
+        Find swing high or low points based on prices using scipy.signal.find_peaks.
         
-        This method detects abrupt price movements by analyzing the differences between
-        consecutive prices rather than the raw price values.
+        This method detects local maxima and minima directly from the price values.
         
         Args:
             prices: Array of price values
@@ -55,38 +60,31 @@ class SwingPointDetector:
         # Use provided parameters or fall back to instance defaults
         distance = distance if distance is not None else self.distance
         prominence = prominence if prominence is not None else self.prominence
-        
-        # Calculate price changes (differences)
-        price_changes = np.diff(prices)
-        
+        width = width if width is not None else self.width
+        wlen = wlen if wlen is not None else self.wlen
+
         # Handle edge case where we have less than 2 prices
-        if len(price_changes) == 0:
+        if len(prices) < 2:
             return []
         
-        # Calculate prominence based on the range of price changes
-        change_range = np.max(price_changes) - np.min(price_changes)
-        prominence_value = change_range * prominence
+        # Calculate prominence based on the price range
+        price_range = np.max(prices) - np.min(prices)
+        prominence_value = price_range * prominence
         
         if price_type == 'high':
-            # Find peaks in positive price changes (abrupt upward movements)
-            peaks, _ = find_peaks(price_changes, distance=distance, prominence=prominence_value)
-            # Add 1 to peak indices because price_changes is one element shorter than prices
-            # The peak at index i in price_changes corresponds to the candle at index i+1 in prices
-            swing_points = [(int(idx + 1), float(prices[idx + 1])) for idx in peaks if idx + 1 < len(prices)]
+            # Find peaks in prices (local maxima)
+            peaks, _ = find_peaks(prices, distance=distance, prominence=prominence_value, width=width, wlen=wlen)
+            swing_points = [(int(idx), float(prices[idx])) for idx in peaks]
         else:  # For 'low' prices
-            # Find peaks in negative price changes (abrupt downward movements)
-            # Invert the price changes to find valleys as peaks
-            peaks, _ = find_peaks(-price_changes, distance=distance, prominence=prominence_value)
-            # Add 1 to peak indices because price_changes is one element shorter than prices
-            swing_points = [(int(idx + 1), float(prices[idx + 1])) for idx in peaks if idx + 1 < len(prices)]
+            # Find valleys in prices (local minima) by inverting the signal
+            peaks, _ = find_peaks(-prices, distance=distance, prominence=prominence_value, width=width, wlen=wlen)
+            swing_points = [(int(idx), float(prices[idx])) for idx in peaks]
                     
         # Sort points by time index
         return sorted(swing_points, key=lambda x: x[0])
     
     def find_and_map_swing_points(self, dataframe: pd.DataFrame, 
-                                 recent_data: pd.DataFrame = None,
-                                 distance: int = None,
-                                 prominence: float = None) -> Tuple[List, List]:
+                                 recent_data: pd.DataFrame = None) -> Tuple[List, List]:
         """
         Find swing points and map them to dataframe columns.
         
@@ -103,8 +101,8 @@ class SwingPointDetector:
         analysis_data = recent_data if recent_data is not None else dataframe
         
         # Find swing highs and lows
-        highs = self.find_swing_points(analysis_data['high'].values, 'high', distance, prominence)
-        lows = self.find_swing_points(analysis_data['low'].values, 'low', distance, prominence)
+        highs = self.find_swing_points(analysis_data['high'].values, 'high')
+        lows = self.find_swing_points(analysis_data['low'].values, 'low')
         
         # Initialize the swing point columns with NaN values
         dataframe.loc[:, 'all_highs'] = np.nan
