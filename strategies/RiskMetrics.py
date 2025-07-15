@@ -367,8 +367,6 @@ class RiskMetrics(IStrategy):
                 "Monte Carlo Optimization": {
                     "MC_Resistance_Score": {"color": "darkred", "type": "line", "width": 3.0},
                     "MC_Support_Score": {"color": "darkgreen", "type": "line", "width": 3.0},
-                    "MC_Optimal_Resistance_Period": {"color": "red", "type": "line", "width": 1.5},
-                    "MC_Optimal_Support_Period": {"color": "green", "type": "line", "width": 1.5}
                 },
                 "Bounce Analysis": {
                     "resistance_bounce_count": {"color": "darkred", "type": "line", "width": 2.0},
@@ -726,8 +724,6 @@ class RiskMetrics(IStrategy):
         # Apply scores to this specific row
         dataframe.loc[pandas_index, 'MC_Resistance_Score'] = resistance_trendline.bounce_count if resistance_trendline else 0.0
         dataframe.loc[pandas_index, 'MC_Support_Score'] = support_trendline.bounce_count if support_trendline else 0.0
-        dataframe.loc[pandas_index, 'MC_Optimal_Resistance_Period'] = resistance_trendline.r_squared if resistance_trendline else 0.0
-        dataframe.loc[pandas_index, 'MC_Optimal_Support_Period'] = support_trendline.r_squared if support_trendline else 0.0
         
         return last_resistance_value, last_support_value
 
@@ -745,8 +741,6 @@ class RiskMetrics(IStrategy):
             dataframe.loc[pandas_index, 'MC_Optimal_Support'] = np.nan
             dataframe.loc[pandas_index, 'MC_Resistance_Score'] = 0.0
             dataframe.loc[pandas_index, 'MC_Support_Score'] = 0.0
-            dataframe.loc[pandas_index, 'MC_Optimal_Resistance_Period'] = 0.0
-            dataframe.loc[pandas_index, 'MC_Optimal_Support_Period'] = 0.0
             dataframe.loc[pandas_index, 'score_convergence_ratio'] = 0.0
             dataframe.loc[pandas_index, 'convergence_multiplier'] = 1.0
             dataframe.loc[pandas_index, 'trading_mode_indicator'] = 0.0
@@ -934,11 +928,7 @@ class RiskMetrics(IStrategy):
         if optimization_results:
             resistance_trendline = optimization_results.get('best_resistance_trendline')
             support_trendline = optimization_results.get('best_support_trendline')
-            
-            print(f"  Resistance Score: {resistance_trendline.bounce_count if resistance_trendline else 0.0:.6f}")
-            print(f"  Support Score: {support_trendline.bounce_count if support_trendline else 0.0:.6f}")
-            print(f"  Optimal Periods: R={resistance_trendline.r_squared if resistance_trendline else 0:.4f}, S={support_trendline.r_squared if support_trendline else 0:.4f}")
-            
+                        
             # Store the best trendline objects returned by Monte Carlo optimization
             if resistance_trendline:
                 self.stored_trendlines.append(resistance_trendline)
