@@ -642,17 +642,9 @@ class RiskMetrics(IStrategy):
                 current_dataframe_slice.iloc[slice_idx, current_dataframe_slice.columns.get_loc('all_lows')] = price
 
         print(f"  Using data slice: {lookback_start} to {i} ({len(current_dataframe_slice)} candles)")
-
-        # Execute MC optimization on the slice of data available at this point in time
-        # Create a temporary optimizer to ensure no state from future data is used
-        temp_optimizer = TrendlineMonteCarloOptimizer(
-            mc_iterations=self.MC_ITERATIONS,
-            min_lookback_period=self.MIN_LOOKBACK_PERIOD,
-            trendline_proximity_threshold=self.trendline_proximity_threshold.value
-        )
         
         # Execute Monte Carlo optimization directly
-        optimization_results = temp_optimizer.monte_carlo_period_optimization(
+        optimization_results = self.monte_carlo_optimizer.monte_carlo_period_optimization(
             current_dataframe_slice, metadata['pair'], self.mc_recalc_interval_minutes.value
         )
         
