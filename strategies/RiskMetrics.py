@@ -392,10 +392,7 @@ class RiskMetrics(IStrategy):
         super().__init__(config)
         
         self.swing_detector = SwingPointDetector()
-        
-        # Initialize highest timeframe as None - will be determined dynamically
-        self.available_timeframes = []
-        
+                
         # Initialize signal generator
         self.signal_generator = SignalGenerator(self)
         
@@ -404,7 +401,6 @@ class RiskMetrics(IStrategy):
         
         # Initialize heartbeat tracking for live trading mode
         self.last_recalculation_time = None  # Track when we last recalculated
-        self.strategy_start_time = pd.Timestamp.now()  # Track when strategy started
         self.monte_carlo_executed = False  # Track if Monte Carlo has been executed at least once
         
         # Initialize Monte Carlo Optimizer with required parameters
@@ -421,7 +417,6 @@ class RiskMetrics(IStrategy):
         print(f"  Monte Carlo Optimizer: Initialized with {self.mc_recalc_interval_minutes.value}min recalc interval")
         print(f"  Rolling Monte Carlo optimization: {'ENABLED' if self.enable_rolling_mc_optimization.value else 'DISABLED'}")
         print(f"  Swing Point Detector: Initialized for swing point detection")
-        print(f"  Heartbeat tracking: Initialized at {self.strategy_start_time}")
         if self.enable_rolling_mc_optimization.value:
             print(f"    - Eliminates lookahead bias for realistic backtesting")
             print(f"    - Uses {self.mc_lookback_window_candles.value} candle lookback window")
@@ -430,74 +425,6 @@ class RiskMetrics(IStrategy):
             print(f"    - Using original method (faster but with potential lookahead bias)")
 
 
-    def resample_to_higher_timeframes(self, dataframe: DataFrame) -> Dict[str, DataFrame]:
-        """
-        Resample the dataframe to all available higher timeframes.
-        
-        Args:
-            dataframe: DataFrame with current timeframe's OHLCV data
-            
-        Returns:
-            Dict[str, DataFrame]: Dictionary of resampled dataframes keyed by timeframe
-        """
-        resampled_dfs = {}
-        
-        # Skip if no data
-        if len(dataframe) == 0:
-            return resampled_dfs
-        
-        print(f"Available timeframes: {self.available_timeframes}")
-        # For each available higher timeframe, resample the data
-        for tf in self.available_timeframes:
-            if tf == self.timeframe:
-                continue  # Skip the base timeframe
-                
-            try:
-                # Use resample_to_interval to convert to higher timeframe
-                resampled = resample_to_interval(dataframe, self.TIMEFRAME_THRESHOLDS[tf])
-                
-                # Add to our dictionary
-                resampled_dfs[tf] = resampled
-                
-                print(f"Successfully resampled to {tf} timeframe: {len(resampled)} candles")
-            except Exception as e:
-                print(f"Error resampling to {tf}: {e}")
-        
-        return resampled_dfs
-
-    def informative_pairs(self):
-        """
-        Define additional, informative pair/interval combinations to be cached from the exchange.
-        These pair/interval combinations are non-tradeable, unless they are part
-        of the whitelist as well.
-        For more information, please consult the documentation
-        :return: List of tuples in the format (pair, interval)
-            Sample: return [("ETH/USDT", "5m"),
-                            ("BTC/USDT", "15m"),
-                            ]
-        """
-        # We'll dynamically determine the informative pairs based on the highest timeframe
-        # This is done at runtime in populate_indicators
-        return []
-
-    def _group_by_day(self, timestamps: pd.Series) -> pd.Series:
-        """
-        Group timestamps by trading day
-        
-        Args:
-            timestamps: Series of timestamps
-            
-        Returns:
-            Series with day grouping
-        """
-        return pd.to_datetime(timestamps).dt.date
-
-    # Define scaling factors for different frequencies
-    SCALING_FACTORS = {
-        'daily': 252,
-        'weekly': 52,
-        'monthly': 12
-    }
 
     @informative('1d')
     def populate_indicators_1d(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
@@ -549,9 +476,6 @@ class RiskMetrics(IStrategy):
             print(f"Keeping existing trendlines for live trading of {metadata.get('pair', 'UNKNOWN')} ({len(self.stored_trendlines)} stored)")
             
                 
-        # Resample to higher timeframes if possible
-        resampled_dfs = self.resample_to_higher_timeframes(dataframe)
-        print(f"Resampled dataframes: {resampled_dfs}")
 
         # Initialize all required dataframe columns
         self._initialize_dataframe_columns(dataframe)
