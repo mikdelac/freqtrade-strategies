@@ -662,62 +662,39 @@ class RiskMetrics(IStrategy):
         
         return (best_resistance_trendline, best_support_trendline) if (best_resistance_trendline or best_support_trendline) else None
 
-    def _update_slopes_and_values_from_trendlines(self, resistance_trendline: Optional[Trendline], 
-                                                 support_trendline: Optional[Trendline]) -> Tuple[float, float, float, float]:
-        """
-        Update resistance and support slopes and values from Trendline objects.
-        
-        Args:
-            resistance_trendline: Best resistance trendline object
-            support_trendline: Best support trendline object
-            
-        Returns:
-            Tuple of (current_resistance_slope, current_support_slope, last_resistance_value, last_support_value)
-        """
-        # Extract slopes from trendline objects
-        current_resistance_slope = resistance_trendline.slope if resistance_trendline else 0.0
-        current_support_slope = support_trendline.slope if support_trendline else 0.0
-        
-        # Get the last valid values from trendline objects
-        last_resistance_value = resistance_trendline.start_price if resistance_trendline else np.nan
-        last_support_value = support_trendline.start_price if support_trendline else np.nan
-        
-        return current_resistance_slope, current_support_slope, last_resistance_value, last_support_value
-
-    def _project_trendlines_forward(self, dataframe: DataFrame, i: int, 
-                                   last_resistance_value: float, last_support_value: float,
+    def _project_trendlines_forward(self, dataframe: DataFrame, candle_index: int, 
+                                   latest_resistance_value: float, latest_support_value: float,
                                    current_resistance_slope: float, current_support_slope: float,
-                                   resistance_trendline: Optional[Trendline], 
-                                   support_trendline: Optional[Trendline]) -> Tuple[float, float]:
+                                   resistance_trendline: Optional[Trendline], support_trendline: Optional[Trendline]) -> Tuple[float, float]:
         """
         Project trendlines forward using slopes and apply results to dataframe.
         
         Args:
             dataframe: The dataframe to update
-            i: Current candle index
-            last_resistance_value: Current resistance value
-            last_support_value: Current support value
-            current_resistance_slope: Resistance slope
-            current_support_slope: Support slope
-            resistance_trendline: Best resistance trendline object
-            support_trendline: Best support trendline object
+            candle_index: Current candle index
+            latest_resistance_value: Last resistance value
+            latest_support_value: Last support value
+            current_resistance_slope: Current resistance slope
+            current_support_slope: Current support slope
+            resistance_trendline: Resistance trendline object
+            support_trendline: Support trendline object
             
         Returns:
-            Tuple of updated (last_resistance_value, last_support_value)
+            Tuple of (new_resistance_value, new_support_value)
         """
-        pandas_index = dataframe.index[i]
+        pandas_index = dataframe.index[candle_index]
         
         # Project resistance line forward
-        if not np.isnan(last_resistance_value):
-            last_resistance_value += current_resistance_slope
-            dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = last_resistance_value
+        if not np.isnan(latest_resistance_value):
+            latest_resistance_value += current_resistance_slope
+            dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = latest_resistance_value
         else:
             dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = np.nan
         
         # Project support line forward
-        if not np.isnan(last_support_value):
-            last_support_value += current_support_slope
-            dataframe.loc[pandas_index, 'MC_Optimal_Support'] = last_support_value
+        if not np.isnan(latest_support_value):
+            latest_support_value += current_support_slope
+            dataframe.loc[pandas_index, 'MC_Optimal_Support'] = latest_support_value
         else:
             dataframe.loc[pandas_index, 'MC_Optimal_Support'] = np.nan
         
@@ -725,26 +702,8 @@ class RiskMetrics(IStrategy):
         dataframe.loc[pandas_index, 'MC_Resistance_Score'] = resistance_trendline.bounce_count if resistance_trendline else 0.0
         dataframe.loc[pandas_index, 'MC_Support_Score'] = support_trendline.bounce_count if support_trendline else 0.0
         
-        return last_resistance_value, last_support_value
+        return latest_resistance_value, latest_support_value
 
-    def _initialize_early_candles(self, dataframe: DataFrame, min_required_candles: int) -> None:
-        """
-        Initialize the early candles that couldn't be processed with rolling optimization.
-        
-        Args:
-            dataframe: The dataframe to initialize
-            min_required_candles: Number of candles that need initialization
-        """
-        for i in range(0, min_required_candles):
-            pandas_index = dataframe.index[i]
-            dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = np.nan
-            dataframe.loc[pandas_index, 'MC_Optimal_Support'] = np.nan
-            dataframe.loc[pandas_index, 'MC_Resistance_Score'] = 0.0
-            dataframe.loc[pandas_index, 'MC_Support_Score'] = 0.0
-            dataframe.loc[pandas_index, 'score_convergence_ratio'] = 0.0
-            dataframe.loc[pandas_index, 'convergence_multiplier'] = 1.0
-            dataframe.loc[pandas_index, 'trading_mode_indicator'] = 0.0
-            dataframe.loc[pandas_index, 'trading_mode'] = "INSUFFICIENT_DATA"
 
     def _execute_rolling_monte_carlo_optimization(self, dataframe: DataFrame, metadata: dict) -> None:
         """
@@ -755,121 +714,27 @@ class RiskMetrics(IStrategy):
             dataframe: The dataframe to process
             metadata: Strategy metadata containing pair information
         """
-        # Calculate intervals and thresholds
+        # Initialize optimization parameters
         recalc_interval_candles = self.mc_recalc_interval_minutes.value // timeframe_to_minutes(self.timeframe)
         min_required_candles = max(self.MIN_LOOKBACK_PERIOD, 100)
         
-        print("=== Using Rolling Monte Carlo Optimization (eliminates lookahead bias) ===")
-        print(f"=== Starting Rolling Monte Carlo Analysis for {metadata['pair']} ===")
-        print(f"Recalc interval: {recalc_interval_candles} candles ({self.mc_recalc_interval_minutes.value} minutes)")
-        print(f"Lookback window: {self.mc_lookback_window_candles.value} candles")
-        print(f"Processing ALL {len(dataframe) - min_required_candles} candles starting from minimum required data ({min_required_candles})")
 
-        # State variables for projecting trendlines with slopes
-        last_resistance_value = np.nan
-        last_support_value = np.nan
+        # Initialize state variables for projecting trendlines with slopes
+        latest_resistance_value = np.nan
+        latest_support_value = np.nan
         current_resistance_slope = 0.0
         current_support_slope = 0.0
         last_resistance_trendline = None
         last_support_trendline = None
 
+
         # Main rolling optimization loop
         for i in range(min_required_candles, len(dataframe)):
-            current_time = dataframe['date'].iloc[i]  # Current timestamp being processed
-            
-            # Determine if it is time to recalculate
-            should_recalculate = (i == min_required_candles) or ((i - min_required_candles) % recalc_interval_candles == 0)
+            current_time = dataframe['date'].iloc[i]
+            should_recalculate = self._should_recalculate_at_candle(i, min_required_candles, recalc_interval_candles)
 
             if should_recalculate:
-                # Check if we already have valid trendlines for this time period
-                has_valid_resistance = False
-                has_valid_support = False
-                
-                for trendline in self.stored_trendlines:
-                    if trendline.is_active_at_time(current_time):
-                        if trendline.trendline_type == 'resistance':
-                            has_valid_resistance = True
-                        elif trendline.trendline_type == 'support':
-                            has_valid_support = True
-                        
-                        # If we have both types, we can skip this simulation
-                        if has_valid_resistance and has_valid_support:
-                            break
-                
-                # If we don't have active trendlines, look for the closest future trendlines
-                if not (has_valid_resistance and has_valid_support):
-                    print(f"Looking for closest future trendlines for time {current_time}")
-                    
-                    # Find closest future resistance trendline (end_time > current_time)
-                    closest_future_resistance = None
-                    min_resistance_time_diff = None
-                    
-                    # Find closest future support trendline (end_time > current_time)
-                    closest_future_support = None
-                    min_support_time_diff = None
-                    
-                    for trendline in self.stored_trendlines:
-                        # Only consider trendlines that end after current time
-                        if trendline.end_time > current_time:
-                            time_diff = (trendline.end_time - current_time).total_seconds()
-                            
-                            if trendline.trendline_type == 'resistance' and not has_valid_resistance:
-                                if min_resistance_time_diff is None or time_diff < min_resistance_time_diff:
-                                    closest_future_resistance = trendline
-                                    min_resistance_time_diff = time_diff
-                                    print(f"    Found future resistance candidate: end_time={trendline.end_time}, time_diff={time_diff/60:.1f}min")
-                            elif trendline.trendline_type == 'support' and not has_valid_support:
-                                if min_support_time_diff is None or time_diff < min_support_time_diff:
-                                    closest_future_support = trendline
-                                    min_support_time_diff = time_diff
-                                    print(f"    Found future support candidate: end_time={trendline.end_time}, time_diff={time_diff/60:.1f}min")
-                    
-                    # Assign closest future trendlines if found
-                    if closest_future_resistance and not has_valid_resistance:
-                        last_resistance_value = closest_future_resistance.get_price_at_time(current_time)
-                        current_resistance_slope = closest_future_resistance.slope
-                        has_valid_resistance = True
-                        print(f"  ✓ Assigned closest future resistance: end_time={closest_future_resistance.end_time}, price={last_resistance_value:.6f}, slope={current_resistance_slope:.6f}")
-                    
-                    if closest_future_support and not has_valid_support:
-                        last_support_value = closest_future_support.get_price_at_time(current_time)
-                        current_support_slope = closest_future_support.slope
-                        has_valid_support = True
-                        print(f"  ✓ Assigned closest future support: end_time={closest_future_support.end_time}, price={last_support_value:.6f}, slope={current_support_slope:.6f}")
-                    
-                    # Debug: Show what we found vs what we were looking for
-                    if not has_valid_resistance:
-                        print(f"  ✗ No future resistance found for time {current_time}")
-                    if not has_valid_support:
-                        print(f"  ✗ No future support found for time {current_time}")
-                
-                # Skip simulation if we now have both resistance and support trendlines
-                if has_valid_resistance and has_valid_support:
-                    print(f"Skipping MC simulation at candle {i}/{len(dataframe)} - using stored/assigned trendlines for time {current_time}")
-                    
-                    # Use existing trendlines to update state variables (only if not already set above)
-                    for trendline in self.stored_trendlines:
-                        if trendline.is_active_at_time(current_time):
-                            if trendline.trendline_type == 'resistance' and np.isnan(last_resistance_value):
-                                last_resistance_value = trendline.get_price_at_time(current_time)
-                                current_resistance_slope = trendline.slope
-                                print(f"  Using existing active resistance: price={last_resistance_value:.6f}, slope={current_resistance_slope:.6f}")
-                            elif trendline.trendline_type == 'support' and np.isnan(last_support_value):
-                                last_support_value = trendline.get_price_at_time(current_time)
-                                current_support_slope = trendline.slope
-                                print(f"  Using existing active support: price={last_support_value:.6f}, slope={current_support_slope:.6f}")
-                else:
-                    # Execute Monte Carlo recalculation only if we still don't have valid trendlines
-                    print(f"Recalculating MC results at candle {i}/{len(dataframe)} ({(i/len(dataframe)*100):.1f}%) - missing trendlines for time {current_time}")
-                    
-                    # Debug: List all stored trendlines before recalculation
-                    print(f"=== DEBUG: All Stored Trendlines at {current_time} ===")
-                    print(f"Total stored trendlines: {len(self.stored_trendlines)}")
-                    for idx, tl in enumerate(self.stored_trendlines, 1):
-                        is_active = tl.is_active_at_time(current_time)
-                        print(f"  {idx}. {tl.trendline_type.upper()} - Start: {tl.start_time}, End: {tl.end_time}, Active: {is_active}")
-                    print(f"=== END DEBUG ===")
-                    
+                                        
                     trendline_results = self._execute_rolling_monte_carlo_recalculation(dataframe, i, metadata)
                     
                     if trendline_results:
@@ -878,36 +743,39 @@ class RiskMetrics(IStrategy):
                         last_support_trendline = support_trendline
                         
                         # Store trendline objects from this iteration
-                        if resistance_trendline:
-                            self.stored_trendlines.append(resistance_trendline)
-                            print(f"  Stored resistance trendline: {resistance_trendline.trendline_type} at candle {i}")
+                        self._store_new_trendlines(resistance_trendline, support_trendline, i)
                         
-                        if support_trendline:
-                            self.stored_trendlines.append(support_trendline)
-                            print(f"  Stored support trendline: {support_trendline.trendline_type} at candle {i}")
+                        # Update slopes and values directly from trendline objects
+                        current_resistance_slope = resistance_trendline.slope if resistance_trendline else 0.0
+                        current_support_slope = support_trendline.slope if support_trendline else 0.0
+                        latest_resistance_value = resistance_trendline.start_price if resistance_trendline else np.nan
+                        latest_support_value = support_trendline.start_price if support_trendline else np.nan
                         
-                        # Update slopes and values
-                        (current_resistance_slope, current_support_slope, 
-                         last_resistance_value, last_support_value) = self._update_slopes_and_values_from_trendlines(resistance_trendline, support_trendline)
-                        
-                        print(f"  New MC results: R_score={resistance_trendline.bounce_count if resistance_trendline else 0:.4f}, S_score={support_trendline.bounce_count if support_trendline else 0:.4f}")
-                        print(f"  Slopes: R_slope={current_resistance_slope:.6f}, S_slope={current_support_slope:.6f}")
 
             # Project trendlines forward using slopes
-            last_resistance_value, last_support_value = self._project_trendlines_forward(
-                dataframe, i, last_resistance_value, last_support_value,
+            latest_resistance_value, latest_support_value = self._project_trendlines_forward(
+                dataframe, i, latest_resistance_value, latest_support_value,
                 current_resistance_slope, current_support_slope,
                 last_resistance_trendline, last_support_trendline
             )
-
-        # Final processing
-        print(f"Rolling Monte Carlo optimization completed for {metadata['pair']}")
-        if last_resistance_trendline or last_support_trendline:
-            print(f"Final results: R_score={last_resistance_trendline.bounce_count if last_resistance_trendline else 0:.4f}, S_score={last_support_trendline.bounce_count if last_support_trendline else 0:.4f}")
-            print(f"Final slopes: R_slope={current_resistance_slope:.6f}, S_slope={current_support_slope:.6f}")
             
-        # Initialize early candles
-        self._initialize_early_candles(dataframe, min_required_candles)
+
+    def _should_recalculate_at_candle(self, candle_index: int, min_required_candles: int, 
+                                    recalc_interval_candles: int) -> bool:
+        """Determine if Monte Carlo should be recalculated at the current candle."""
+        return (candle_index == min_required_candles) or ((candle_index - min_required_candles) % recalc_interval_candles == 0)        
+
+
+    def _store_new_trendlines(self, resistance_trendline: Optional[Trendline], 
+                             support_trendline: Optional[Trendline], candle_index: int) -> None:
+        """Store new trendline objects from Monte Carlo iteration."""
+        if resistance_trendline:
+            self.stored_trendlines.append(resistance_trendline)
+            print(f"  Stored resistance trendline: {resistance_trendline.trendline_type} at candle {candle_index}")
+        
+        if support_trendline:
+            self.stored_trendlines.append(support_trendline)
+            print(f"  Stored support trendline: {support_trendline.trendline_type} at candle {candle_index}")
 
     def _execute_non_rolling_monte_carlo_optimization(self, dataframe: DataFrame, metadata: dict) -> None:
         """
