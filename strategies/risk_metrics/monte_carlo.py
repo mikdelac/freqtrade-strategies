@@ -345,18 +345,31 @@ class TrendlineMonteCarloOptimizer:
                 recent_data = trendline_results['recent_data']
                 
                 # Generate bounce conditions and update Trendline objects with bounce counts
+                trendline_config = {
+                    'resistance': {
+                        'line_key': 'Max Line',
+                        'direction': 'short',
+                        'line_data': trends.get('Max Line', pd.Series())
+                    },
+                    'support': {
+                        'line_key': 'Min Line', 
+                        'direction': 'long',
+                        'line_data': trends.get('Min Line', pd.Series())
+                    }
+                }
+                
                 for trendline_obj in trendline_objects:
-                    if trendline_obj.trendline_type == 'resistance' and 'Max Line' in trends.columns:
-                        # Generate bounce conditions for resistance
+                    config = trendline_config.get(trendline_obj.trendline_type)
+                    if config and config['line_key'] in trends.columns:
                         try:
                             # Ensure indices match by reindexing the trendline data
-                            resistance_line = trends['Max Line'].copy()
-                            resistance_line.index = recent_data.index
+                            level_line = config['line_data'].copy()
+                            level_line.index = recent_data.index
                             
                             bounce_conditions = generate_bounce_conditions(
                                 close_data=recent_data['close'],
-                                level_data=resistance_line,
-                                direction='short',
+                                level_data=level_line,
+                                direction=config['direction'],
                                 tolerance=self.trendline_proximity_threshold,
                                 pivot_highs=recent_data['all_highs'],
                                 pivot_lows=recent_data['all_lows']
@@ -369,34 +382,7 @@ class TrendlineMonteCarloOptimizer:
                             trendline_obj.bounce_timestamps = recent_data.loc[bounce_indices, 'date'].tolist()
                             
                         except Exception as e:
-                            print(f"Error generating resistance bounce conditions: {e}")
-                            trendline_obj.bounce_count = 0
-                            trendline_obj.bounce_timestamps = []
-                    
-                    elif trendline_obj.trendline_type == 'support' and 'Min Line' in trends.columns:
-                        # Generate bounce conditions for support
-                        try:
-                            # Ensure indices match by reindexing the trendline data
-                            support_line = trends['Min Line'].copy()
-                            support_line.index = recent_data.index
-                            
-                            bounce_conditions = generate_bounce_conditions(
-                                close_data=recent_data['close'],
-                                level_data=support_line,
-                                direction='long',
-                                tolerance=self.trendline_proximity_threshold,
-                                pivot_highs=recent_data['all_highs'],
-                                pivot_lows=recent_data['all_lows']
-                            )
-                            # Store bounce count in the Trendline object
-                            trendline_obj.bounce_count = bounce_conditions.sum()
-                            
-                            # Capture bounce timestamps
-                            bounce_indices = bounce_conditions[bounce_conditions].index
-                            trendline_obj.bounce_timestamps = recent_data.loc[bounce_indices, 'date'].tolist()
-                            
-                        except Exception as e:
-                            print(f"Error generating support bounce conditions: {e}")
+                            print(f"Error generating {trendline_obj.trendline_type} bounce conditions: {e}")
                             trendline_obj.bounce_count = 0
                             trendline_obj.bounce_timestamps = []
                 

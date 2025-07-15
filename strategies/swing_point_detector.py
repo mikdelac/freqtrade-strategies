@@ -83,33 +83,31 @@ class SwingPointDetector:
         # Sort points by time index
         return sorted(swing_points, key=lambda x: x[0])
     
-    def find_and_map_swing_points(self, dataframe: pd.DataFrame, 
-                                 recent_data: pd.DataFrame = None) -> Tuple[List, List]:
+    def find_and_map_swing_points(self, dataframe: pd.DataFrame) -> Tuple[List, List]:
         """
         Find swing points and map them to dataframe columns.
         
         Args:
             dataframe: Full dataframe to store swing points in
-            recent_data: Recent data to analyze (if None, uses full dataframe)
             distance: Minimum horizontal distance between peaks (overrides default)
             prominence: Minimum prominence percentage for peaks (overrides default)
             
         Returns:
             Tuple[List, List]: (mapped_highs, mapped_lows) for the full dataframe
         """
-        # Use recent_data if provided, otherwise use full dataframe
-        analysis_data = recent_data if recent_data is not None else dataframe
         
         # Find swing highs and lows
-        highs = self.find_swing_points(analysis_data['high'].values, 'high')
-        lows = self.find_swing_points(analysis_data['low'].values, 'low')
-        
+        highs = self.find_swing_points(dataframe['high'].values, 'high')
+        lows = self.find_swing_points(dataframe['low'].values, 'low')
+                
         # Initialize the swing point columns with NaN values
         dataframe.loc[:, 'all_highs'] = np.nan
         dataframe.loc[:, 'all_lows'] = np.nan
         
         # Calculate the offset to map analysis_data indices to dataframe indices
-        offset = len(dataframe) - len(analysis_data)
+        offset = 0
+
+        analysis_data = dataframe
         
         # Map swing highs
         for idx, price in highs:

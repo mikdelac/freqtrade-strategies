@@ -7,7 +7,7 @@ https://github.com/dysonance/Trendy
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Optional, Union, Tuple, Dict, Any
+from typing import Optional, Union, Tuple, Dict, Any, List
 from scipy import stats
 
 
@@ -687,3 +687,55 @@ def calculate_r_squared(price_series: Union[pd.Series, np.ndarray],
     except Exception as e:
         return 0.0
 
+def output_trendlines_info(trendline_objects: List[Trendline]) -> None:
+    """
+    Output information about trendlines to the console.
+    
+    Args:
+        trendline_objects: List of Trendline objects
+    """
+    try:
+        print("\n=== STORED TRENDLINES SUMMARY ===")
+        
+        # Count trendlines from stored_trendlines list
+        total_trendlines = len(trendline_objects)
+        resistance_trendlines = sum(1 for tl in trendline_objects if tl.trendline_type == 'resistance')
+        support_trendlines = sum(1 for tl in trendline_objects if tl.trendline_type == 'support')
+                
+        # Display trendline count summary
+        print(f"\n--- TRENDLINE COUNT SUMMARY ---")
+        print(f"  Total Saved Trendlines: {total_trendlines}")
+        print(f"  Resistance Trendlines: {resistance_trendlines}")
+        print(f"  Support Trendlines: {support_trendlines}")
+        
+        # Display all stored trendlines
+        if total_trendlines > 0:
+            print(f"\n--- ALL STORED TRENDLINES ---")
+            for i, trendline in enumerate(trendline_objects, 1):
+                print(f"  {i}. {trendline.trendline_type.upper()} TRENDLINE")
+                print(f"     Start Time: {trendline.start_time}")
+                print(f"     End Time: {trendline.end_time}")
+                print(f"     Duration: {trendline.duration_hours:.2f} hours")
+                print(f"     Age: {trendline.age_hours:.2f} hours")
+                print(f"     Slope: {trendline.slope:.8f}")
+                print(f"     R-squared: {trendline.r_squared:.4f}")
+                print(f"     Start Price: {trendline.start_price:.6f}")
+                print(f"     Bounce Count: {trendline.bounce_count}")
+                
+                # Display bounce timestamps if available
+                if hasattr(trendline, 'bounce_timestamps') and trendline.bounce_timestamps:
+                    print(f"     Bounce Timestamps ({len(trendline.bounce_timestamps)}):")
+                    for j, timestamp in enumerate(trendline.bounce_timestamps, 1):
+                        print(f"       {j}. {timestamp}")
+                else:
+                    print(f"     Bounce Timestamps: None")
+                
+                print("")
+        else:
+            print(f"  No trendlines stored during this execution")
+        
+        
+        print(f"=== END TRENDLINES SUMMARY ===\n")
+        
+    except Exception as e:
+        print(f"Error outputting stored trendlines: {e}")
