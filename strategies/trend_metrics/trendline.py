@@ -600,52 +600,6 @@ def generate_trendlines_for_period(recent_data: pd.DataFrame, random_period: int
     }
 
 
-def apply_monte_carlo_results(dataframe: pd.DataFrame, mc_results: Dict[str, Any]) -> None:
-    """
-    Apply Monte Carlo results to the dataframe.
-    
-    Args:
-        dataframe: DataFrame to apply results to
-        mc_results: Monte Carlo optimization results
-    """
-    if not mc_results:
-        return
-    
-    # Apply the optimal lines to the dataframe using proper pandas assignment
-    # Handle potential length mismatches when new candles appear
-    if 'resistance_line' in mc_results:
-        resistance_line = mc_results['resistance_line']
-        if len(resistance_line) != len(dataframe):
-            # Handle length mismatch - resize the array to match current dataframe length
-            if len(resistance_line) < len(dataframe):
-                # Dataframe grew (new candles added) - extend the array with NaN values
-                extended_line = np.full(len(dataframe), np.nan)
-                extended_line[:len(resistance_line)] = resistance_line
-                resistance_line = extended_line
-            else:
-                # Dataframe shrunk (unlikely but handle it) - truncate the array
-                resistance_line = resistance_line[:len(dataframe)]
-        dataframe.loc[:, 'MC_Optimal_Resistance'] = resistance_line
-        
-    if 'support_line' in mc_results:
-        support_line = mc_results['support_line']
-        if len(support_line) != len(dataframe):
-            # Handle length mismatch - resize the array to match current dataframe length
-            if len(support_line) < len(dataframe):
-                # Dataframe grew (new candles added) - extend the array with NaN values
-                extended_line = np.full(len(dataframe), np.nan)
-                extended_line[:len(support_line)] = support_line
-                support_line = extended_line
-            else:
-                # Dataframe shrunk (unlikely but handle it) - truncate the array
-                support_line = support_line[:len(dataframe)]
-        dataframe.loc[:, 'MC_Optimal_Support'] = support_line
-    
-    # Apply scores using proper pandas assignment
-    dataframe.loc[:, 'MC_Resistance_Score'] = mc_results.get('resistance_score', 0.0)
-    dataframe.loc[:, 'MC_Support_Score'] = mc_results.get('support_score', 0.0)
-    dataframe.loc[:, 'MC_Optimal_Period'] = mc_results.get('optimal_resistance_period', 0.0)
-
 def calculate_r_squared(price_series: Union[pd.Series, np.ndarray], 
                        trendline_series: Union[pd.Series, np.ndarray]) -> float:
     """

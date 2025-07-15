@@ -604,7 +604,7 @@ class RiskMetrics(IStrategy):
         return self.signal_generator.generate_exit_signals(dataframe)
 
 
-    def _execute_rolling_monte_carlo_recalculation(self, dataframe: DataFrame, i: int, metadata: dict) -> Optional[Dict]:
+    def _execute_rolling_monte_carlo_recalculation(self, dataframe: DataFrame, i: int, metadata: dict) -> Optional[Tuple[Trendline, Trendline]]:
         """
         Execute Monte Carlo recalculation for a specific candle index.
         
@@ -614,7 +614,7 @@ class RiskMetrics(IStrategy):
             metadata: Strategy metadata
             
         Returns:
-            Dictionary containing Monte Carlo results or None if failed
+            Tuple of (best_resistance_trendline, best_support_trendline) or None if failed
         """
         # Define the lookback window for the current candle (point-in-time data only)
         lookback_start = max(0, i - self.mc_lookback_window_candles.value)
@@ -654,41 +654,43 @@ class RiskMetrics(IStrategy):
         )
         
         # Execute Monte Carlo optimization directly
-        mc_results = temp_optimizer.monte_carlo_period_optimization(
+        optimization_results = temp_optimizer.monte_carlo_period_optimization(
             current_dataframe_slice, metadata['pair'], self.mc_recalc_interval_minutes.value
         )
         
-        return mc_results
+        # Extract trendline objects directly
+        best_resistance_trendline = optimization_results.get('best_resistance_trendline')
+        best_support_trendline = optimization_results.get('best_support_trendline')
+        
+        return (best_resistance_trendline, best_support_trendline) if (best_resistance_trendline or best_support_trendline) else None
 
-    def _update_slopes_and_values_from_mc_results(self, mc_results: Dict) -> Tuple[float, float, float, float]:
+    def _update_slopes_and_values_from_trendlines(self, resistance_trendline: Optional[Trendline], 
+                                                 support_trendline: Optional[Trendline]) -> Tuple[float, float, float, float]:
         """
-        Update resistance and support slopes and values from Monte Carlo results.
+        Update resistance and support slopes and values from Trendline objects.
         
         Args:
-            mc_results: Dictionary containing Monte Carlo optimization results
+            resistance_trendline: Best resistance trendline object
+            support_trendline: Best support trendline object
             
         Returns:
             Tuple of (current_resistance_slope, current_support_slope, last_resistance_value, last_support_value)
         """
-        # Update slopes from the new MC results
-        current_resistance_slope = mc_results.get('best_resistance_slope', 0.0)
-        current_support_slope = mc_results.get('best_support_slope', 0.0)
+        # Extract slopes from trendline objects
+        current_resistance_slope = resistance_trendline.slope if resistance_trendline else 0.0
+        current_support_slope = support_trendline.slope if support_trendline else 0.0
         
-        # Get the last valid value from the calculated lines as the starting point
-        res_line = mc_results.get('resistance_line', np.array([]))
-        valid_res = res_line[~np.isnan(res_line)]
-        last_resistance_value = valid_res[-1] if len(valid_res) > 0 else np.nan
-
-        sup_line = mc_results.get('support_line', np.array([]))
-        valid_sup = sup_line[~np.isnan(sup_line)]
-        last_support_value = valid_sup[-1] if len(valid_sup) > 0 else np.nan
+        # Get the last valid values from trendline objects
+        last_resistance_value = resistance_trendline.start_price if resistance_trendline else np.nan
+        last_support_value = support_trendline.start_price if support_trendline else np.nan
         
         return current_resistance_slope, current_support_slope, last_resistance_value, last_support_value
 
     def _project_trendlines_forward(self, dataframe: DataFrame, i: int, 
                                    last_resistance_value: float, last_support_value: float,
                                    current_resistance_slope: float, current_support_slope: float,
-                                   last_mc_results: Optional[Dict]) -> Tuple[float, float]:
+                                   resistance_trendline: Optional[Trendline], 
+                                   support_trendline: Optional[Trendline]) -> Tuple[float, float]:
         """
         Project trendlines forward using slopes and apply results to dataframe.
         
@@ -699,7 +701,8 @@ class RiskMetrics(IStrategy):
             last_support_value: Current support value
             current_resistance_slope: Resistance slope
             current_support_slope: Support slope
-            last_mc_results: Latest Monte Carlo results
+            resistance_trendline: Best resistance trendline object
+            support_trendline: Best support trendline object
             
         Returns:
             Tuple of updated (last_resistance_value, last_support_value)
@@ -721,10 +724,10 @@ class RiskMetrics(IStrategy):
             dataframe.loc[pandas_index, 'MC_Optimal_Support'] = np.nan
         
         # Apply scores to this specific row
-        dataframe.loc[pandas_index, 'MC_Resistance_Score'] = last_mc_results.get('resistance_score', 0.0) if last_mc_results else 0.0
-        dataframe.loc[pandas_index, 'MC_Support_Score'] = last_mc_results.get('support_score', 0.0) if last_mc_results else 0.0
-        dataframe.loc[pandas_index, 'MC_Optimal_Resistance_Period'] = last_mc_results.get('optimal_resistance_period', 0.0) if last_mc_results else 0.0
-        dataframe.loc[pandas_index, 'MC_Optimal_Support_Period'] = last_mc_results.get('optimal_support_period', 0.0) if last_mc_results else 0.0
+        dataframe.loc[pandas_index, 'MC_Resistance_Score'] = resistance_trendline.bounce_count if resistance_trendline else 0.0
+        dataframe.loc[pandas_index, 'MC_Support_Score'] = support_trendline.bounce_count if support_trendline else 0.0
+        dataframe.loc[pandas_index, 'MC_Optimal_Resistance_Period'] = resistance_trendline.r_squared if resistance_trendline else 0.0
+        dataframe.loc[pandas_index, 'MC_Optimal_Support_Period'] = support_trendline.r_squared if support_trendline else 0.0
         
         return last_resistance_value, last_support_value
 
@@ -773,7 +776,8 @@ class RiskMetrics(IStrategy):
         last_support_value = np.nan
         current_resistance_slope = 0.0
         current_support_slope = 0.0
-        last_mc_results = None
+        last_resistance_trendline = None
+        last_support_trendline = None
 
         # Main rolling optimization loop
         for i in range(min_required_candles, len(dataframe)):
@@ -872,15 +876,14 @@ class RiskMetrics(IStrategy):
                         print(f"  {idx}. {tl.trendline_type.upper()} - Start: {tl.start_time}, End: {tl.end_time}, Active: {is_active}")
                     print(f"=== END DEBUG ===")
                     
-                    mc_results = self._execute_rolling_monte_carlo_recalculation(dataframe, i, metadata)
+                    trendline_results = self._execute_rolling_monte_carlo_recalculation(dataframe, i, metadata)
                     
-                    if mc_results:
-                        last_mc_results = mc_results
+                    if trendline_results:
+                        resistance_trendline, support_trendline = trendline_results
+                        last_resistance_trendline = resistance_trendline
+                        last_support_trendline = support_trendline
                         
                         # Store trendline objects from this iteration
-                        resistance_trendline = mc_results.get('best_resistance_trendline')
-                        support_trendline = mc_results.get('best_support_trendline')
-                        
                         if resistance_trendline:
                             self.stored_trendlines.append(resistance_trendline)
                             print(f"  Stored resistance trendline: {resistance_trendline.trendline_type} at candle {i}")
@@ -891,21 +894,22 @@ class RiskMetrics(IStrategy):
                         
                         # Update slopes and values
                         (current_resistance_slope, current_support_slope, 
-                         last_resistance_value, last_support_value) = self._update_slopes_and_values_from_mc_results(mc_results)
+                         last_resistance_value, last_support_value) = self._update_slopes_and_values_from_trendlines(resistance_trendline, support_trendline)
                         
-                        print(f"  New MC results: R_score={mc_results.get('resistance_score', 0):.4f}, S_score={mc_results.get('support_score', 0):.4f}")
+                        print(f"  New MC results: R_score={resistance_trendline.bounce_count if resistance_trendline else 0:.4f}, S_score={support_trendline.bounce_count if support_trendline else 0:.4f}")
                         print(f"  Slopes: R_slope={current_resistance_slope:.6f}, S_slope={current_support_slope:.6f}")
 
             # Project trendlines forward using slopes
             last_resistance_value, last_support_value = self._project_trendlines_forward(
                 dataframe, i, last_resistance_value, last_support_value,
-                current_resistance_slope, current_support_slope, last_mc_results
+                current_resistance_slope, current_support_slope,
+                last_resistance_trendline, last_support_trendline
             )
 
         # Final processing
         print(f"Rolling Monte Carlo optimization completed for {metadata['pair']}")
-        if last_mc_results:
-            print(f"Final results: R_score={last_mc_results.get('resistance_score', 0):.4f}, S_score={last_mc_results.get('support_score', 0):.4f}")
+        if last_resistance_trendline or last_support_trendline:
+            print(f"Final results: R_score={last_resistance_trendline.bounce_count if last_resistance_trendline else 0:.4f}, S_score={last_support_trendline.bounce_count if last_support_trendline else 0:.4f}")
             print(f"Final slopes: R_slope={current_resistance_slope:.6f}, S_slope={current_support_slope:.6f}")
             
         # Initialize early candles
@@ -922,22 +926,20 @@ class RiskMetrics(IStrategy):
         print("=== Using Original Monte Carlo Optimization (with potential lookahead bias) ===")
 
         # Execute Monte Carlo optimization directly using the optimizer
-        mc_results = self.monte_carlo_optimizer.monte_carlo_period_optimization(
+        optimization_results = self.monte_carlo_optimizer.monte_carlo_period_optimization(
             dataframe, metadata['pair'], self.mc_recalc_interval_minutes.value
         )
         
-        # Apply the results to the dataframe
-        # Assuming apply_monte_carlo_results is a method of MonteCarloManager or similar
-        # For now, we'll just print the results and store the trendlines
-        if mc_results:
-            print(f"  Resistance Score: {mc_results.get('resistance_score', 0.0):.6f}")
-            print(f"  Support Score: {mc_results.get('support_score', 0.0):.6f}")
-            print(f"  Optimal Periods: R={mc_results.get('optimal_resistance_period', 0)}, S={mc_results.get('optimal_support_period', 0)}")
+        # Extract trendline objects directly from results
+        if optimization_results:
+            resistance_trendline = optimization_results.get('best_resistance_trendline')
+            support_trendline = optimization_results.get('best_support_trendline')
+            
+            print(f"  Resistance Score: {resistance_trendline.bounce_count if resistance_trendline else 0.0:.6f}")
+            print(f"  Support Score: {support_trendline.bounce_count if support_trendline else 0.0:.6f}")
+            print(f"  Optimal Periods: R={resistance_trendline.r_squared if resistance_trendline else 0:.4f}, S={support_trendline.r_squared if support_trendline else 0:.4f}")
             
             # Store the best trendline objects returned by Monte Carlo optimization
-            resistance_trendline = mc_results.get('best_resistance_trendline')
-            support_trendline = mc_results.get('best_support_trendline')
-            
             if resistance_trendline:
                 self.stored_trendlines.append(resistance_trendline)
             
