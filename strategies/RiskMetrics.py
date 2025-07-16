@@ -39,9 +39,13 @@ from freqtrade.strategy import (
 
 # --------------------------------
 # Add your lib to import here
-from risk_metrics.monte_carlo import MonteCarloSimulator, TrendlineMonteCarloOptimizer
+from risk_metrics.monte_carlo import MonteCarloSimulator
 from swing_point_detector import SwingPointDetector
-from trend_metrics.trendline import gentrends, segtrends, rank_trendlines, generate_bounce_conditions, Trendline, output_trendlines_info
+from trend_metrics.trendline import (
+    gentrends, segtrends, rank_trendlines, generate_bounce_conditions, 
+    Trendline, output_trendlines_info, monte_carlo_period_optimization,
+    evaluate_lookback_period_for_trendlines, generate_lookback_periods
+)
 from technical.util import resample_to_interval, resampled_merge
 
 class SignalGenerator:
@@ -401,18 +405,11 @@ class RiskMetrics(IStrategy):
         self.last_recalculation_time = None  # Track when we last recalculated
         self.backtest_executed = False  # Track if Monte Carlo has been executed at least once
         
-        # Initialize Monte Carlo Optimizer with required parameters
-        self.monte_carlo_optimizer = TrendlineMonteCarloOptimizer(
-            mc_iterations=self.MC_ITERATIONS,
-            min_lookback_period=self.MIN_LOOKBACK_PERIOD,
-            trendline_proximity_threshold=self.trendline_proximity_threshold.value
-        )
-        
         print(f"RiskMetrics strategy initialized with Monte Carlo architecture:")
         print(f"  Lookback periods: Fixed periods for Monte Carlo optimization")
         print(f"  Monte Carlo iterations: {self.MC_ITERATIONS}")
         print(f"  Signal generator: Initialized for modular signal generation")
-        print(f"  Monte Carlo Optimizer: Initialized with {self.mc_recalc_interval_minutes.value}min recalc interval")
+        print(f"  Monte Carlo functions: Using standalone functions from trendline.py")
         print(f"  Rolling Monte Carlo optimization: {'ENABLED' if self.enable_rolling_mc_optimization.value else 'DISABLED'}")
         print(f"  Swing Point Detector: Initialized for swing point detection")
         if self.enable_rolling_mc_optimization.value:
@@ -644,8 +641,9 @@ class RiskMetrics(IStrategy):
         print(f"  Using data slice: {lookback_start} to {i} ({len(current_dataframe_slice)} candles)")
         
         # Execute Monte Carlo optimization directly
-        optimization_results = self.monte_carlo_optimizer.monte_carlo_period_optimization(
-            current_dataframe_slice, metadata['pair'], self.mc_recalc_interval_minutes.value
+        optimization_results = monte_carlo_period_optimization(
+            current_dataframe_slice, metadata['pair'], self.mc_recalc_interval_minutes.value,
+            self.MC_ITERATIONS, self.trendline_proximity_threshold.value
         )
         
         # Extract trendline objects directly
@@ -780,8 +778,9 @@ class RiskMetrics(IStrategy):
         print("=== Using Original Monte Carlo Optimization (with potential lookahead bias) ===")
 
         # Execute Monte Carlo optimization directly using the optimizer
-        optimization_results = self.monte_carlo_optimizer.monte_carlo_period_optimization(
-            dataframe, metadata['pair'], self.mc_recalc_interval_minutes.value
+        optimization_results = monte_carlo_period_optimization(
+            dataframe, metadata['pair'], self.mc_recalc_interval_minutes.value,
+            self.MC_ITERATIONS, self.trendline_proximity_threshold.value
         )
         
         # Extract trendline objects directly from results
