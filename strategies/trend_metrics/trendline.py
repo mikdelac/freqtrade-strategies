@@ -11,6 +11,15 @@ from typing import Optional, Union, Tuple, Dict, Any, List
 from scipy import stats
 import random
 import time
+from enum import Enum
+
+
+class TrendlineCategory(Enum):
+    """Enum for trendline categories."""
+    MAJOR_INTERNAL = "major_internal"
+    MAJOR_EXTERNAL = "major_external"
+    MINOR_INTERNAL = "minor_internal"
+    MINOR_EXTERNAL = "minor_external"
 
 
 class Trendline:
@@ -30,7 +39,8 @@ class Trendline:
                  r_squared: float,
                  bounce_count: int = -1,
                  creation_time: Optional[Union[datetime, pd.Timestamp]] = None,
-                 bounce_timestamps: Optional[list] = None):
+                 bounce_timestamps: Optional[list] = None,
+                 category: TrendlineCategory = TrendlineCategory.MINOR_INTERNAL):
         """
         Initialize a Trendline object.
         
@@ -44,6 +54,7 @@ class Trendline:
             bounce_count: Number of times price has bounced off this trendline (default: -1)
             creation_time: When this trendline object was created (defaults to current time)
             bounce_timestamps: List of timestamps where bounces occurred (defaults to empty list)
+            category: Category of the trendline (defaults to MINOR_INTERNAL)
         """
         self.trendline_type = trendline_type.lower()
         self.start_time = pd.Timestamp(start_time)
@@ -54,6 +65,7 @@ class Trendline:
         self.bounce_count = bounce_count
         self.creation_time = pd.Timestamp(creation_time) if creation_time else pd.Timestamp.now()
         self.bounce_timestamps = bounce_timestamps or []
+        self.category = category
         
         # Validation
         if self.trendline_type not in ['support', 'resistance']:
@@ -175,7 +187,8 @@ class Trendline:
             'duration_hours': self.duration_hours,
             'age_hours': self.age_hours,
             'bounce_timestamps': self.bounce_timestamps,
-            'r_squared': self.r_squared
+            'r_squared': self.r_squared,
+            'category': self.category.value
         }
     
     def __str__(self) -> str:
@@ -184,14 +197,16 @@ class Trendline:
                 f"{self.start_time.strftime('%Y-%m-%d %H:%M')} to "
                 f"{self.end_time.strftime('%Y-%m-%d %H:%M')}, "
                 f"slope={self.slope:.6f}, bounces={self.bounce_count}, "
-                f"duration={self.duration_hours:.1f}h, R²={self.r_squared:.3f})")
+                f"duration={self.duration_hours:.1f}h, R²={self.r_squared:.3f}, "
+                f"category={self.category.value})")
     
     def __repr__(self) -> str:
         """Detailed representation of the trendline."""
         return (f"Trendline(type='{self.trendline_type}', "
                 f"start_time='{self.start_time}', end_time='{self.end_time}', "
                 f"slope={self.slope}, start_price={self.start_price}, "
-                f"bounce_count={self.bounce_count}, r_squared={self.r_squared})")
+                f"bounce_count={self.bounce_count}, r_squared={self.r_squared}, "
+                f"category='{self.category.value}')")
 
 
 def generate_bounce_conditions(close_data, level_data, direction: str, tolerance: float = 0.00005, pivot_highs=None, pivot_lows=None):
@@ -530,7 +545,7 @@ def generate_trendlines_for_period(recent_data: pd.DataFrame, random_period: int
         Dict containing trendlines and Trendline objects (without scores)
     """
     # Generate trends for this period
-    trends = gentrends(recent_data, field='close', window=1/3.0)
+    trends = gentrends(recent_data, field='close', window=1)
     
     # Extract slope from the trends dataframe - gentrends now provides these columns
     resistance_slope = trends['Max Slope'].iloc[-1] if 'Max Slope' in trends.columns else 0.0
@@ -564,7 +579,8 @@ def generate_trendlines_for_period(recent_data: pd.DataFrame, random_period: int
             slope=resistance_slope,
             start_price=resistance_start_price,
             r_squared=resistance_r_squared,
-            bounce_count=0
+            bounce_count=0,
+            category=TrendlineCategory.MINOR_INTERNAL
         )
         trendline_objects.append(resistance_trendline)
     
@@ -586,7 +602,8 @@ def generate_trendlines_for_period(recent_data: pd.DataFrame, random_period: int
             slope=support_slope,
             start_price=support_start_price,
             r_squared=support_r_squared,
-            bounce_count=0
+            bounce_count=0,
+            category=TrendlineCategory.MINOR_INTERNAL
         )
         trendline_objects.append(support_trendline)
     
@@ -710,7 +727,8 @@ def create_trendline_object(recent_data: pd.DataFrame, trends: pd.DataFrame,
         start_price=start_price,
         r_squared=r_squared,
         bounce_count=bounce_conditions.sum(),
-        bounce_timestamps=bounce_timestamps
+        bounce_timestamps=bounce_timestamps,
+        category=TrendlineCategory.MINOR_INTERNAL
     )
     
     return trendline
@@ -750,6 +768,7 @@ def output_trendlines_info(trendline_objects: List[Trendline]) -> None:
                 print(f"     R-squared: {trendline.r_squared:.4f}")
                 print(f"     Start Price: {trendline.start_price:.6f}")
                 print(f"     Bounce Count: {trendline.bounce_count}")
+                print(f"     Category: {trendline.category.value}")
                 
                 # Display bounce timestamps if available
                 if hasattr(trendline, 'bounce_timestamps') and trendline.bounce_timestamps:
