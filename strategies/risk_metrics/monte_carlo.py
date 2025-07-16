@@ -8,11 +8,11 @@ from .volatility_models import GARCHModel
 
 # Import trendline functions and Trendline class from trend_metrics using absolute imports
 try:
-    from trend_metrics.trendline import gentrends, rank_trendlines, Trendline, generate_bounce_conditions, calculate_r_squared, generate_trendlines_for_period
+    from trend_metrics.trendline import gentrends, rank_trendlines, Trendline, generate_bounce_conditions, calculate_r_squared, generate_trendlines_for_period, create_trendline_object
 except ImportError:
     # Fallback for different import structures
     try:
-        from strategies.trend_metrics.trendline import gentrends, rank_trendlines, Trendline, generate_bounce_conditions, calculate_r_squared, generate_trendlines_for_period
+        from strategies.trend_metrics.trendline import gentrends, rank_trendlines, Trendline, generate_bounce_conditions, calculate_r_squared, generate_trendlines_for_period, create_trendline_object
     except ImportError:
         print("Warning: Could not import trendline functions. Some functionality may be limited.")
         # Define dummy functions to prevent errors
@@ -24,6 +24,8 @@ except ImportError:
             return pd.Series([False] * 100)  # Return dummy series
         def calculate_r_squared(*args, **kwargs):
             return 0.0  # Return dummy R-squared
+        def create_trendline_object(*args, **kwargs):
+            return None  # Return dummy trendline object
         
         # Define dummy Trendline class
         class Trendline:
@@ -275,77 +277,7 @@ class TrendlineMonteCarloOptimizer:
         
         return lookback_periods
     
-    def _create_trendline_object(self, recent_data: pd.DataFrame, trends: pd.DataFrame, 
-                                trendline_type: str, slope: float, start_time: pd.Timestamp, 
-                                end_time: pd.Timestamp) -> Optional[Trendline]:
-        """
-        Create a single Trendline object (either support or resistance).
-        
-        Args:
-            recent_data: Recent price data
-            trends: Generated trendline data
-            trendline_type: Either 'support' or 'resistance'
-            slope: Slope of the trendline
-            start_time: Start time for trendline
-            end_time: End time for trendline
-            
-        Returns:
-            Trendline object or None if creation fails
-        """
-        # Define column and price series based on trendline type
-        if trendline_type == 'resistance':
-            column = 'Max Line'
-            price_series = recent_data['high']
-            direction = 'short'
-        elif trendline_type == 'support':
-            column = 'Min Line'
-            price_series = recent_data['low']
-            direction = 'long'
-        else:
-            return None
-        
-        # Check if the trendline column exists and has valid data
-        if column not in trends.columns or trends[column].isna().all():
-            return None
-        
-        # Get the price at the start_time (last candle)
-        start_price = trends[column].iloc[-1]
-        
-        # Calculate R-squared for trendline
-        r_squared = calculate_r_squared(
-            price_series=price_series,
-            trendline_series=trends[column]
-        )
-        
-        # Generate bounce conditions
-        bounce_conditions = generate_bounce_conditions(
-            close_data=recent_data['close'],
-            level_data=trends[column].reindex(recent_data.index, method='ffill'),
-            direction=direction,
-            tolerance=self.trendline_proximity_threshold,
-            pivot_highs=recent_data['all_highs'],
-            pivot_lows=recent_data['all_lows']
-        )
-        
-        # Capture bounce timestamps
-        bounce_indices = bounce_conditions[bounce_conditions].index
-        bounce_timestamps = recent_data.loc[bounce_indices, 'date'].tolist()
-        
-        # Create trendline object
-        trendline = Trendline(
-            trendline_type=trendline_type,
-            start_time=start_time,
-            end_time=end_time,
-            slope=slope,
-            start_price=start_price,
-            r_squared=r_squared,
-            bounce_count=bounce_conditions.sum(),
-            bounce_timestamps=bounce_timestamps
-        )
-        
-        return trendline
-    
-    def _evaluate_trendline_period(self, dataframe: pd.DataFrame, random_period: int,
+    def evaluate_lookback_period_for_trendlines(self, dataframe: pd.DataFrame, random_period: int,
                                   recalc_interval_minutes: int) -> Tuple[List[Trendline], float, float]:
         """
         Evaluate a single lookback period and return trendline objects and scores.
@@ -378,15 +310,15 @@ class TrendlineMonteCarloOptimizer:
         trendline_objects = []
         
         # Create resistance trendline
-        resistance_trendline = self._create_trendline_object(
-            recent_data, trends, 'resistance', resistance_slope, start_time, end_time
+        resistance_trendline = create_trendline_object(
+            recent_data, trends, 'resistance', resistance_slope, start_time, end_time, self.trendline_proximity_threshold
         )
         if resistance_trendline:
             trendline_objects.append(resistance_trendline)
         
         # Create support trendline
-        support_trendline = self._create_trendline_object(
-            recent_data, trends, 'support', support_slope, start_time, end_time
+        support_trendline = create_trendline_object(
+            recent_data, trends, 'support', support_slope, start_time, end_time, self.trendline_proximity_threshold
         )
         if support_trendline:
             trendline_objects.append(support_trendline)
@@ -423,7 +355,7 @@ class TrendlineMonteCarloOptimizer:
         for iteration, random_period in enumerate(lookback_periods):
             try:
                 # Evaluate this period
-                trendline_objects, current_resistance_score, current_support_score = self._evaluate_trendline_period(
+                trendline_objects, current_resistance_score, current_support_score = self.evaluate_lookback_period_for_trendlines(
                     dataframe, random_period, recalc_interval_minutes
                 )
                 

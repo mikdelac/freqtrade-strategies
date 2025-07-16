@@ -641,6 +641,79 @@ def calculate_r_squared(price_series: Union[pd.Series, np.ndarray],
     except Exception as e:
         return 0.0
 
+
+def create_trendline_object(recent_data: pd.DataFrame, trends: pd.DataFrame, 
+                           trendline_type: str, slope: float, start_time: pd.Timestamp, 
+                           end_time: pd.Timestamp, trendline_proximity_threshold: float) -> Optional[Trendline]:
+    """
+    Create a single Trendline object (either support or resistance).
+    
+    Args:
+        recent_data: Recent price data
+        trends: Generated trendline data
+        trendline_type: Either 'support' or 'resistance'
+        slope: Slope of the trendline
+        start_time: Start time for trendline
+        end_time: End time for trendline
+        trendline_proximity_threshold: Threshold for trendline proximity scoring
+        
+    Returns:
+        Trendline object or None if creation fails
+    """
+    # Define column and price series based on trendline type
+    if trendline_type == 'resistance':
+        column = 'Max Line'
+        price_series = recent_data['high']
+        direction = 'short'
+    elif trendline_type == 'support':
+        column = 'Min Line'
+        price_series = recent_data['low']
+        direction = 'long'
+    else:
+        return None
+    
+    # Check if the trendline column exists and has valid data
+    if column not in trends.columns or trends[column].isna().all():
+        return None
+    
+    # Get the price at the start_time (last candle)
+    start_price = trends[column].iloc[-1]
+    
+    # Calculate R-squared for trendline
+    r_squared = calculate_r_squared(
+        price_series=price_series,
+        trendline_series=trends[column]
+    )
+    
+    # Generate bounce conditions
+    bounce_conditions = generate_bounce_conditions(
+        close_data=recent_data['close'],
+        level_data=trends[column].reindex(recent_data.index, method='ffill'),
+        direction=direction,
+        tolerance=trendline_proximity_threshold,
+        pivot_highs=recent_data['all_highs'],
+        pivot_lows=recent_data['all_lows']
+    )
+    
+    # Capture bounce timestamps
+    bounce_indices = bounce_conditions[bounce_conditions].index
+    bounce_timestamps = recent_data.loc[bounce_indices, 'date'].tolist()
+    
+    # Create trendline object
+    trendline = Trendline(
+        trendline_type=trendline_type,
+        start_time=start_time,
+        end_time=end_time,
+        slope=slope,
+        start_price=start_price,
+        r_squared=r_squared,
+        bounce_count=bounce_conditions.sum(),
+        bounce_timestamps=bounce_timestamps
+    )
+    
+    return trendline
+
+
 def output_trendlines_info(trendline_objects: List[Trendline]) -> None:
     """
     Output information about trendlines to the console.
