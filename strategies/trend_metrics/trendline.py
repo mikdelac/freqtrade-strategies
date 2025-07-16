@@ -936,3 +936,41 @@ def monte_carlo_period_optimization(dataframe: pd.DataFrame, pair: str = "UNKNOW
         'best_resistance_trendline': best_resistance_trendline,
         'best_support_trendline': best_support_trendline
     }
+
+
+def project_trendlines_forward(dataframe: pd.DataFrame, candle_index: int, 
+                              resistance_trendline: Optional[Trendline], support_trendline: Optional[Trendline]) -> Tuple[float, float]:
+    """
+    Project trendlines forward using slopes and apply results to dataframe.
+    
+    Args:
+        dataframe: The dataframe to update
+        candle_index: Current candle index
+        resistance_trendline: Resistance trendline object
+        support_trendline: Support trendline object
+        
+    Returns:
+        Tuple of (new_resistance_value, new_support_value)
+    """
+    pandas_index = dataframe.index[candle_index]
+    
+    # Calculate resistance projection
+    if resistance_trendline:
+        resistance_value = resistance_trendline.get_price_at_time(dataframe['date'].iloc[candle_index])
+        dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = resistance_value
+        dataframe.loc[pandas_index, 'MC_Resistance_Score'] = resistance_trendline.bounce_count
+    else:
+        dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = np.nan
+        dataframe.loc[pandas_index, 'MC_Resistance_Score'] = 0.0
+    
+    # Calculate support projection
+    if support_trendline:
+        support_value = support_trendline.get_price_at_time(dataframe['date'].iloc[candle_index])
+        dataframe.loc[pandas_index, 'MC_Optimal_Support'] = support_value
+        dataframe.loc[pandas_index, 'MC_Support_Score'] = support_trendline.bounce_count
+    else:
+        dataframe.loc[pandas_index, 'MC_Optimal_Support'] = np.nan
+        dataframe.loc[pandas_index, 'MC_Support_Score'] = 0.0
+    
+    return (resistance_value if resistance_trendline else np.nan, 
+            support_value if support_trendline else np.nan)
