@@ -117,7 +117,7 @@ class Trendline:
         """
         return self.age.total_seconds() / 3600
     
-    def get_price_at_time(self, timestamp: Union[datetime, pd.Timestamp]) -> float:
+    def get_price_at_time(self, timestamp: Union[datetime, pd.Timestamp], timeframe_minutes: int = 1) -> float:
         """
         Calculate the trendline price at a specific timestamp using the linear equation.
         
@@ -126,6 +126,7 @@ class Trendline:
         
         Args:
             timestamp: The timestamp to calculate price for
+            timeframe_minutes: The timeframe in minutes (1 for 1m, 5 for 5m, etc.)
             
         Returns:
             float: Price at the given timestamp
@@ -135,9 +136,8 @@ class Trendline:
         # Calculate time difference in seconds
         time_diff_seconds = (timestamp - self.start_time).total_seconds()
         
-        # Assume 1-minute candles for time period conversion (most common timeframe)
-        # This converts time difference to number of candles since start_time
-        candle_periods = time_diff_seconds / 60.0  # 60 seconds per 1-minute candle
+        # Convert time difference to number of candle periods based on actual timeframe
+        candle_periods = time_diff_seconds / (timeframe_minutes * 60.0)
         
         # Use linear equation: price = slope * candle_periods + start_price
         # where slope is price change per candle period
@@ -218,7 +218,7 @@ def generate_bounce_conditions(close_data, level_data, direction: str, tolerance
         close_data: Close price series
         level_data: Trendline level series
         direction: Either 'long' for support bounce or 'short' for resistance bounce
-        tolerance: Proximity tolerance (default: 0.00005 or 0.005%)
+        tolerance: Proximity tolerance as percentage (default: 0.00005 or 0.005%)
         pivot_highs: Pre-calculated pivot high points (pandas Series with same index) - REQUIRED
         pivot_lows: Pre-calculated pivot low points (pandas Series with same index) - REQUIRED
         
@@ -229,31 +229,19 @@ def generate_bounce_conditions(close_data, level_data, direction: str, tolerance
         if pivot_lows is None:
             raise ValueError("pivot_lows must be provided for long direction bounce detection")
             
-        # Long entry: Bounce off support using pre-calculated pivot lows
+        # Long entry: Check if pivot lows are within tolerance from support level
         bounce_conditions = (
-            # Current close is above support
-            (close_data > level_data) &
-            # Previous candle had a pivot low (swing low extrema)
-            (~pivot_lows.shift(1).isna()) &
-            # Pivot low must be above or at the support level
-            (pivot_lows.shift(1) >= level_data.shift(1)) &
-            # Current close is higher than previous close (upward movement)
-            (close_data > close_data.shift(1)) 
+            # Pivot low must be within tolerance percentage from the support level
+            (abs(pivot_lows - level_data) <= (level_data * tolerance))
         )
     elif direction == 'short':
         if pivot_highs is None:
             raise ValueError("pivot_highs must be provided for short direction bounce detection")
             
-        # Short entry: Bounce off resistance using pre-calculated pivot highs
+        # Short entry: Check if pivot highs are within tolerance from resistance level
         bounce_conditions = (
-            # Current close is below resistance
-            (close_data < level_data) &
-            # Previous candle had a pivot high (swing high extrema)
-            (~pivot_highs.shift(1).isna()) &
-            # Pivot high must be below or at the resistance level
-            (pivot_highs.shift(1) <= level_data.shift(1)) &
-            # Current close is lower than previous close (downward movement)
-            (close_data < close_data.shift(1)) 
+            # Pivot high must be within tolerance percentage from the resistance level
+            (abs(pivot_highs - level_data) <= (level_data * tolerance))
         )
     else:
         return pd.Series([False] * len(close_data), index=close_data.index)
@@ -958,7 +946,8 @@ def monte_carlo_period_optimization(dataframe: pd.DataFrame, pair: str = "UNKNOW
 
 
 def project_trendlines_forward(dataframe: pd.DataFrame, candle_index: int, 
-                              resistance_trendline: Optional[Trendline], support_trendline: Optional[Trendline]) -> Tuple[float, float]:
+                              resistance_trendline: Optional[Trendline], support_trendline: Optional[Trendline],
+                              timeframe_minutes: int = 1) -> Tuple[float, float]:
     """
     Project trendlines forward using slopes and apply results to dataframe.
     
@@ -967,6 +956,7 @@ def project_trendlines_forward(dataframe: pd.DataFrame, candle_index: int,
         candle_index: Current candle index
         resistance_trendline: Resistance trendline object
         support_trendline: Support trendline object
+        timeframe_minutes: The timeframe in minutes (1 for 1m, 5 for 5m, etc.)
         
     Returns:
         Tuple of (new_resistance_value, new_support_value)
@@ -975,7 +965,7 @@ def project_trendlines_forward(dataframe: pd.DataFrame, candle_index: int,
     
     # Calculate resistance projection
     if resistance_trendline:
-        resistance_value = resistance_trendline.get_price_at_time(dataframe['date'].iloc[candle_index])
+        resistance_value = resistance_trendline.get_price_at_time(dataframe['date'].iloc[candle_index], timeframe_minutes)
         dataframe.loc[pandas_index, 'MC_Optimal_Resistance'] = resistance_value
         dataframe.loc[pandas_index, 'MC_Resistance_Score'] = resistance_trendline.bounce_count
     else:
@@ -984,7 +974,7 @@ def project_trendlines_forward(dataframe: pd.DataFrame, candle_index: int,
     
     # Calculate support projection
     if support_trendline:
-        support_value = support_trendline.get_price_at_time(dataframe['date'].iloc[candle_index])
+        support_value = support_trendline.get_price_at_time(dataframe['date'].iloc[candle_index], timeframe_minutes)
         dataframe.loc[pandas_index, 'MC_Optimal_Support'] = support_value
         dataframe.loc[pandas_index, 'MC_Support_Score'] = support_trendline.bounce_count
     else:

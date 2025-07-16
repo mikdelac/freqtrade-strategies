@@ -276,8 +276,7 @@ class RiskMetrics(IStrategy):
     # Timeframe settings
     timeframe = "5m"
     MINUTES_IN_DAY = 24 * 60
-    MINUTES_PER_CANDLE = 5
-    CANDLES_PER_DAY = MINUTES_IN_DAY // MINUTES_PER_CANDLE  # 288 5-min candles per day
+    # CANDLES_PER_DAY will be calculated dynamically in __init__ based on actual timeframe
     
     # Monte Carlo period optimization settings
     MC_ITERATIONS = 200
@@ -286,12 +285,8 @@ class RiskMetrics(IStrategy):
     
     # Timeframe thresholds for resampling
     # Minimum number of candles needed for each timeframe
-    TIMEFRAME_THRESHOLDS = {
-        '1d': CANDLES_PER_DAY,           # Need at least 1 day of data
-        '3d': CANDLES_PER_DAY * 3,       # Need at least 3 days of data
-        '1w': CANDLES_PER_DAY * 5,       # Need at least 1 week of data
-        '1M': CANDLES_PER_DAY * 22,      # Need at least 1 month of data
-    }
+    # These will be calculated dynamically in __init__ based on actual timeframe
+    TIMEFRAME_THRESHOLDS = {}  # Will be populated in __init__
     
     # Supported higher timeframes in order of preference (highest first)
     HIGHER_TIMEFRAMES = ['1M', '1w', '3d', '1d']
@@ -300,7 +295,7 @@ class RiskMetrics(IStrategy):
     can_short: bool = False
     
     # Trendline parameters
-    trendline_proximity_threshold = DecimalParameter(0.005, 0.02, default=0.007, space="buy", optimize=True)
+    trendline_proximity_threshold = DecimalParameter(0.005, 0.02, default=0.001, space="buy", optimize=True)
     
     # Linear Regression parameters
     linearreg_timeperiod = IntParameter(10, 500, default=200, space="buy", optimize=True)
@@ -393,6 +388,17 @@ class RiskMetrics(IStrategy):
     
     def __init__(self, config: dict) -> None:
         super().__init__(config)
+        
+        # Calculate candles per day dynamically based on actual timeframe
+        self.CANDLES_PER_DAY = self.MINUTES_IN_DAY // timeframe_to_minutes(self.timeframe)
+        
+        # Calculate timeframe thresholds dynamically based on actual timeframe
+        self.TIMEFRAME_THRESHOLDS = {
+            '1d': self.CANDLES_PER_DAY,           # Need at least 1 day of data
+            '3d': self.CANDLES_PER_DAY * 3,       # Need at least 3 days of data
+            '1w': self.CANDLES_PER_DAY * 5,       # Need at least 1 week of data
+            '1M': self.CANDLES_PER_DAY * 22,      # Need at least 1 month of data
+        }
         
         self.swing_detector = SwingPointDetector()
                 
@@ -573,7 +579,7 @@ class RiskMetrics(IStrategy):
 
         # Calculate prices for all active timestamps at once (vectorized)
         active_timestamps = dataframe.loc[active_mask, 'date']
-        prices = active_timestamps.apply(lambda ts: trendline.get_price_at_time(ts))
+        prices = active_timestamps.apply(lambda ts: trendline.get_price_at_time(ts, timeframe_to_minutes(self.timeframe)))
         
         # Apply to appropriate columns using vectorized assignment
         if trendline.trendline_type == 'resistance':
@@ -692,7 +698,7 @@ class RiskMetrics(IStrategy):
 
             # Project trendlines forward using slopes
             project_trendlines_forward(
-                dataframe, i, resistance_trendline, support_trendline
+                dataframe, i, resistance_trendline, support_trendline, timeframe_to_minutes(self.timeframe)
             )
 
 
