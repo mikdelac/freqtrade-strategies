@@ -309,7 +309,7 @@ class RiskMetrics(IStrategy):
     mc_lookback_window_candles = IntParameter(1000, 3000, default=2000, space="buy", optimize=False)
     
     # Rolling Monte Carlo optimization (eliminates lookahead bias)
-    enable_rolling_mc_optimization = BooleanParameter(default=True, space="buy", optimize=False)
+    enable_rolling_mc_optimization = BooleanParameter(default=False, space="buy", optimize=False)
 
     # Minimal ROI designed for the strategy.
     minimal_roi = {
@@ -410,8 +410,17 @@ class RiskMetrics(IStrategy):
         
         # Initialize trendline storage for each timeframe
         self.stored_trendlines_1h = []
+        self.latest_bounce_resistance_1h = None
+        self.latest_bounce_support_1h = None
         self.stored_trendlines_1d = []
+        self.latest_bounce_resistance_1d = None
+        self.latest_bounce_support_1d = None
         self.stored_trendlines_1w = []
+        self.latest_bounce_resistance_1w = None
+        self.latest_bounce_support_1w = None
+        self.stored_trendlines_2w = []
+        self.latest_bounce_resistance_2w = None
+        self.latest_bounce_support_2w = None
         
         # Initialize heartbeat tracking for live trading mode
         self.last_recalculation_time = None  # Track when we last recalculated
@@ -447,90 +456,133 @@ class RiskMetrics(IStrategy):
         return None
 
 
-    @informative('1h')
-    def populate_indicators_1h(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+    def informative_pairs(self):
         """
-        Analyse Monte Carlo pour le timeframe 1h.
-        Utilise les résultats du timeframe parent (1d) pour l'analyse fractale.
+        Define informative pair mappings for the strategy.
+        Defines pairs and timeframes to be cached for the strategy.
         """
-        print(f"=== ANALYSE 1H POUR {metadata['pair']} ===")
+        pairs = self.dp.current_whitelist()
+        informative_pairs = []
         
-        # TODO: Implémenter la logique d'analyse fractale pour 1h
-        # 1. Récupérer les données du timeframe parent (1d)
-        # 2. Extraire le start_time du parent
-        # 3. Exécuter Monte Carlo avec start_time dynamique
-        # 4. Stocker les trendlines avec métadonnées
-        
-        return dataframe
+        # Add each pair with required timeframes
+        for pair in pairs:
+            informative_pairs += [
+                (pair, '1h'),   # 1h timeframe analysis
+                (pair, '1d'),   # 1d timeframe analysis
+                (pair, '1w'),   # 1w timeframe analysis
+            ]
+            
+        return informative_pairs
 
-    @informative('1d') 
-    def populate_indicators_1d(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+    def _execute_fractal_analysis(self, dataframe: DataFrame, metadata: dict, timeframe: str, 
+                                 parent_resistance_time: Optional[pd.Timestamp], 
+                                 parent_support_time: Optional[pd.Timestamp]) -> DataFrame:
         """
-        Analyse Monte Carlo pour le timeframe 1d.
-        Utilise les résultats du timeframe parent (1w) pour l'analyse fractale.
-        """
-        print(f"=== ANALYSE 1D POUR {metadata['pair']} ===")
+        Execute fractal analysis for a given timeframe using parent timeframe data.
         
-        # TODO: Implémenter la logique d'analyse fractale pour 1d
-        # 1. Récupérer les données du timeframe parent (1w)
-        # 2. Extraire le start_time du parent
-        # 3. Exécuter Monte Carlo avec start_time dynamique
-        # 4. Stocker les trendlines avec métadonnées
+        Args:
+            dataframe: DataFrame to analyze
+            metadata: Strategy metadata
+            timeframe: Current timeframe being analyzed (e.g., '1w', '1d', '1h')
+            parent_resistance_time: Latest bounce resistance time from parent timeframe
+            parent_support_time: Latest bounce support time from parent timeframe
+            
+        Returns:
+            DataFrame: Updated dataframe with analysis results
+        """
+        print(f"=== ANALYSE {timeframe.upper()} POUR {metadata['pair']} ===")
+
+        # Clear stored trendlines for this timeframe
+        timeframe_storage_attr = f"stored_trendlines_{timeframe}"
+        if hasattr(self, timeframe_storage_attr):
+            getattr(self, timeframe_storage_attr).clear()
         
-        return dataframe
-
-    @informative('1w')
-    def populate_indicators_1w(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        """
-        Analyse Monte Carlo pour le timeframe 1w.
-        Utilise les résultats du timeframe parent (2w) pour l'analyse fractale.
-        """
-        print(f"=== ANALYSE 1W POUR {metadata['pair']} ===")
-
-        self.stored_trendlines_1w.clear()
         self._initialize_dataframe_columns(dataframe)
         self.swing_detector.find_and_map_swing_points(dataframe)
 
-        # Extraire le start_time du parent (2w)
-        start_time = None
-        if hasattr(self, 'stored_trendlines_2w') and self.stored_trendlines_2w:
-            start_time = max(
-                (self.extract_latest_bounce_timestamp(t) for t in self.stored_trendlines_2w if self.extract_latest_bounce_timestamp(t) is not None),
-                default=None
+        # Define the analysis types to process
+        analysis_types = [
+            {'type': 'resistance', 'start_time': parent_resistance_time},
+            {'type': 'support', 'start_time': parent_support_time}
+        ]
+
+        for analysis in analysis_types:
+            analysis_type = analysis['type']
+            start_time = analysis['start_time']
+
+            if start_time is not None:
+                # Découper le dataframe à partir de start_time si fourni
+                mask = dataframe['date'] > start_time
+                filtered_df = dataframe[mask].copy()
+                print(f"Découpage du dataframe {timeframe} à partir de start_time: {start_time}, {len(filtered_df)} candles conservés.")
+            else:
+                filtered_df = dataframe
+                
+            # Exécuter Monte Carlo sur le sous-dataframe
+            optimization_results = monte_carlo_period_optimization(
+                filtered_df, metadata['pair'],
+                self.mc_recalc_interval_minutes.value,
+                self.MC_ITERATIONS,
+                trendline_proximity_threshold=0.1
             )
-            print(f"Start time extrait du 2w: {start_time}")
 
-        # Découper le dataframe à partir de start_time si fourni
-        if start_time is not None:
-            mask = dataframe['date'] > start_time
-            filtered_df = dataframe[mask].copy()
-            print(f"Découpage du dataframe 1w à partir de start_time: {start_time}, {len(filtered_df)} candles conservés.")
-        else:
-            filtered_df = dataframe
+            # Stocker les trendlines avec métadonnées
+            if optimization_results:
+                if analysis_type == 'resistance':
+                    resistance_trendline = optimization_results.get('best_resistance_trendline')
+                    
+                    if resistance_trendline:
+                        resistance_trendline.source_timeframe = timeframe
+                        getattr(self, timeframe_storage_attr).append(resistance_trendline)
+                        latest_bounce = self.extract_latest_bounce_timestamp(resistance_trendline)
+                        dataframe[f'latest_bounce_resistance'] = latest_bounce
+                        
+                elif analysis_type == 'support':
+                    support_trendline = optimization_results.get('best_support_trendline')
 
-        # Exécuter Monte Carlo sur le sous-dataframe
-        optimization_results = monte_carlo_period_optimization(
-            filtered_df, metadata['pair'],
-            self.mc_recalc_interval_minutes.value,
-            self.MC_ITERATIONS,
-            trendline_proximity_threshold=0.1
-        )
-
-        # Stocker les trendlines avec métadonnées
-        if optimization_results:
-            resistance_trendline = optimization_results.get('best_resistance_trendline')
-            support_trendline = optimization_results.get('best_support_trendline')
-            
-            if resistance_trendline:
-                resistance_trendline.source_timeframe = '1w'
-                self.stored_trendlines_1w.append(resistance_trendline)
-            
-            if support_trendline:
-                support_trendline.source_timeframe = '1w'
-                self.stored_trendlines_1w.append(support_trendline)
-
+                    if support_trendline:
+                        support_trendline.source_timeframe = timeframe
+                        getattr(self, timeframe_storage_attr).append(support_trendline)
+                        latest_bounce = self.extract_latest_bounce_timestamp(support_trendline)
+                        dataframe[f'latest_bounce_support'] = latest_bounce
+                
         return dataframe
 
+    def _get_and_analyze_timeframe_data(self, pair: str, timeframe: str, 
+                                      parent_resistance_time: Optional[pd.Timestamp],
+                                      parent_support_time: Optional[pd.Timestamp],
+                                      dataframe: DataFrame) -> DataFrame:
+        """
+        Get and analyze data for a specific timeframe.
+        
+        Args:
+            pair: Trading pair
+            timeframe: Timeframe to analyze
+            parent_resistance_time: Parent timeframe resistance time
+            parent_support_time: Parent timeframe support time
+            dataframe: Original dataframe for merging
+            
+        Returns:
+            DataFrame: Analyzed and merged dataframe
+        """
+        if not self.dp:
+            return dataframe
+            
+        # Get the informative pair data
+        informative = self.dp.get_pair_dataframe(pair=pair, timeframe=timeframe)
+        
+        # Execute fractal analysis
+        informative = self._execute_fractal_analysis(
+            informative, {'pair': pair}, timeframe,
+            parent_resistance_time, parent_support_time
+        )
+        
+        # Merge informative pair with original dataframe
+        dataframe = merge_informative_pair(
+            dataframe, informative, self.timeframe, timeframe, ffill=True
+        )
+        
+        return dataframe
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
@@ -541,9 +593,39 @@ class RiskMetrics(IStrategy):
         2. Live trading (heartbeat): Non-rolling Monte Carlo only when recalc interval is reached
         """
         print("Populating indicators", dataframe)
-        if len(dataframe) == 0:
+        if len(dataframe) == 0 or not self.dp:
             return dataframe
-                
+        
+        pair = metadata['pair']
+        
+        # Define timeframes to analyze in order (dependency chain)
+        timeframes_to_analyze = [
+            {'timeframe': '1w', 'parent_resistance': None, 'parent_support': None},
+            {'timeframe': '1d', 'parent_resistance': 'latest_bounce_resistance_1w', 'parent_support': 'latest_bounce_support_1w'},
+            {'timeframe': '1h', 'parent_resistance': 'latest_bounce_resistance_1d', 'parent_support': 'latest_bounce_support_1d'}
+        ]
+        
+        # Analyze each timeframe in sequence
+        for analysis_config in timeframes_to_analyze:
+            timeframe = analysis_config['timeframe']
+            parent_resistance_col = analysis_config['parent_resistance']
+            parent_support_col = analysis_config['parent_support']
+            
+            # Get parent times if available
+            parent_resistance_time = None
+            parent_support_time = None
+            
+            if parent_resistance_col and parent_resistance_col in dataframe.columns:
+                parent_resistance_time = dataframe[parent_resistance_col].iloc[-1]
+            
+            if parent_support_col and parent_support_col in dataframe.columns:
+                parent_support_time = dataframe[parent_support_col].iloc[-1]
+            
+            # Analyze current timeframe
+            dataframe = self._get_and_analyze_timeframe_data(
+                pair, timeframe, parent_resistance_time, parent_support_time, dataframe
+            )
+        
         # Multiple criteria for backtest detection:
         # 1. No stored trendlines yet (first run)
         # 2. Monte Carlo has never been executed (safety check)
@@ -609,6 +691,18 @@ class RiskMetrics(IStrategy):
 
         # === Output All Stored Trendlines ===
         output_trendlines_info(self.stored_trendlines_1w)
+        
+        # Print latest bounce timestamps for each timeframe
+        for analysis_config in timeframes_to_analyze:
+            timeframe = analysis_config['timeframe']
+            resistance_col = f'latest_bounce_resistance_{timeframe}'
+            support_col = f'latest_bounce_support_{timeframe}'
+            
+            resistance_time = dataframe[resistance_col].iloc[-1] if resistance_col in dataframe.columns else None
+            support_time = dataframe[support_col].iloc[-1] if support_col in dataframe.columns else None
+            
+            print(f"Latest bounce timestamp {timeframe} resistance: {resistance_time}")
+            print(f"Latest bounce timestamp {timeframe} support: {support_time}")
 
         return dataframe
 
