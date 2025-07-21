@@ -1044,6 +1044,105 @@ def monte_carlo_period_optimization(dataframe: pd.DataFrame, pair: str = "UNKNOW
     }
 
 
+def generate_forward_trendline(dataframe: pd.DataFrame, 
+                             start_time: pd.Timestamp,
+                             trendline_type: str,
+                             mc_recalc_interval_minutes: int = 120,
+                             trendline_proximity_threshold: float = 0.00005) -> Optional[Trendline]:
+    """
+    Generate a forward-looking trendline from a starting point.
+    
+    Args:
+        dataframe: DataFrame containing price data after the start_time
+        start_time: Starting timestamp for the trendline
+        trendline_type: Either 'support' or 'resistance'
+        mc_recalc_interval_minutes: Monte Carlo recalculation interval in minutes
+        trendline_proximity_threshold: Threshold for trendline proximity scoring
+        
+    Returns:
+        Optional[Trendline]: A new trendline object if successful, None otherwise
+    """
+    # Get the price at the start_time from the dataframe
+    start_mask = dataframe['date'] == start_time
+    if start_mask.any():
+        start_price = dataframe.loc[start_mask, 'close'].iloc[0]
+    else:
+        # If exact time not found, use the closest time
+        start_price = dataframe.loc[dataframe['date'] >= start_time, 'close'].iloc[0]
+    
+    # Filter dataframe to only include data after start_time
+    future_data = dataframe[dataframe['date'] >= start_time].copy()
+    if len(future_data) == 0:
+        return None
+        
+    # Generate random lookforward periods using the same logic as lookback
+    total_future_candles = len(future_data)
+    lookforward_periods = generate_lookback_periods(total_future_candles, mc_iterations=100)
+    
+    # Initialize variables for best trendline
+    best_trendline = None
+    best_score = 0
+    
+    # Try different lookforward periods
+    for period in lookforward_periods:
+            
+        # Take a slice of future data for this period
+        period_data = future_data.head(period).copy()
+        if len(period_data) < 2:
+            continue
+            
+        # Create a temporary dataframe with the starting point included
+        temp_df = pd.concat([
+            pd.DataFrame({
+                'date': [start_time],
+                'open': [start_price],
+                'high': [start_price],
+                'low': [start_price],
+                'close': [start_price],
+                'all_highs': [True if trendline_type == 'resistance' else False],
+                'all_lows': [True if trendline_type == 'support' else False]
+            }),
+            period_data
+        ]).reset_index(drop=True)
+        
+        # Generate trends using existing function
+        trends = gentrends(temp_df, field='close', window=1/3.0)
+        
+        # Extract slope from trends
+        slope_column = 'Max Slope' if trendline_type == 'resistance' else 'Min Slope'
+        slope = trends[slope_column].iloc[-1] if slope_column in trends.columns else 0.0
+        
+        # Set end_time as start_time plus the lookforward period
+        end_time = start_time + pd.Timedelta(minutes=len(period_data))
+        
+        # Create trendline object using existing function
+        trendline = create_trendline_object(
+            temp_df, 
+            trends, 
+            trendline_type,
+            slope,
+            start_time,
+            end_time,
+            trendline_proximity_threshold
+        )
+        
+        if trendline:
+            # Calculate score using rank_trendlines
+            scores = rank_trendlines(trends, [trendline], original_data=temp_df)
+            current_score = (
+                scores["ranked_maxlines"].get("Max Line", 0) 
+                if trendline_type == 'resistance' 
+                else scores["ranked_minlines"].get("Min Line", 0)
+            )
+            
+            # Update best trendline if current score is better
+            if current_score > best_score:
+                best_score = current_score
+                best_trendline = trendline
+    
+    return best_trendline
+
+
 def project_trendlines_forward(dataframe: pd.DataFrame, candle_index: int, 
                               resistance_trendline: Optional[Trendline], support_trendline: Optional[Trendline],
                               timeframe_minutes: int = 1) -> Tuple[float, float]:

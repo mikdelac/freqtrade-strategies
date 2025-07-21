@@ -45,7 +45,7 @@ from trend_metrics.trendline import (
     gentrends, segtrends, rank_trendlines, generate_bounce_conditions, 
     Trendline, output_trendlines_info, monte_carlo_period_optimization,
     evaluate_lookback_period_for_trendlines, generate_lookback_periods,
-    project_trendlines_forward
+    project_trendlines_forward, generate_forward_trendline
 )
 from technical.util import resample_to_interval, resampled_merge
 
@@ -515,36 +515,62 @@ class RiskMetrics(IStrategy):
                 mask = dataframe['date'] > start_time
                 filtered_df = dataframe[mask].copy()
                 print(f"Découpage du dataframe {timeframe} à partir de start_time: {start_time}, {len(filtered_df)} candles conservés.")
-            else:
-                filtered_df = dataframe
                 
-            # Exécuter Monte Carlo sur le sous-dataframe
-            optimization_results = monte_carlo_period_optimization(
-                filtered_df, metadata['pair'],
-                self.mc_recalc_interval_minutes.value,
-                self.MC_ITERATIONS,
-                trendline_proximity_threshold=0.1
-            )
+                print(f"Generating forward trendline for {analysis_type} from {start_time}")
+                
+                # Generate forward trendline using the new function
+                trendline = generate_forward_trendline(
+                    dataframe=dataframe,
+                    start_time=start_time,
+                    trendline_type=analysis_type,
+                    mc_recalc_interval_minutes=self.mc_recalc_interval_minutes.value,
+                    trendline_proximity_threshold=0.1
+                )
 
-            # Stocker les trendlines avec métadonnées
-            if optimization_results:
-                if analysis_type == 'resistance':
-                    resistance_trendline = optimization_results.get('best_resistance_trendline')
+                # Store the trendline with metadata
+                if trendline:
+                    trendline.source_timeframe = timeframe
+                    getattr(self, timeframe_storage_attr).append(trendline)
+                    latest_bounce = self.extract_latest_bounce_timestamp(trendline)
                     
-                    if resistance_trendline:
-                        resistance_trendline.source_timeframe = timeframe
-                        getattr(self, timeframe_storage_attr).append(resistance_trendline)
-                        latest_bounce = self.extract_latest_bounce_timestamp(resistance_trendline)
+                    if analysis_type == 'resistance':
                         dataframe[f'latest_bounce_resistance'] = latest_bounce
-                        
-                elif analysis_type == 'support':
-                    support_trendline = optimization_results.get('best_support_trendline')
-
-                    if support_trendline:
-                        support_trendline.source_timeframe = timeframe
-                        getattr(self, timeframe_storage_attr).append(support_trendline)
-                        latest_bounce = self.extract_latest_bounce_timestamp(support_trendline)
+                    elif analysis_type == 'support':
                         dataframe[f'latest_bounce_support'] = latest_bounce
+                        
+                    print(f"Generated {analysis_type} trendline: {trendline}")
+                else:
+                    print(f"No valid {analysis_type} trendline generated from {start_time}")
+            else:
+                # Use Monte Carlo optimization when no start_time is provided
+                print(f"Executing Monte Carlo optimization for {analysis_type} (no start_time provided)")
+                
+                optimization_results = monte_carlo_period_optimization(
+                    dataframe, metadata['pair'],
+                    self.mc_recalc_interval_minutes.value,
+                    self.MC_ITERATIONS,
+                    trendline_proximity_threshold=0.1
+                )
+
+                # Store the trendlines with metadata
+                if optimization_results:
+                    if analysis_type == 'resistance':
+                        resistance_trendline = optimization_results.get('best_resistance_trendline')
+                        
+                        if resistance_trendline:
+                            resistance_trendline.source_timeframe = timeframe
+                            getattr(self, timeframe_storage_attr).append(resistance_trendline)
+                            latest_bounce = self.extract_latest_bounce_timestamp(resistance_trendline)
+                            dataframe[f'latest_bounce_resistance'] = latest_bounce
+                            
+                    elif analysis_type == 'support':
+                        support_trendline = optimization_results.get('best_support_trendline')
+
+                        if support_trendline:
+                            support_trendline.source_timeframe = timeframe
+                            getattr(self, timeframe_storage_attr).append(support_trendline)
+                            latest_bounce = self.extract_latest_bounce_timestamp(support_trendline)
+                            dataframe[f'latest_bounce_support'] = latest_bounce
                 
         return dataframe
 
@@ -691,6 +717,8 @@ class RiskMetrics(IStrategy):
 
         # === Output All Stored Trendlines ===
         output_trendlines_info(self.stored_trendlines_1w)
+        output_trendlines_info(self.stored_trendlines_1d)
+        output_trendlines_info(self.stored_trendlines_1h)
         
         # Print latest bounce timestamps for each timeframe
         for analysis_config in timeframes_to_analyze:
