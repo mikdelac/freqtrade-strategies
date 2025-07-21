@@ -417,17 +417,20 @@ def segtrends(dataframe, field="close", segments=2, charts=False):
     return trends
 
 
-def rank_trendlines(trends, trendline_objects):
+def rank_trendlines(trends, trendline_objects, original_data=None):
     """
     Ranks trendlines based on bounce count from Trendline objects, with R-squared as tiebreaker.
+    Implements dynamic resistance scoring to penalize broken or ineffective resistance lines.
     
     Ranking System:
     1. Primary: Number of bounces (higher is better)
     2. Tiebreaker: R-squared value (higher is better)
+    3. Dynamic Resistance Scoring: Penalizes resistance lines that get broken or go under candles
     
     Args:
         trends: DataFrame containing price data and trendlines
         trendline_objects: List of Trendline objects with pre-calculated bounce counts (REQUIRED)
+        original_data: Original OHLCV DataFrame for dynamic resistance scoring (optional)
         
     Returns:
         Dictionary with ranked maxlines and minlines based on bounce count and R-squared
@@ -495,6 +498,102 @@ def rank_trendlines(trends, trendline_objects):
     # Sort and create ranked results
     resistance_sorted = sorted(trendline_categories['resistance']['trendlines'], key=sort_key)
     support_sorted = sorted(trendline_categories['support']['trendlines'], key=sort_key)
+    
+    # Dynamic Resistance Scoring - Filter resistance lines that fail quality checks
+    if original_data is not None and len(resistance_sorted) > 0:
+        filtered_resistance_sorted = []
+        
+        for col, bounce_count, r_squared, trendline_obj in resistance_sorted:
+            # Skip resistance lines with no bounces (they're already low priority)
+            if bounce_count <= 0:
+                continue
+                
+            # Get the resistance trendline values
+            resistance_values = trends[col].dropna()
+            
+            # Check if we have enough data for analysis
+            if len(resistance_values) < 2 or len(original_data) < 2:
+                filtered_resistance_sorted.append((col, bounce_count, r_squared, trendline_obj))
+                continue
+            
+            # Align resistance values with original data
+            # Use the same index as the trends DataFrame
+            aligned_resistance = resistance_values.reindex(original_data.index, method='ffill')
+            
+            # Dynamic Resistance Scoring Criteria:
+            resistance_quality_score = 1.0  # Start with perfect score
+            
+            # 1. Check if resistance gets broken by price action (high prices exceed resistance)
+            if 'high' in original_data.columns:
+                high_prices = original_data['high']
+                break_count = 0
+                total_candles = 0
+                
+                for i in range(len(aligned_resistance)):
+                    if not pd.isna(aligned_resistance.iloc[i]) and not pd.isna(high_prices.iloc[i]):
+                        total_candles += 1
+                        if high_prices.iloc[i] > aligned_resistance.iloc[i]:
+                            break_count += 1
+                
+                if total_candles > 0:
+                    break_ratio = break_count / total_candles
+                    # Penalize if more than 20% of candles break the resistance
+                    if break_ratio > 0.2:
+                        resistance_quality_score *= (1.0 - break_ratio)
+            
+            # 2. Check if resistance goes under candles (resistance below low prices)
+            if 'low' in original_data.columns:
+                low_prices = original_data['low']
+                under_candle_count = 0
+                total_candles = 0
+                
+                for i in range(len(aligned_resistance)):
+                    if not pd.isna(aligned_resistance.iloc[i]) and not pd.isna(low_prices.iloc[i]):
+                        total_candles += 1
+                        if aligned_resistance.iloc[i] < low_prices.iloc[i]:
+                            under_candle_count += 1
+                
+                if total_candles > 0:
+                    under_ratio = under_candle_count / total_candles
+                    # Penalize if more than 30% of candles are above the resistance
+                    if under_ratio > 0.3:
+                        resistance_quality_score *= (1.0 - under_ratio)
+            
+            # 3. Check if resistance acts as meaningful resistance (close prices near resistance)
+            if 'close' in original_data.columns:
+                close_prices = original_data['close']
+                meaningful_touches = 0
+                total_candles = 0
+                tolerance = 0.005  # 0.5% tolerance for meaningful touches
+                
+                for i in range(len(aligned_resistance)):
+                    if not pd.isna(aligned_resistance.iloc[i]) and not pd.isna(close_prices.iloc[i]):
+                        total_candles += 1
+                        resistance_level = aligned_resistance.iloc[i]
+                        close_price = close_prices.iloc[i]
+                        
+                        # Check if close price is within tolerance of resistance
+                        if abs(close_price - resistance_level) <= (resistance_level * tolerance):
+                            meaningful_touches += 1
+                
+                if total_candles > 0:
+                    touch_ratio = meaningful_touches / total_candles
+                    # Reward if resistance is meaningfully touched (between 5-20% of candles)
+                    if 0.05 <= touch_ratio <= 0.2:
+                        resistance_quality_score *= (1.0 + touch_ratio)
+                    # Penalize if resistance is rarely touched (less than 2% of candles)
+                    elif touch_ratio < 0.02:
+                        resistance_quality_score *= 0.5
+            
+            # Apply quality score to bounce count (effective bounce count)
+            effective_bounce_count = int(bounce_count * resistance_quality_score)
+            
+            # Only include resistance lines with meaningful effective bounce count
+            if effective_bounce_count > 0:
+                filtered_resistance_sorted.append((col, effective_bounce_count, r_squared, trendline_obj))
+        
+        # Replace original resistance_sorted with filtered version
+        resistance_sorted = filtered_resistance_sorted
     
     # Create the ranked results dictionary with bounce counts as scores (for backward compatibility)
     ranked_results = {
@@ -865,7 +964,7 @@ def evaluate_lookback_period_for_trendlines(dataframe: pd.DataFrame, random_peri
         trendline_objects.append(support_trendline)
     
     # Calculate scores using rank_trendlines
-    main_lines_score = rank_trendlines(trends, trendline_objects)
+    main_lines_score = rank_trendlines(trends, trendline_objects, original_data=recent_data)
     
     current_resistance_score = main_lines_score["ranked_maxlines"].get("Max Line", 0)
     current_support_score = main_lines_score["ranked_minlines"].get("Min Line", 0)
