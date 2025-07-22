@@ -282,15 +282,7 @@ class RiskMetrics(IStrategy):
     MC_ITERATIONS = 200
     MIN_LOOKBACK_PERIOD = 50
     # MAX_LOOKBACK_PERIOD will be set dynamically based on available data
-    
-    # Timeframe thresholds for resampling
-    # Minimum number of candles needed for each timeframe
-    # These will be calculated dynamically in __init__ based on actual timeframe
-    TIMEFRAME_THRESHOLDS = {}  # Will be populated in __init__
-    
-    # Supported higher timeframes in order of preference (highest first)
-    HIGHER_TIMEFRAMES = ['1M', '1w', '3d', '1d']
-    
+            
     # Trading parameters
     can_short: bool = False
     
@@ -348,6 +340,8 @@ class RiskMetrics(IStrategy):
         "exit": "GTC"
     }
 
+    # Timeframe hierarchy for recursive analysis
+    TIMEFRAME_HIERARCHY = ['1h', '4h', '1d', '1w']
 
     @property
     def plot_config(self):
@@ -391,15 +385,7 @@ class RiskMetrics(IStrategy):
         
         # Calculate candles per day dynamically based on actual timeframe
         self.CANDLES_PER_DAY = self.MINUTES_IN_DAY // timeframe_to_minutes(self.timeframe)
-        
-        # Calculate timeframe thresholds dynamically based on actual timeframe
-        self.TIMEFRAME_THRESHOLDS = {
-            '1d': self.CANDLES_PER_DAY,           # Need at least 1 day of data
-            '3d': self.CANDLES_PER_DAY * 3,       # Need at least 3 days of data
-            '1w': self.CANDLES_PER_DAY * 5,       # Need at least 1 week of data
-            '1M': self.CANDLES_PER_DAY * 22,      # Need at least 1 month of data
-        }
-        
+                
         self.swing_detector = SwingPointDetector()
                 
         # Initialize signal generator
@@ -412,6 +398,9 @@ class RiskMetrics(IStrategy):
         self.stored_trendlines_1h = []
         self.latest_bounce_resistance_1h = None
         self.latest_bounce_support_1h = None
+        self.stored_trendlines_4h = []
+        self.latest_bounce_resistance_4h = None
+        self.latest_bounce_support_4h = None
         self.stored_trendlines_1d = []
         self.latest_bounce_resistance_1d = None
         self.latest_bounce_support_1d = None
@@ -421,6 +410,11 @@ class RiskMetrics(IStrategy):
         self.stored_trendlines_2w = []
         self.latest_bounce_resistance_2w = None
         self.latest_bounce_support_2w = None
+
+        self.timeframe_1h_start_date = None
+        self.timeframe_4h_start_date = None
+        self.timeframe_1d_start_date = None
+        self.timeframe_1w_start_date = None
         
         # Initialize heartbeat tracking for live trading mode
         self.last_recalculation_time = None  # Track when we last recalculated
@@ -439,6 +433,108 @@ class RiskMetrics(IStrategy):
             print(f"    - Recalculates every {self.mc_recalc_interval_minutes.value} minutes")
         else:
             print(f"    - Using original method (faster but with potential lookahead bias)")
+
+    def _get_parent_timeframe(self, current_timeframe: str) -> Optional[str]:
+        """
+        Get the parent (higher) timeframe for the given timeframe.
+        
+        Args:
+            current_timeframe: Current timeframe (e.g., '1h')
+            
+        Returns:
+            str or None: Parent timeframe (e.g., '4h') or None if no parent exists
+        """
+        try:
+            current_index = self.TIMEFRAME_HIERARCHY.index(current_timeframe)
+            if current_index < len(self.TIMEFRAME_HIERARCHY) - 1:
+                return self.TIMEFRAME_HIERARCHY[current_index + 1]
+        except ValueError:
+            pass
+        return None
+
+    def _get_timeframe_start_date(self, timeframe: str) -> Optional[pd.Timestamp]:
+        """
+        Get the start date for a specific timeframe.
+        
+        Args:
+            timeframe: Timeframe to get start date for
+            
+        Returns:
+            pd.Timestamp or None: Start date for the timeframe
+        """
+        start_date_attr = f"timeframe_{timeframe}_start_date"
+        return getattr(self, start_date_attr, None)
+
+    def _get_timeframe_dataframe(self, pair: str, timeframe: str) -> Optional[DataFrame]:
+        """
+        Get the dataframe for a specific timeframe.
+        
+        Args:
+            pair: Trading pair
+            timeframe: Timeframe to get data for
+            
+        Returns:
+            DataFrame or None: Dataframe for the timeframe
+        """
+        if not self.dp:
+            return None
+        return self.dp.get_pair_dataframe(pair=pair, timeframe=timeframe)
+
+    def _calculate_trendline_in_higher_timeframe(self, pair: str, timeframe: str, 
+                                               start_time: pd.Timestamp, 
+                                               analysis_type: str) -> Optional[Trendline]:
+        """
+        Calculate trendline in a higher timeframe when start_time is before current timeframe data.
+        
+        Args:
+            pair: Trading pair
+            timeframe: Current timeframe
+            start_time: Start time for trendline calculation
+            analysis_type: Either 'resistance' or 'support'
+            
+        Returns:
+            Trendline or None: Generated trendline from higher timeframe
+        """
+        parent_timeframe = self._get_parent_timeframe(timeframe)
+        if not parent_timeframe:
+            print(f"No parent timeframe available for {timeframe}, using Monte Carlo fallback")
+            return None
+        
+        print(f"Calculating {analysis_type} trendline in {parent_timeframe} for start_time {start_time}")
+        
+        # Get parent timeframe dataframe
+        parent_dataframe = self._get_timeframe_dataframe(pair, parent_timeframe)
+        if parent_dataframe is None:
+            print(f"No data available for parent timeframe {parent_timeframe}")
+            return None
+        
+        parent_start_date = self._get_timeframe_start_date(parent_timeframe)
+        
+        # Check if we need to go even higher
+        if parent_start_date and start_time < parent_start_date:
+            print(f"start_time {start_time} < parent timeframe {parent_timeframe} start_date {parent_start_date}")
+            return self._calculate_trendline_in_higher_timeframe(pair, parent_timeframe, start_time, analysis_type)
+        
+        # Initialize and analyze parent timeframe dataframe
+        self._initialize_dataframe_columns(parent_dataframe)
+        self.swing_detector.find_and_map_swing_points(parent_dataframe)
+        
+        # Generate forward trendline in parent timeframe
+        trendline = generate_forward_trendline(
+            dataframe=parent_dataframe,
+            start_time=start_time,
+            trendline_type=analysis_type,
+            mc_recalc_interval_minutes=self.mc_recalc_interval_minutes.value,
+            trendline_proximity_threshold=0.005
+        )
+        
+        if trendline:
+            trendline.source_timeframe = parent_timeframe
+            print(f"Successfully generated {analysis_type} trendline in {parent_timeframe}: {trendline}")
+        else:
+            print(f"Failed to generate {analysis_type} trendline in {parent_timeframe}")
+            
+        return trendline
 
     @staticmethod
     def extract_latest_bounce_timestamp(trendline: Trendline) -> Optional[pd.Timestamp]:
@@ -468,6 +564,7 @@ class RiskMetrics(IStrategy):
         for pair in pairs:
             informative_pairs += [
                 (pair, '1h'),   # 1h timeframe analysis
+                (pair, '4h'),   # 4h timeframe analysis
                 (pair, '1d'),   # 1d timeframe analysis
                 (pair, '1w'),   # 1w timeframe analysis
             ]
@@ -483,7 +580,7 @@ class RiskMetrics(IStrategy):
         Args:
             dataframe: DataFrame to analyze
             metadata: Strategy metadata
-            timeframe: Current timeframe being analyzed (e.g., '1w', '1d', '1h')
+            timeframe: Current timeframe being analyzed (e.g., '1w', '1d', '4h', '1h')
             parent_resistance_time: Latest bounce resistance time from parent timeframe
             parent_support_time: Latest bounce support time from parent timeframe
             
@@ -492,94 +589,291 @@ class RiskMetrics(IStrategy):
         """
         print(f"=== ANALYSE {timeframe.upper()} POUR {metadata['pair']} ===")
 
+        # Initialize analysis environment
+        self._prepare_fractal_analysis_environment(dataframe, timeframe)
+        
+        # Get timeframe start date for validation
+        timeframe_start_date = self._get_timeframe_start_date(timeframe)
+        
+        # Define analysis configurations
+        analysis_configurations = self._create_analysis_configurations(
+            parent_resistance_time, parent_support_time
+        )
+        
+        # Execute each analysis type
+        for analysis_config in analysis_configurations:
+            self._execute_single_analysis_type(
+                dataframe, metadata, timeframe, timeframe_start_date, analysis_config
+            )
+                
+        return dataframe
+
+    def _prepare_fractal_analysis_environment(self, dataframe: DataFrame, timeframe: str) -> None:
+        """
+        Prepare the environment for fractal analysis.
+        
+        Args:
+            dataframe: DataFrame to prepare
+            timeframe: Current timeframe being analyzed
+        """
         # Clear stored trendlines for this timeframe
         timeframe_storage_attr = f"stored_trendlines_{timeframe}"
         if hasattr(self, timeframe_storage_attr):
             getattr(self, timeframe_storage_attr).clear()
         
+        # Initialize dataframe columns and detect swing points
         self._initialize_dataframe_columns(dataframe)
         self.swing_detector.find_and_map_swing_points(dataframe)
 
-        # Define the analysis types to process
-        analysis_types = [
-            {'type': 'resistance', 'start_time': parent_resistance_time},
-            {'type': 'support', 'start_time': parent_support_time}
+    def _create_analysis_configurations(self, parent_resistance_time: Optional[pd.Timestamp], 
+                                     parent_support_time: Optional[pd.Timestamp]) -> List[Dict]:
+        """
+        Create analysis configurations for resistance and support analysis.
+        
+        Args:
+            parent_resistance_time: Parent timeframe resistance time
+            parent_support_time: Parent timeframe support time
+            
+        Returns:
+            List[Dict]: List of analysis configurations
+        """
+        return [
+            {
+                'type': 'resistance', 
+                'start_time': parent_resistance_time,
+                'column_suffix': 'resistance'
+            },
+            {
+                'type': 'support', 
+                'start_time': parent_support_time,
+                'column_suffix': 'support'
+            }
         ]
 
-        for analysis in analysis_types:
-            analysis_type = analysis['type']
-            start_time = analysis['start_time']
-
-            if start_time is not None:
-                # Découper le dataframe à partir de start_time si fourni
-                mask = dataframe['date'] > start_time
-                filtered_df = dataframe[mask].copy()
-                print(f"Découpage du dataframe {timeframe} à partir de start_time: {start_time}, {len(filtered_df)} candles conservés.")
-                
-                print(f"Generating forward trendline for {analysis_type} from {start_time}")
-                
-                # Generate forward trendline using the new function
-                trendline = generate_forward_trendline(
-                    dataframe=dataframe,
-                    start_time=start_time,
-                    trendline_type=analysis_type,
-                    mc_recalc_interval_minutes=self.mc_recalc_interval_minutes.value,
-                    trendline_proximity_threshold=0.1
+    def _execute_single_analysis_type(self, dataframe: DataFrame, metadata: dict, 
+                                    timeframe: str, timeframe_start_date: Optional[pd.Timestamp],
+                                    analysis_config: Dict) -> None:
+        """
+        Execute analysis for a single type (resistance or support).
+        
+        Args:
+            dataframe: DataFrame to analyze
+            metadata: Strategy metadata
+            timeframe: Current timeframe
+            timeframe_start_date: Start date of the timeframe
+            analysis_config: Analysis configuration dictionary
+        """
+        analysis_type = analysis_config['type']
+        start_time = analysis_config['start_time']
+        column_suffix = analysis_config['column_suffix']
+        
+        print(f"Processing {analysis_type} analysis for {timeframe}")
+        
+        if start_time is not None:
+            self._execute_timed_analysis(
+                dataframe, metadata, timeframe, timeframe_start_date, 
+                analysis_type, start_time, column_suffix
+            )
+        else:
+            print(f"Executing Monte Carlo optimization for {analysis_type} (no start_time provided)")
+            
+            if optimization_results := monte_carlo_period_optimization(
+                dataframe, metadata['pair'],
+                mc_iterations=self.MC_ITERATIONS,
+                trendline_proximity_threshold=0.1
+            ):
+                self._process_monte_carlo_results(
+                    dataframe, timeframe, analysis_type, column_suffix, optimization_results
                 )
 
-                # Store the trendline with metadata
-                if trendline:
-                    trendline.source_timeframe = timeframe
-                    getattr(self, timeframe_storage_attr).append(trendline)
-                    latest_bounce = self.extract_latest_bounce_timestamp(trendline)
-                    
-                    if analysis_type == 'resistance':
-                        dataframe[f'latest_bounce_resistance'] = latest_bounce
-                    elif analysis_type == 'support':
-                        dataframe[f'latest_bounce_support'] = latest_bounce
-                        
-                    print(f"Generated {analysis_type} trendline: {trendline}")
-                else:
-                    print(f"No valid {analysis_type} trendline generated from {start_time}")
+
+    def _execute_timed_analysis(self, dataframe: DataFrame, metadata: dict, 
+                               timeframe: str, timeframe_start_date: Optional[pd.Timestamp],
+                               analysis_type: str, start_time: pd.Timestamp, 
+                               column_suffix: str) -> None:
+        """
+        Execute analysis with a specific start time.
+        
+        Args:
+            dataframe: DataFrame to analyze
+            metadata: Strategy metadata
+            timeframe: Current timeframe
+            timeframe_start_date: Start date of the timeframe
+            analysis_type: Type of analysis ('resistance' or 'support')
+            start_time: Start time for analysis
+            column_suffix: Suffix for dataframe column names
+        """
+        if self._should_use_higher_timeframe(timeframe_start_date, start_time):
+            self._execute_higher_timeframe_analysis(
+                dataframe, metadata, timeframe, analysis_type, start_time, column_suffix
+            )
+        else:
+            self._execute_current_timeframe_analysis(
+                dataframe, metadata, timeframe, analysis_type, start_time, column_suffix
+            )
+
+    def _should_use_higher_timeframe(self, timeframe_start_date: Optional[pd.Timestamp], 
+                                    start_time: pd.Timestamp) -> bool:
+        """
+        Determine if analysis should use higher timeframe data.
+        
+        Args:
+            timeframe_start_date: Start date of current timeframe
+            start_time: Analysis start time
+            
+        Returns:
+            bool: True if higher timeframe should be used
+        """
+        return timeframe_start_date is not None and start_time < timeframe_start_date
+
+    def _execute_higher_timeframe_analysis(self, dataframe: DataFrame, metadata: dict,
+                                         timeframe: str, analysis_type: str, 
+                                         start_time: pd.Timestamp, column_suffix: str) -> None:
+        """
+        Execute analysis using higher timeframe data.
+        
+        Args:
+            dataframe: DataFrame to analyze
+            metadata: Strategy metadata
+            timeframe: Current timeframe
+            analysis_type: Type of analysis
+            start_time: Start time for analysis
+            column_suffix: Suffix for dataframe column names
+        """
+        print(f"start_time {start_time} < timeframe_{timeframe}_start_date {self._get_timeframe_start_date(timeframe)}")
+        print(f"Calculating {analysis_type} trendline in higher timeframe")
+        
+        trendline = self._calculate_trendline_in_higher_timeframe(
+            metadata['pair'], timeframe, start_time, analysis_type
+        )
+        
+        if trendline:
+            # Get the parent timeframe since the trendline was calculated in the parent timeframe
+            parent_timeframe = self._get_parent_timeframe(timeframe)
+            if parent_timeframe:
+                # Store the trendline in the parent timeframe storage since it was calculated there
+                self._store_trendline_and_update_dataframe(
+                    dataframe, parent_timeframe, trendline, column_suffix
+                )
+                print(f"Generated {analysis_type} trendline from higher timeframe: {trendline}")
             else:
-                # Use Monte Carlo optimization when no start_time is provided
-                print(f"Executing Monte Carlo optimization for {analysis_type} (no start_time provided)")
-                
-                optimization_results = monte_carlo_period_optimization(
-                    dataframe, metadata['pair'],
-                    self.mc_recalc_interval_minutes.value,
-                    self.MC_ITERATIONS,
-                    trendline_proximity_threshold=0.1
-                )
+                print(f"Failed to get parent timeframe for {timeframe}")
+        else:
+            print(f"Failed to generate {analysis_type} trendline from higher timeframe")
 
-                # Store the trendlines with metadata
-                if optimization_results:
-                    if analysis_type == 'resistance':
-                        resistance_trendline = optimization_results.get('best_resistance_trendline')
-                        
-                        if resistance_trendline:
-                            resistance_trendline.source_timeframe = timeframe
-                            getattr(self, timeframe_storage_attr).append(resistance_trendline)
-                            latest_bounce = self.extract_latest_bounce_timestamp(resistance_trendline)
-                            dataframe[f'latest_bounce_resistance'] = latest_bounce
-                            
-                    elif analysis_type == 'support':
-                        support_trendline = optimization_results.get('best_support_trendline')
+    def _execute_current_timeframe_analysis(self, dataframe: DataFrame, metadata: dict,
+                                         timeframe: str, analysis_type: str, 
+                                         start_time: pd.Timestamp, column_suffix: str) -> None:
+        """
+        Execute analysis using current timeframe data.
+        
+        Args:
+            dataframe: DataFrame to analyze
+            metadata: Strategy metadata
+            timeframe: Current timeframe
+            analysis_type: Type of analysis
+            start_time: Start time for analysis
+            column_suffix: Suffix for dataframe column names
+        """
+        # Filter dataframe to data after start_time
+        filtered_dataframe = self._filter_dataframe_by_start_time(dataframe, start_time)
+        print(f"Filtered dataframe {timeframe} from start_time: {start_time}, {len(filtered_dataframe)} candles retained.")
+        
+        print(f"Generating forward trendline for {analysis_type} from {start_time}")
+        
+        trendline = generate_forward_trendline(
+            dataframe=dataframe,
+            start_time=start_time,
+            trendline_type=analysis_type,
+            mc_recalc_interval_minutes=self.mc_recalc_interval_minutes.value,
+            trendline_proximity_threshold=self._get_trendline_proximity_threshold()
+        )
 
-                        if support_trendline:
-                            support_trendline.source_timeframe = timeframe
-                            getattr(self, timeframe_storage_attr).append(support_trendline)
-                            latest_bounce = self.extract_latest_bounce_timestamp(support_trendline)
-                            dataframe[f'latest_bounce_support'] = latest_bounce
-                
-        return dataframe
+        if trendline:
+            self._store_trendline_and_update_dataframe(
+                dataframe, timeframe, trendline, column_suffix
+            )
+            print(f"Generated {analysis_type} trendline: {trendline}")
+        else:
+            print(f"No valid {analysis_type} trendline generated from {start_time}")
+
+    def _filter_dataframe_by_start_time(self, dataframe: DataFrame, start_time: pd.Timestamp) -> DataFrame:
+        """
+        Filter dataframe to include only data after the start time.
+        
+        Args:
+            dataframe: DataFrame to filter
+            start_time: Start time for filtering
+            
+        Returns:
+            DataFrame: Filtered dataframe
+        """
+        mask = dataframe['date'] > start_time
+        return dataframe[mask].copy()
+
+
+    def _process_monte_carlo_results(self, dataframe: DataFrame, timeframe: str,
+                                   analysis_type: str, column_suffix: str, 
+                                   optimization_results: Dict) -> None:
+        """
+        Process Monte Carlo optimization results.
+        
+        Args:
+            dataframe: DataFrame to update
+            timeframe: Current timeframe
+            analysis_type: Type of analysis
+            column_suffix: Suffix for dataframe column names
+            optimization_results: Results from Monte Carlo optimization
+        """
+        trendline_key = f'best_{analysis_type}_trendline'
+        trendline = optimization_results.get(trendline_key)
+        
+        if trendline:
+            self._store_trendline_and_update_dataframe(
+                dataframe, timeframe, trendline, column_suffix
+            )
+
+    def _store_trendline_and_update_dataframe(self, dataframe: DataFrame, timeframe: str,
+                                            trendline: Trendline, column_suffix: str) -> None:
+        """
+        Store trendline and update dataframe with latest bounce information.
+        
+        Args:
+            dataframe: DataFrame to update
+            timeframe: Current timeframe
+            trendline: Trendline object to store
+            column_suffix: Suffix for dataframe column names
+        """
+        # Store trendline in appropriate timeframe storage
+        timeframe_storage_attr = f"stored_trendlines_{timeframe}"
+        if hasattr(self, timeframe_storage_attr):
+            trendline.source_timeframe = timeframe
+            getattr(self, timeframe_storage_attr).append(trendline)
+        
+        # Update dataframe with latest bounce timestamp
+        latest_bounce = self.extract_latest_bounce_timestamp(trendline)
+        dataframe[f'latest_bounce_{column_suffix}'] = latest_bounce
+
+    def _get_trendline_proximity_threshold(self) -> float:
+        """
+        Get the trendline proximity threshold for forward trendline generation.
+        
+        Returns:
+            float: Proximity threshold value
+        """
+        return 0.005  # 0.5% default threshold
 
     def _get_and_analyze_timeframe_data(self, pair: str, timeframe: str, 
                                       parent_resistance_time: Optional[pd.Timestamp],
                                       parent_support_time: Optional[pd.Timestamp],
                                       dataframe: DataFrame) -> DataFrame:
         """
-        Get and analyze data for a specific timeframe.
+        Orchestrate the complete timeframe analysis process.
+        
+        This method coordinates the workflow:
+        1. Retrieve timeframe data
+        2. Execute fractal analysis
+        3. Merge results back to main dataframe
         
         Args:
             pair: Trading pair
@@ -594,21 +888,35 @@ class RiskMetrics(IStrategy):
         if not self.dp:
             return dataframe
             
-        # Get the informative pair data
-        informative = self.dp.get_pair_dataframe(pair=pair, timeframe=timeframe)
+        # Step 1: Retrieve timeframe data
+        informative_dataframe = self.dp.get_pair_dataframe(pair=pair, timeframe=timeframe)
+        self._set_timeframe_start_date(timeframe, informative_dataframe)
         
-        # Execute fractal analysis
-        informative = self._execute_fractal_analysis(
-            informative, {'pair': pair}, timeframe,
+        # Step 2: Execute fractal analysis
+        analyzed_dataframe = self._execute_fractal_analysis(
+            informative_dataframe, {'pair': pair}, timeframe,
             parent_resistance_time, parent_support_time
         )
         
-        # Merge informative pair with original dataframe
-        dataframe = merge_informative_pair(
-            dataframe, informative, self.timeframe, timeframe, ffill=True
+        # Step 3: Merge results back to main dataframe
+        merged_dataframe = merge_informative_pair(
+            dataframe, analyzed_dataframe, self.timeframe, timeframe, ffill=True
         )
         
-        return dataframe
+        return merged_dataframe
+
+    def _set_timeframe_start_date(self, timeframe: str, dataframe: DataFrame) -> None:
+        """
+        Set the start date for a specific timeframe.
+        
+        Args:
+            timeframe: Timeframe identifier
+            dataframe: Dataframe containing the timeframe data
+        """
+        start_date_attr = f"timeframe_{timeframe}_start_date"
+        start_date = dataframe['date'].iloc[0]
+        setattr(self, start_date_attr, start_date)
+        print(f"Date de la première ligne du dataframe {timeframe}: {start_date}")
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
@@ -628,7 +936,8 @@ class RiskMetrics(IStrategy):
         timeframes_to_analyze = [
             {'timeframe': '1w', 'parent_resistance': None, 'parent_support': None},
             {'timeframe': '1d', 'parent_resistance': 'latest_bounce_resistance_1w', 'parent_support': 'latest_bounce_support_1w'},
-            {'timeframe': '1h', 'parent_resistance': 'latest_bounce_resistance_1d', 'parent_support': 'latest_bounce_support_1d'}
+            {'timeframe': '4h', 'parent_resistance': 'latest_bounce_resistance_1d', 'parent_support': 'latest_bounce_support_1d'},
+            {'timeframe': '1h', 'parent_resistance': 'latest_bounce_resistance_4h', 'parent_support': 'latest_bounce_support_4h'}
         ]
         
         # Analyze each timeframe in sequence
@@ -718,6 +1027,7 @@ class RiskMetrics(IStrategy):
         # === Output All Stored Trendlines ===
         output_trendlines_info(self.stored_trendlines_1w)
         output_trendlines_info(self.stored_trendlines_1d)
+        output_trendlines_info(self.stored_trendlines_4h)
         output_trendlines_info(self.stored_trendlines_1h)
         
         # Print latest bounce timestamps for each timeframe
@@ -935,23 +1245,23 @@ class RiskMetrics(IStrategy):
         """
         print("=== Using Original Monte Carlo Optimization (with potential lookahead bias) ===")
 
-        # Execute Monte Carlo optimization directly using the optimizer
+        # Execute Monte Carlo optimization (returns both resistance and support results)
         optimization_results = monte_carlo_period_optimization(
-            dataframe, metadata['pair'], self.mc_recalc_interval_minutes.value,
-            self.MC_ITERATIONS, self.trendline_proximity_threshold.value
+            dataframe, metadata['pair'],
+            mc_iterations=self.MC_ITERATIONS,
+            trendline_proximity_threshold=self.trendline_proximity_threshold.value
         )
         
-        # Extract trendline objects directly from results
         if optimization_results:
-            resistance_trendline = optimization_results.get('best_resistance_trendline')
-            support_trendline = optimization_results.get('best_support_trendline')
-                        
-            # Store the best trendline objects returned by Monte Carlo optimization
-            if resistance_trendline:
-                self.stored_trendlines.append(resistance_trendline)
+            # Process resistance results
+            self._process_monte_carlo_results(
+                dataframe, self.timeframe, 'resistance', 'resistance', optimization_results
+            )
             
-            if support_trendline:
-                self.stored_trendlines.append(support_trendline)
+            # Process support results  
+            self._process_monte_carlo_results(
+                dataframe, self.timeframe, 'support', 'support', optimization_results
+            )
         else:
             print(f"Monte Carlo results not yet available for {metadata['pair']}.")
 
