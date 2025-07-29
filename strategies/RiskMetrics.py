@@ -365,7 +365,7 @@ class RiskMetrics(IStrategy):
         },
         '1d': {
             'distance': 5,      # Minimum distance between swing points (5 candles)
-            'prominence': 0.05, # 5% prominence for 1d timeframe
+            'prominence': 0.04, # 4% prominence for 1d timeframe
             'wlen': None,
             'width': None
         },
@@ -380,10 +380,10 @@ class RiskMetrics(IStrategy):
     # Trendline proximity thresholds for each timeframe
     TRENDLINE_PROXIMITY_THRESHOLDS = {
         '5m': 0.001,   # 0.1% proximity threshold for 5m timeframe (tight)
-        '1h': 0.008,   # 0.8% proximity threshold for 1h timeframe
+        '1h': 0.004,   # 0.4% proximity threshold for 1h timeframe
         '4h': 0.012,   # 1.2% proximity threshold for 4h timeframe
-        '1d': 0.015,   # 1.5% proximity threshold for 1d timeframe
-        '1w': 0.20,   # 20.0% proximity threshold for 1w timeframe (loose)
+        '1d': 0.075,   # 7.5% proximity threshold for 1d timeframe
+        '1w': 0.20,    # 20.0% proximity threshold for 1w timeframe (loose)
     }
 
     @property
