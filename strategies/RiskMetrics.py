@@ -297,7 +297,7 @@ class RiskMetrics(IStrategy):
     enable_mc_optimization = BooleanParameter(default=True, space="buy", optimize=False)
     
     # === Periodic Monte Carlo Parameters ===
-    mc_recalc_interval_minutes = IntParameter(60, 480, default=120, space="buy", optimize=False)
+    mc_recalc_interval_minutes = IntParameter(60, 480, default=240, space="buy", optimize=False)
     mc_lookback_window_candles = IntParameter(1000, 3000, default=2000, space="buy", optimize=False)
     
     # Rolling Monte Carlo optimization (eliminates lookahead bias)
@@ -305,6 +305,10 @@ class RiskMetrics(IStrategy):
 
     # RSI parameters
     rsi_timeperiod = IntParameter(10, 30, default=14, space="buy", optimize=True)
+    
+    # === RSI Trendline Parameters ===
+    enable_rsi_trendlines = BooleanParameter(default=True, space="buy", optimize=False)
+    rsi_trendline_proximity_threshold = DecimalParameter(0.5, 5.0, default=2.0, space="buy", optimize=True)
 
     # Minimal ROI designed for the strategy.
     minimal_roi = {
@@ -401,11 +405,17 @@ class RiskMetrics(IStrategy):
             },
             "subplots": {
                 "RSI": {
-                    "rsi": {"color": "purple", "type": "line", "width": 2.0}
+                    "rsi": {"color": "purple", "type": "line", "width": 2.0},
+                    "all_highs_rsi": {"color": "red", "type": "scatter", "symbol": "triangle-down", "size": 8, "fillcolor": "red"},
+                    "all_lows_rsi": {"color": "green", "type": "scatter", "symbol": "triangle-up", "size": 8, "fillcolor": "green"},
+                    "RSI_Optimal_Resistance": {"color": "orange", "width": 3.0, "dash": "dash"},
+                    "RSI_Optimal_Support": {"color": "lightblue", "width": 3.0, "dash": "dash"}
                 },
                 "Monte Carlo Optimization": {
                     "MC_Resistance_Score": {"color": "darkred", "type": "line", "width": 3.0},
                     "MC_Support_Score": {"color": "darkgreen", "type": "line", "width": 3.0},
+                    "RSI_Resistance_Score": {"color": "orange", "type": "line", "width": 2.0},
+                    "RSI_Support_Score": {"color": "lightblue", "type": "line", "width": 2.0},
                 }
             }
         }
@@ -435,6 +445,9 @@ class RiskMetrics(IStrategy):
         # Initialize trendline storage for all iterations
         self.stored_trendlines = []  # List to store all Trendline objects from each Monte Carlo iteration
         
+        # Initialize RSI trendline storage
+        self.stored_rsi_trendlines = []  # List to store RSI-specific Trendline objects
+        
         # Initialize trendline storage for each timeframe
         self.stored_trendlines_5m = []
         self.stored_trendlines_1h = []
@@ -446,6 +459,7 @@ class RiskMetrics(IStrategy):
         # Initialize heartbeat tracking for live trading mode
         self.last_recalculation_time = None  # Track when we last recalculated
         self.backtest_executed = False  # Track if Monte Carlo has been executed at least once
+        self.rsi_backtest_executed = False  # Track if RSI Monte Carlo has been executed at least once
         
         print(f"RiskMetrics strategy initialized with Monte Carlo architecture:")
         print(f"  Lookback periods: Fixed periods for Monte Carlo optimization")
@@ -453,6 +467,7 @@ class RiskMetrics(IStrategy):
         print(f"  Signal generator: Initialized for modular signal generation")
         print(f"  Monte Carlo functions: Using standalone functions from trendline.py")
         print(f"  Rolling Monte Carlo optimization: {'ENABLED' if self.enable_rolling_mc_optimization.value else 'DISABLED'}")
+        print(f"  RSI Trendlines: {'ENABLED' if self.enable_rsi_trendlines.value else 'DISABLED'}")
         print(f"  Swing Point Detector: Initialized for swing point detection")
         if self.enable_rolling_mc_optimization.value:
             print(f"    - Eliminates lookahead bias for realistic backtesting")
@@ -696,6 +711,250 @@ class RiskMetrics(IStrategy):
         setattr(self, start_date_attr, start_date)
         print(f"Date de la première ligne du dataframe {timeframe}: {start_date}")
 
+    def _create_rsi_dataframe_for_trendlines(self, dataframe: DataFrame) -> DataFrame:
+        """
+        Create a dataframe suitable for RSI trendline analysis.
+        Maps RSI swing points to OHLCV format for trendline analysis.
+        
+        Args:
+            dataframe: Original dataframe with RSI data and swing points
+            
+        Returns:
+            DataFrame: RSI dataframe with swing points mapped to OHLCV format
+        """
+        if 'rsi' not in dataframe.columns:
+            return None
+            
+        # Create RSI dataframe with OHLCV format using RSI values
+        rsi_df = dataframe[['date', 'rsi']].copy()
+        rsi_df.rename(columns={'rsi': 'close'}, inplace=True)
+        
+        # For RSI trendlines, we use RSI value as all OHLCV components
+        rsi_df['open'] = rsi_df['close']
+        rsi_df['high'] = rsi_df['close']
+        rsi_df['low'] = rsi_df['close']
+        rsi_df['volume'] = 1.0  # Dummy volume
+        
+        # Map RSI swing points to highs/lows columns
+        rsi_df['all_highs'] = dataframe.get('all_highs_rsi', np.nan)
+        rsi_df['all_lows'] = dataframe.get('all_lows_rsi', np.nan)
+        
+        return rsi_df
+
+    def _execute_rolling_rsi_monte_carlo_recalculation(self, dataframe: DataFrame, i: int, metadata: dict) -> Optional[Tuple[Trendline, Trendline]]:
+        """
+        Execute RSI Monte Carlo recalculation for a specific candle index.
+        
+        Args:
+            dataframe: The full dataframe
+            i: Current candle index
+            metadata: Strategy metadata
+            
+        Returns:
+            Tuple of (best_resistance_trendline, best_support_trendline) or None if failed
+        """
+        # Create RSI dataframe for trendline analysis
+        rsi_dataframe = self._create_rsi_dataframe_for_trendlines(dataframe)
+        if rsi_dataframe is None:
+            return None
+        
+        # Define the lookback window for the current candle (point-in-time data only)
+        lookback_start = max(0, i - self.mc_lookback_window_candles.value)
+        current_rsi_slice = rsi_dataframe.iloc[lookback_start:i].copy()
+
+        print(f"  RSI analysis using data slice: {lookback_start} to {i} ({len(current_rsi_slice)} candles)")
+        
+        # Execute Monte Carlo optimization on RSI data
+        optimization_results = monte_carlo_period_optimization(
+            current_rsi_slice, f"{metadata['pair']}_RSI", self.mc_recalc_interval_minutes.value,
+            self.MC_ITERATIONS, self.rsi_trendline_proximity_threshold.value
+        )
+        
+        # Extract trendline objects directly
+        best_resistance_trendline = optimization_results.get('best_resistance_trendline')
+        best_support_trendline = optimization_results.get('best_support_trendline')
+        
+        # Mark trendlines as RSI-specific
+        if best_resistance_trendline:
+            best_resistance_trendline.trendline_type = 'rsi_resistance'
+        if best_support_trendline:
+            best_support_trendline.trendline_type = 'rsi_support'
+        
+        return (best_resistance_trendline, best_support_trendline) if (best_resistance_trendline or best_support_trendline) else None
+
+    def _execute_rolling_rsi_monte_carlo_optimization(self, dataframe: DataFrame, metadata: dict) -> None:
+        """
+        Execute rolling Monte Carlo optimization for RSI trendlines to eliminate lookahead bias.
+        
+        Args:
+            dataframe: The dataframe to process
+            metadata: Strategy metadata containing pair information
+        """
+        print("=== EXECUTING RSI Rolling Monte Carlo Optimization ===")
+        
+        # Initialize optimization parameters
+        recalc_interval_candles = self.mc_recalc_interval_minutes.value // timeframe_to_minutes(self.timeframe)
+        min_required_candles = max(self.MIN_LOOKBACK_PERIOD, 100)
+        
+        # Initialize variables used in the loop
+        rsi_resistance_trendline = None
+        rsi_support_trendline = None
+
+        # Main rolling optimization loop for RSI
+        for i in range(min_required_candles, len(dataframe)):
+            current_time = dataframe['date'].iloc[i]
+            should_recalculate = self._should_recalculate_at_candle(i, min_required_candles, recalc_interval_candles)
+
+            if should_recalculate:
+                print(f"RSI Monte Carlo recalculation at index {i} (time: {current_time})")
+                
+                trendline_results = self._execute_rolling_rsi_monte_carlo_recalculation(dataframe, i, metadata)
+                
+                if trendline_results:
+                    rsi_resistance_trendline, rsi_support_trendline = trendline_results
+                    
+                    # Store RSI trendline objects from this iteration
+                    if rsi_resistance_trendline:
+                        self.stored_rsi_trendlines.append(rsi_resistance_trendline)
+                    
+                    if rsi_support_trendline:
+                        self.stored_rsi_trendlines.append(rsi_support_trendline)
+
+            # Project RSI trendlines forward using slopes
+            self._project_rsi_trendlines_forward(
+                dataframe, i, rsi_resistance_trendline, rsi_support_trendline
+            )
+
+    def _project_rsi_trendlines_forward(self, dataframe: DataFrame, current_index: int, 
+                                      rsi_resistance_trendline: Optional[Trendline], 
+                                      rsi_support_trendline: Optional[Trendline]) -> None:
+        """
+        Project RSI trendlines forward and update dataframe columns.
+        
+        Args:
+            dataframe: DataFrame to update
+            current_index: Current candle index
+            rsi_resistance_trendline: Current RSI resistance trendline
+            rsi_support_trendline: Current RSI support trendline
+        """
+        current_time = dataframe['date'].iloc[current_index]
+        
+        # Project RSI resistance trendline
+        if rsi_resistance_trendline:
+            projected_resistance = rsi_resistance_trendline.get_price_at_time(
+                current_time, timeframe_to_minutes(self.timeframe)
+            )
+            if projected_resistance is not None:
+                dataframe.iloc[current_index, dataframe.columns.get_loc('RSI_Optimal_Resistance')] = projected_resistance
+                dataframe.iloc[current_index, dataframe.columns.get_loc('RSI_Resistance_Score')] = float(rsi_resistance_trendline.bounce_count)
+        
+        # Project RSI support trendline
+        if rsi_support_trendline:
+            projected_support = rsi_support_trendline.get_price_at_time(
+                current_time, timeframe_to_minutes(self.timeframe)
+            )
+            if projected_support is not None:
+                dataframe.iloc[current_index, dataframe.columns.get_loc('RSI_Optimal_Support')] = projected_support
+                dataframe.iloc[current_index, dataframe.columns.get_loc('RSI_Support_Score')] = float(rsi_support_trendline.bounce_count)
+
+    def _execute_non_rolling_rsi_monte_carlo_optimization(self, dataframe: DataFrame, metadata: dict) -> None:
+        """
+        Execute non-rolling RSI Monte Carlo optimization (original method with potential lookahead bias).
+        
+        Args:
+            dataframe: The dataframe to process
+            metadata: Strategy metadata containing pair information
+        """
+        print("=== Using Original RSI Monte Carlo Optimization (with potential lookahead bias) ===")
+
+        # Create RSI dataframe for trendline analysis
+        rsi_dataframe = self._create_rsi_dataframe_for_trendlines(dataframe)
+        if rsi_dataframe is None:
+            print("No RSI data available for trendline analysis")
+            return
+
+        # Execute Monte Carlo optimization on RSI data
+        optimization_results = monte_carlo_period_optimization(
+            rsi_dataframe, f"{metadata['pair']}_RSI",
+            mc_iterations=self.MC_ITERATIONS,
+            trendline_proximity_threshold=self.rsi_trendline_proximity_threshold.value
+        )
+        
+        if optimization_results:
+            # Process RSI resistance results
+            rsi_resistance_trendline = optimization_results.get('best_resistance_trendline')
+            if rsi_resistance_trendline:
+                rsi_resistance_trendline.trendline_type = 'rsi_resistance'
+                self.stored_rsi_trendlines.append(rsi_resistance_trendline)
+                self._apply_rsi_trendline_to_dataframe(dataframe, rsi_resistance_trendline, 'resistance')
+            
+            # Process RSI support results  
+            rsi_support_trendline = optimization_results.get('best_support_trendline')
+            if rsi_support_trendline:
+                rsi_support_trendline.trendline_type = 'rsi_support'
+                self.stored_rsi_trendlines.append(rsi_support_trendline)
+                self._apply_rsi_trendline_to_dataframe(dataframe, rsi_support_trendline, 'support')
+                
+            print(f"RSI Monte Carlo optimization completed for {metadata['pair']}")
+        else:
+            print(f"RSI Monte Carlo results not yet available for {metadata['pair']}.")
+
+    def _apply_rsi_trendline_to_dataframe(self, dataframe: DataFrame, trendline: Trendline, trendline_type: str) -> None:
+        """
+        Apply a single RSI trendline to the dataframe by calculating its price at each timestamp.
+        
+        Args:
+            dataframe: DataFrame to populate
+            trendline: Trendline object to apply
+            trendline_type: Either 'resistance' or 'support'
+        """
+        # Create boolean mask for active timestamps (vectorized)
+        active_mask = dataframe['date'].apply(lambda ts: trendline.is_active_at_time(ts))
+
+        # Calculate prices for all active timestamps at once (vectorized)
+        active_timestamps = dataframe.loc[active_mask, 'date']
+        prices = active_timestamps.apply(lambda ts: trendline.get_price_at_time(ts, timeframe_to_minutes(self.timeframe)))
+        
+        # Apply to appropriate RSI columns using vectorized assignment
+        if trendline_type == 'resistance':
+            dataframe.loc[active_mask, 'RSI_Optimal_Resistance'] = prices
+            dataframe.loc[active_mask, 'RSI_Resistance_Score'] = float(trendline.bounce_count)
+        elif trendline_type == 'support':
+            dataframe.loc[active_mask, 'RSI_Optimal_Support'] = prices
+            dataframe.loc[active_mask, 'RSI_Support_Score'] = float(trendline.bounce_count)
+
+    def _populate_rsi_from_existing_trendlines(self, dataframe: DataFrame, metadata: dict) -> bool:
+        """
+        Draw every stored RSI trendline during their exact start/end time periods.
+        
+        Args:
+            dataframe: DataFrame to populate with existing RSI trendline data
+            metadata: Strategy metadata containing pair information
+            
+        Returns:
+            bool: True if any RSI trendlines were drawn, False otherwise
+        """
+        if not self.stored_rsi_trendlines:
+            return False
+        
+        pair = metadata.get('pair', 'UNKNOWN')
+        print(f"Drawing {len(self.stored_rsi_trendlines)} stored RSI trendlines for {pair}")
+                
+        # Use vectorized operations instead of nested loops
+        for trendline in self.stored_rsi_trendlines:
+            # Create boolean mask for active timestamps (vectorized)
+            active_mask = dataframe['date'].apply(lambda ts: trendline.is_active_at_time(ts))
+            
+            if not active_mask.any():
+                continue  # Skip if no active timestamps
+
+            if trendline.trendline_type == 'rsi_resistance':
+                self._apply_rsi_trendline_to_dataframe(dataframe, trendline, 'resistance')
+            elif trendline.trendline_type == 'rsi_support':
+                self._apply_rsi_trendline_to_dataframe(dataframe, trendline, 'support')
+
+        return True
+
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
         Adds several different TA indicators to the given DataFrame.
@@ -730,25 +989,36 @@ class RiskMetrics(IStrategy):
             not self.backtest_executed  # Monte Carlo has never been executed
         )
         
+        # RSI backtest detection
+        is_rsi_backtest_mode = (
+            len(self.stored_rsi_trendlines) == 0 or  # No RSI trendlines stored yet (first run)
+            not self.rsi_backtest_executed  # RSI Monte Carlo has never been executed
+        )
+        
         latest_candle_time = dataframe['date'].iloc[-1]
 
         print(f"=== MODE DETECTION ===")
         print(f"Latest candle: {latest_candle_time}")
         print(f"Dataframe length: {len(dataframe)} candles")
         print(f"Stored trendlines: {len(self.stored_trendlines)}")
+        print(f"Stored RSI trendlines: {len(self.stored_rsi_trendlines)}")
         print(f"Monte Carlo executed: {self.backtest_executed}")
-        print(f"Backtest criteria:")
-        print(f"  - No stored trendlines: {len(self.stored_trendlines) == 0}")
-        print(f"  - Monte Carlo never executed: {not self.backtest_executed}")
-        print(f"Mode: {'BACKTEST (Rolling Monte Carlo)' if is_backtest_mode else 'LIVE TRADING (Heartbeat-based)'}")
+        print(f"RSI Monte Carlo executed: {self.rsi_backtest_executed}")
+        print(f"Price trendlines mode: {'BACKTEST' if is_backtest_mode else 'LIVE TRADING'}")
+        print(f"RSI trendlines mode: {'BACKTEST' if is_rsi_backtest_mode else 'LIVE TRADING'}")
         
         # Clear stored trendlines from previous runs only in backtest mode
         if is_backtest_mode:
             self.stored_trendlines.clear()
-            print(f"Cleared previous trendline storage for backtest analysis of {metadata.get('pair', 'UNKNOWN')}")
+            print(f"Cleared previous price trendline storage for backtest analysis of {metadata.get('pair', 'UNKNOWN')}")
         else:
-            print(f"Keeping existing trendlines for live trading of {metadata.get('pair', 'UNKNOWN')} ({len(self.stored_trendlines)} stored)")
+            print(f"Keeping existing price trendlines for live trading of {metadata.get('pair', 'UNKNOWN')} ({len(self.stored_trendlines)} stored)")
             
+        if is_rsi_backtest_mode:
+            self.stored_rsi_trendlines.clear()
+            print(f"Cleared previous RSI trendline storage for backtest analysis of {metadata.get('pair', 'UNKNOWN')}")
+        else:
+            print(f"Keeping existing RSI trendlines for live trading of {metadata.get('pair', 'UNKNOWN')} ({len(self.stored_rsi_trendlines)} stored)")
 
         # Initialize all required dataframe columns
         self._initialize_dataframe_columns(dataframe)
@@ -756,13 +1026,17 @@ class RiskMetrics(IStrategy):
         # Calculate RSI
         dataframe['rsi'] = ta.RSI(dataframe, timeperiod=self.rsi_timeperiod.value)
 
+        # Find and map RSI swing points
+        self._find_rsi_swing_points(dataframe)
+
         # Find and map swing points using SwingPointDetector for the main timeframe (5m)
         main_detector = self.swing_detectors.get(self.timeframe)
         main_detector.find_and_map_swing_points(dataframe)
         
+        # === PRICE TRENDLINES PROCESSING ===
         if not self.backtest_executed:
             # === BACKTEST MODE: Rolling Monte Carlo ===
-            print("=== EXECUTING BACKTEST MODE ===")
+            print("=== EXECUTING PRICE TRENDLINES BACKTEST MODE ===")
             
             # In backtest mode, always run Monte Carlo optimization since we cleared stored trendlines
             # Execute rolling Monte Carlo optimization for backtest
@@ -777,7 +1051,7 @@ class RiskMetrics(IStrategy):
             self.backtest_executed = True
         else:
             # === LIVE TRADING MODE: Heartbeat-based Monte Carlo ===
-            print("=== EXECUTING LIVE TRADING MODE ===")
+            print("=== EXECUTING PRICE TRENDLINES LIVE TRADING MODE ===")
             
             self._populate_from_existing_trendlines(dataframe, metadata)
 
@@ -788,6 +1062,30 @@ class RiskMetrics(IStrategy):
                 # Update last recalculation time
                 self._update_last_recalculation_time(latest_candle_time)
 
+        # === RSI TRENDLINES PROCESSING ===
+        if self.enable_rsi_trendlines.value:
+            if not self.rsi_backtest_executed:
+                # === RSI BACKTEST MODE: Rolling Monte Carlo ===
+                print("=== EXECUTING RSI TRENDLINES BACKTEST MODE ===")
+                
+                # In backtest mode, always run RSI Monte Carlo optimization since we cleared stored RSI trendlines
+                if self.enable_rolling_mc_optimization.value:
+                    self._execute_rolling_rsi_monte_carlo_optimization(dataframe, metadata)
+                else:
+                    self._execute_non_rolling_rsi_monte_carlo_optimization(dataframe, metadata)
+
+                # Mark that RSI Monte Carlo has been executed
+                self.rsi_backtest_executed = True
+            else:
+                # === RSI LIVE TRADING MODE: Heartbeat-based Monte Carlo ===
+                print("=== EXECUTING RSI TRENDLINES LIVE TRADING MODE ===")
+                
+                self._populate_rsi_from_existing_trendlines(dataframe, metadata)
+
+                # Check if we need to recalculate RSI trendlines based on time interval            
+                if self._should_recalculate_for_heartbeat(latest_candle_time):
+                    print(f"RSI recalculation interval reached - executing non-rolling RSI Monte Carlo")
+                    self._execute_non_rolling_rsi_monte_carlo_optimization(dataframe, metadata)
 
         # === Output All Stored Trendlines ===
         output_trendlines_info(self.stored_trendlines_1w)
@@ -806,7 +1104,12 @@ class RiskMetrics(IStrategy):
             print(f"Latest bounce timestamp {timeframe} resistance: {resistance_time}")
             print(f"Latest bounce timestamp {timeframe} support: {support_time}")
 
-        #output_trendlines_info(self.stored_trendlines)
+        # Print RSI trendline information
+        if self.enable_rsi_trendlines.value:
+            print(f"RSI trendlines stored: {len(self.stored_rsi_trendlines)}")
+            if self.stored_rsi_trendlines:
+                print("=== RSI TRENDLINES INFO ===")
+                output_trendlines_info(self.stored_rsi_trendlines)
 
         return dataframe
 
@@ -827,6 +1130,12 @@ class RiskMetrics(IStrategy):
         dataframe.loc[:, 'MC_Resistance_Score'] = 0.0
         dataframe.loc[:, 'MC_Support_Score'] = 0.0
         dataframe.loc[:, 'MC_Optimal_Period'] = 0.0
+        
+        # Initialize RSI trendline columns
+        dataframe.loc[:, 'RSI_Optimal_Resistance'] = np.nan
+        dataframe.loc[:, 'RSI_Optimal_Support'] = np.nan
+        dataframe.loc[:, 'RSI_Resistance_Score'] = 0.0
+        dataframe.loc[:, 'RSI_Support_Score'] = 0.0
                 
     def _populate_from_existing_trendlines(self, dataframe: DataFrame, metadata: dict) -> bool:
         """
@@ -1074,4 +1383,53 @@ class RiskMetrics(IStrategy):
         """
         self.last_recalculation_time = current_candle_time
         print(f"Updated last recalculation time to: {self.last_recalculation_time}")
+
+    def _find_rsi_swing_points(self, dataframe: DataFrame) -> None:
+        """
+        Find swing high and low points in RSI and map them to dataframe columns.
+        
+        Args:
+            dataframe: DataFrame containing RSI data
+        """
+        if 'rsi' not in dataframe.columns:
+            return
+            
+        # Initialize RSI swing point columns
+        dataframe.loc[:, 'all_highs_rsi'] = np.nan
+        dataframe.loc[:, 'all_lows_rsi'] = np.nan
+        
+        # Clean RSI data by removing NaN values
+        rsi_series = dataframe['rsi'].dropna()
+        
+        if len(rsi_series) < 10:  # Need at least 10 valid RSI values
+            print("Not enough valid RSI data for swing point detection")
+            return
+        
+        # Use SwingPointDetector for RSI with appropriate parameters
+        rsi_detector = SwingPointDetector(
+            distance=10,      # Minimum distance between RSI swing points
+            prominence=0.10,  # 8% prominence for RSI swing points
+            wlen=None,
+            width=None
+        )
+        
+        # Find RSI swing highs and lows using clean data
+        rsi_highs = rsi_detector.find_swing_points(rsi_series.values, 'high')
+        rsi_lows = rsi_detector.find_swing_points(rsi_series.values, 'low')
+        
+        print(f"RSI data range: {rsi_series.min():.2f} to {rsi_series.max():.2f}")
+        print(f"RSI highs found: {len(rsi_highs)}")
+        print(f"RSI lows found: {len(rsi_lows)}")
+        
+        # Map RSI swing highs back to original dataframe indices
+        for idx, rsi_value in rsi_highs:
+            # Convert from clean data index to original dataframe index
+            original_idx = rsi_series.index[idx]
+            dataframe.loc[original_idx, 'all_highs_rsi'] = rsi_value
+        
+        # Map RSI swing lows back to original dataframe indices
+        for idx, rsi_value in rsi_lows:
+            # Convert from clean data index to original dataframe index
+            original_idx = rsi_series.index[idx]
+            dataframe.loc[original_idx, 'all_lows_rsi'] = rsi_value
 
