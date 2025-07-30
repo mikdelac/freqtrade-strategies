@@ -303,6 +303,9 @@ class RiskMetrics(IStrategy):
     # Rolling Monte Carlo optimization (eliminates lookahead bias)
     enable_rolling_mc_optimization = BooleanParameter(default=True, space="buy", optimize=False)
 
+    # RSI parameters
+    rsi_timeperiod = IntParameter(10, 30, default=14, space="buy", optimize=True)
+
     # Minimal ROI designed for the strategy.
     minimal_roi = {
         "360": 0.15,  # Exit after 6 hours if profit is 15%
@@ -397,26 +400,12 @@ class RiskMetrics(IStrategy):
                 "MC_Optimal_Support": {"color": "darkgreen", "width": 4.0, "dash": "dot"}
             },
             "subplots": {
-                "Total Line Scores": {
-                    "Resistance_Line_Score": {"color": "red", "type": "line", "width": 2.0},
-                    "Support_Line_Score": {"color": "green", "type": "line", "width": 2.0}
+                "RSI": {
+                    "rsi": {"color": "purple", "type": "line", "width": 2.0}
                 },
                 "Monte Carlo Optimization": {
                     "MC_Resistance_Score": {"color": "darkred", "type": "line", "width": 3.0},
                     "MC_Support_Score": {"color": "darkgreen", "type": "line", "width": 3.0},
-                },
-                "Bounce Analysis": {
-                    "resistance_bounce_count": {"color": "darkred", "type": "line", "width": 2.0},
-                    "support_bounce_count": {"color": "darkgreen", "type": "line", "width": 2.0},
-                    "resistance_bounce_score_display": {"color": "red", "type": "line", "width": 1.5, "dash": "dash"},
-                    "support_bounce_score_display": {"color": "green", "type": "line", "width": 1.5, "dash": "dash"}
-                },
-                "Score Convergence Analysis": {
-                    "score_convergence_ratio": {"color": "purple", "type": "line", "width": 2.0},
-                    "convergence_multiplier": {"color": "orange", "type": "line", "width": 2.0}
-                },
-                "Trading Mode": {
-                    "trading_mode_indicator": {"color": "blue", "type": "line", "width": 2.0}
                 }
             }
         }
@@ -763,6 +752,9 @@ class RiskMetrics(IStrategy):
 
         # Initialize all required dataframe columns
         self._initialize_dataframe_columns(dataframe)
+
+        # Calculate RSI
+        dataframe['rsi'] = ta.RSI(dataframe, timeperiod=self.rsi_timeperiod.value)
 
         # Find and map swing points using SwingPointDetector for the main timeframe (5m)
         main_detector = self.swing_detectors.get(self.timeframe)
