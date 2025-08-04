@@ -67,7 +67,8 @@ class SignalGenerator:
     
     def generate_entry_signals(self, dataframe: DataFrame) -> DataFrame:
         """
-        Generate entry signals for both long and short positions.
+        Generate entry signals based on RSI crossing support from below.
+        Filters signals using Bollinger Bands for confirmation.
         
         Args:
             dataframe: DataFrame with OHLCV data and indicators
@@ -80,55 +81,28 @@ class SignalGenerator:
         dataframe.loc[:, 'enter_short'] = 0
         
         # Check if required columns exist
-        required_columns = ['MC_Optimal_Support', 'MC_Optimal_Resistance', 
-                          'MC_Support_Score', 'MC_Resistance_Score']
+        required_columns = ['rsi', 'RSI_Optimal_Support', 'RSI_Optimal_Resistance', 
+                          'bb_lowerband', 'bb_middleband', 'bb_upperband']
         if not all(col in dataframe.columns for col in required_columns):
-            print("Missing required columns for signal generation")
+            print("Missing required columns for RSI signal generation")
             return dataframe
         
-        # Additional validation: Check if trendlines have valid values
-        # Create a mask for rows where both support and resistance have valid values
-        valid_support = ~dataframe['MC_Optimal_Support'].isna()
-        valid_resistance = ~dataframe['MC_Optimal_Resistance'].isna()
-        valid_trendlines = valid_support & valid_resistance
-        
-        if not valid_trendlines.any():
-            print("No valid trendline data available - skipping entry signal generation")
-            return dataframe
-        
-        # Generate long entry conditions (bounce off support) - using direct import from trendline.py
-        long_bounce_conditions = generate_bounce_conditions(
-            dataframe['close'], 
-            dataframe['MC_Optimal_Support'], 'long', self.strategy._get_trendline_proximity_threshold(),
-            dataframe.get('all_highs'), dataframe.get('all_lows')
+        # Create RSI crossover conditions
+        rsi_support_crossover = (
+            (dataframe['rsi'] > dataframe['RSI_Optimal_Support']) &  # Current RSI above support
+            (dataframe['rsi'].shift(1) <= dataframe['RSI_Optimal_Support'].shift(1)) &  # Previous RSI was below support
+            (~dataframe['RSI_Optimal_Support'].isna()) &  # Support line exists
+            (~dataframe['RSI_Optimal_Support'].shift(1).isna()) &  # Previous support line exists
+            (dataframe['close'] < dataframe['bb_middleband']) &  # Price below BB middle band
+            (dataframe['close'] > dataframe['bb_lowerband'])  # Price above BB lower band
         )
-                
-        # Apply trendline validity filter for long entries
-        long_conditions_filtered = long_bounce_conditions & valid_trendlines
-        
-        # Generate short entry conditions (bounce off resistance) - using direct import from trendline.py
-        short_bounce_conditions = generate_bounce_conditions(
-            dataframe['close'], 
-            dataframe['MC_Optimal_Resistance'], 'short', self.strategy._get_trendline_proximity_threshold(),
-            dataframe.get('all_highs'), dataframe.get('all_lows')
-        )
-
-        # Apply trendline validity filter for short entries
-        short_conditions_filtered = short_bounce_conditions & valid_trendlines
         
         # Set entry signals
-        dataframe.loc[long_conditions_filtered, 'enter_long'] = 1
-        dataframe.loc[short_conditions_filtered, 'enter_short'] = 1
+        dataframe.loc[rsi_support_crossover, 'enter_long'] = 1
         
         # Log entry signal summary
         long_signals = dataframe['enter_long'].sum()
-        short_signals = dataframe['enter_short'].sum()
-        valid_rows = valid_trendlines.sum()
-        total_rows = len(dataframe)
-        
-        print(f"Entry signals generated: {long_signals} long, {short_signals} short")
-        print(f"Valid trendline data: {valid_rows}/{total_rows} rows ({valid_rows/total_rows*100:.1f}%)")
-        
+        print(f"RSI-based entry signals generated: {long_signals} long")
         
         return dataframe
     
@@ -207,7 +181,8 @@ class SignalGenerator:
     
     def generate_exit_signals(self, dataframe: DataFrame) -> DataFrame:
         """
-        Generate exit signals for both long and short positions.
+        Generate exit signals based on RSI approaching resistance.
+        Uses Bollinger Bands for additional confirmation.
         
         Args:
             dataframe: DataFrame with OHLCV data and indicators
@@ -219,38 +194,29 @@ class SignalGenerator:
         dataframe.loc[:, 'exit_long'] = 0
         dataframe.loc[:, 'exit_short'] = 0
         
-        # === Traditional Support/Resistance Break Exits ===
+        # Check if required columns exist
+        required_columns = ['rsi', 'RSI_Optimal_Resistance', 'bb_upperband']
+        if not all(col in dataframe.columns for col in required_columns):
+            print("Missing required columns for RSI exit signal generation")
+            return dataframe
         
-        # Exit long when support is broken
-        if 'MC_Optimal_Support' in dataframe.columns:
-            support_break_exit = self.generate_break_exit_conditions(
-                dataframe, 'MC_Optimal_Support', 'long'
-            )
-            dataframe.loc[support_break_exit, 'exit_long'] = 1
+        # Define proximity threshold for RSI resistance (within 5 points)
+        rsi_resistance_proximity = 5.0
         
-        # Exit short when resistance is broken
-        if 'MC_Optimal_Resistance' in dataframe.columns:
-            resistance_break_exit = self.generate_break_exit_conditions(
-                dataframe, 'MC_Optimal_Resistance', 'short'
-            )
-            dataframe.loc[resistance_break_exit, 'exit_short'] = 1
+        # Create RSI resistance proximity condition with BB confirmation
+        near_rsi_resistance = (
+            (dataframe['RSI_Optimal_Resistance'] - dataframe['rsi'] <= rsi_resistance_proximity) &
+            (dataframe['rsi'] < dataframe['RSI_Optimal_Resistance']) &  # RSI below resistance
+            (~dataframe['RSI_Optimal_Resistance'].isna()) &  # Resistance line exists
+            (dataframe['close'] > dataframe['bb_upperband'])  # Price above BB upper band
+        )
         
-        # === Cross-Signal Exits ===
-        
-        # Check if required columns exist for cross-signal exits
-        required_columns = ['MC_Optimal_Support', 'MC_Optimal_Resistance', 
-                          'MC_Support_Score', 'MC_Resistance_Score']
-        if all(col in dataframe.columns for col in required_columns):
-            exit_long_cross, exit_short_cross = self.generate_cross_signal_exits(dataframe)
-            
-            # Apply cross-signal exits
-            dataframe.loc[exit_long_cross, 'exit_long'] = 1
-            dataframe.loc[exit_short_cross, 'exit_short'] = 1
+        # Set exit signals
+        dataframe.loc[near_rsi_resistance, 'exit_long'] = 1
         
         # Log exit signal summary
         long_exits = dataframe['exit_long'].sum()
-        short_exits = dataframe['exit_short'].sum()
-        print(f"Exit signals generated: {long_exits} long exits, {short_exits} short exits")
+        print(f"RSI-based exit signals generated: {long_exits} long exits")
         
         return dataframe
 
@@ -401,7 +367,12 @@ class RiskMetrics(IStrategy):
                 "all_highs": {"color": "red", "type": "scatter", "symbol": "triangle-down", "size": 12, "fillcolor": "red"},
                 "all_lows": {"color": "green", "type": "scatter", "symbol": "triangle-up", "size": 12, "fillcolor": "green"},
                 "MC_Optimal_Resistance": {"color": "darkred", "width": 4.0, "dash": "dot"},
-                "MC_Optimal_Support": {"color": "darkgreen", "width": 4.0, "dash": "dot"}
+                "MC_Optimal_Support": {"color": "darkgreen", "width": 4.0, "dash": "dot"},
+                "bb_upperband": {"color": "rgba(255,144,144,0.6)", "fill": None, "width": 1.0},
+                "bb_middleband": {"color": "rgba(144,144,144,0.6)", "width": 1.0},
+                "bb_lowerband": {"color": "rgba(144,255,144,0.6)", "fill": "tonexty", "width": 1.0},
+                "bb_high_tag": {"color": "yellow", "type": "scatter", "symbol": "triangle-down", "size": 10, "fillcolor": "yellow"},
+                "bb_low_tag": {"color": "blue", "type": "scatter", "symbol": "triangle-up", "size": 10, "fillcolor": "blue"}
             },
             "subplots": {
                 "RSI": {
@@ -524,6 +495,10 @@ class RiskMetrics(IStrategy):
         Returns:
             DataFrame: Updated dataframe with analysis results
         """
+        if dataframe is None or len(dataframe) == 0:
+            print(f"Warning: Empty dataframe provided for fractal analysis on {timeframe}")
+            return dataframe
+            
         print(f"=== ANALYSE {timeframe.upper()} POUR {metadata['pair']} (12-24 MONTH APPROACH) ===")
 
         # Initialize analysis environment
@@ -653,15 +628,25 @@ class RiskMetrics(IStrategy):
             
         # Step 1: Retrieve timeframe data
         informative_dataframe = self.dp.get_pair_dataframe(pair=pair, timeframe=timeframe)
+        if informative_dataframe is None or len(informative_dataframe) == 0:
+            print(f"Warning: No data available for {pair} on {timeframe} timeframe")
+            return dataframe
+            
         self._set_timeframe_start_date(timeframe, informative_dataframe)
         
         # Step 2: Filter to 12-24 month window (use 18 months as optimal balance)
         filtered_dataframe = self._filter_to_recent_window(informative_dataframe, months=18)
+        if len(filtered_dataframe) == 0:
+            print(f"Warning: No data available after filtering for {pair} on {timeframe} timeframe")
+            return dataframe
         
         # Step 3: Execute fractal analysis on filtered data only
         analyzed_dataframe = self._execute_fractal_analysis(
             filtered_dataframe, {'pair': pair}, timeframe
         )
+        if analyzed_dataframe is None or len(analyzed_dataframe) == 0:
+            print(f"Warning: Fractal analysis produced no results for {pair} on {timeframe} timeframe")
+            return dataframe
         
         # Step 4: Merge results back to main dataframe
         merged_dataframe = merge_informative_pair(
@@ -707,9 +692,13 @@ class RiskMetrics(IStrategy):
             dataframe: Dataframe containing the timeframe data
         """
         start_date_attr = f"timeframe_{timeframe}_start_date"
-        start_date = dataframe['date'].iloc[0]
-        setattr(self, start_date_attr, start_date)
-        print(f"Date de la première ligne du dataframe {timeframe}: {start_date}")
+        if len(dataframe) > 0:
+            start_date = dataframe['date'].iloc[0]
+            setattr(self, start_date_attr, start_date)
+            print(f"Date de la première ligne du dataframe {timeframe}: {start_date}")
+        else:
+            print(f"Warning: Empty dataframe for timeframe {timeframe}")
+            setattr(self, start_date_attr, None)
 
     def _create_rsi_dataframe_for_trendlines(self, dataframe: DataFrame) -> DataFrame:
         """
@@ -968,6 +957,24 @@ class RiskMetrics(IStrategy):
             return dataframe
         
         pair = metadata['pair']
+        
+        # Calculate Bollinger Bands
+        bollinger = ta.BBANDS(dataframe, timeperiod=20, nbdevup=2.0, nbdevdn=2.0, matype=0)
+        dataframe['bb_upperband'] = bollinger['upperband']
+        dataframe['bb_middleband'] = bollinger['middleband']
+        dataframe['bb_lowerband'] = bollinger['lowerband']
+        
+        # Calculate Bollinger Band tags
+        dataframe['bb_high_tag'] = np.nan
+        dataframe['bb_low_tag'] = np.nan
+        
+        # High tag when price touches or crosses upper band
+        high_touch_mask = (dataframe['high'] >= dataframe['bb_upperband'])
+        dataframe.loc[high_touch_mask, 'bb_high_tag'] = dataframe.loc[high_touch_mask, 'high']
+        
+        # Low tag when price touches or crosses lower band
+        low_touch_mask = (dataframe['low'] <= dataframe['bb_lowerband'])
+        dataframe.loc[low_touch_mask, 'bb_low_tag'] = dataframe.loc[low_touch_mask, 'low']
         
         # Define timeframes to analyze independently (no dependency chain - 12-24 month approach)
         timeframes_to_analyze = ['1w', '1d', '4h', '1h']
