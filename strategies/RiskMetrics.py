@@ -236,6 +236,15 @@ class RiskMetrics(IStrategy):
     - Dynamic timeframe selection based on available data
       * Automatically selects the highest appropriate timeframe
       * Adapts analysis based on available historical data length
+    - Comprehensive Bollinger Bands implementation following John Bollinger's official rules:
+      * Rule 1: Relative definition of high/low using bands
+      * Rule 6: Tags are just tags, not signals by themselves
+      * Rule 8: Closes outside bands are continuation signals (not reversal)
+      * Rules 9 & 11: Configurable parameters with period-based std dev adjustment
+      * Rules 15-16: %b calculation for position within bands and pattern recognition
+      * Rules 18-19: BandWidth calculation and Squeeze detection for volatility analysis
+      * Enhanced visualization with %b subplots and squeeze indicators
+      * Real-time analysis output showing current market state per official rules
     """
     INTERFACE_VERSION = 3
 
@@ -271,7 +280,24 @@ class RiskMetrics(IStrategy):
 
     # RSI parameters
     rsi_timeperiod = IntParameter(10, 30, default=14, space="buy", optimize=True)
-    
+
+    # === Bollinger Bands Parameters (Rules 9 & 11) ===
+    # Rule 9: Default parameters are just defaults - actual parameters may be different for each market/task
+    bb_timeperiod = IntParameter(10, 50, default=20, space="buy", optimize=True)
+    bb_std_dev = DecimalParameter(1.5, 2.5, default=2.0, space="buy", optimize=True)
+
+    # Rule 11: For consistent price containment - adjust std dev based on period length
+    # From 2 at 20 periods, to 2.1 at 50 periods, to 1.9 at 10 periods
+    enable_bb_period_adjustment = BooleanParameter(default=True, space="buy", optimize=False)
+
+    # %b analysis parameters (Rules 15-16)
+    bb_percent_b_overbought_level = DecimalParameter(0.7, 0.9, default=0.8, space="buy", optimize=True)
+    bb_percent_b_oversold_level = DecimalParameter(0.1, 0.3, default=0.2, space="buy", optimize=True)
+
+    # Squeeze detection parameters (Rule 19)
+    bb_squeeze_lookback = IntParameter(10, 30, default=20, space="buy", optimize=True)
+    bb_squeeze_threshold = DecimalParameter(0.7, 0.9, default=0.8, space="buy", optimize=True)
+
     # === RSI Trendline Parameters ===
     enable_rsi_trendlines = BooleanParameter(default=True, space="buy", optimize=False)
     rsi_trendline_proximity_threshold = DecimalParameter(0.5, 5.0, default=2.0, space="buy", optimize=True)
@@ -361,7 +387,7 @@ class RiskMetrics(IStrategy):
 
     @property
     def plot_config(self):
-        # Basic configuration with default plots
+        # Enhanced configuration with Bollinger Bands indicators following official rules
         plot_config = {
             "main_plot": {
                 "all_highs": {"color": "red", "type": "scatter", "symbol": "triangle-down", "size": 12, "fillcolor": "red"},
@@ -372,7 +398,12 @@ class RiskMetrics(IStrategy):
                 "bb_middleband": {"color": "rgba(144,144,144,0.6)", "width": 1.0},
                 "bb_lowerband": {"color": "rgba(144,255,144,0.6)", "fill": "tonexty", "width": 1.0},
                 "bb_high_tag": {"color": "yellow", "type": "scatter", "symbol": "triangle-down", "size": 10, "fillcolor": "yellow"},
-                "bb_low_tag": {"color": "blue", "type": "scatter", "symbol": "triangle-up", "size": 10, "fillcolor": "blue"}
+                "bb_low_tag": {"color": "blue", "type": "scatter", "symbol": "triangle-up", "size": 10, "fillcolor": "blue"},
+                # Rule 8: Closes outside bands are continuation signals
+                "bb_outside_upper": {"color": "red", "type": "scatter", "symbol": "circle", "size": 8, "fillcolor": "red"},
+                "bb_outside_lower": {"color": "green", "type": "scatter", "symbol": "circle", "size": 8, "fillcolor": "green"},
+                # Rule 15-16: %b visualization on main plot for reference
+                "bb_percent_b": {"color": "rgba(255,165,0,0.3)", "width": 1.0, "dash": "dash"}
             },
             "subplots": {
                 "RSI": {
@@ -381,6 +412,20 @@ class RiskMetrics(IStrategy):
                     "all_lows_rsi": {"color": "green", "type": "scatter", "symbol": "triangle-up", "size": 8, "fillcolor": "green"},
                     "RSI_Optimal_Resistance": {"color": "orange", "width": 3.0, "dash": "dash"},
                     "RSI_Optimal_Support": {"color": "lightblue", "width": 3.0, "dash": "dash"}
+                },
+                "Bollinger Bands %b": {
+                    # Rule 15-16: %b shows where we are in relation to the bands
+                    "bb_percent_b": {"color": "blue", "type": "line", "width": 2.0},
+                    "bb_percent_b_overbought": {"color": "red", "type": "scatter", "symbol": "circle", "size": 6, "fillcolor": "red"},
+                    "bb_percent_b_oversold": {"color": "green", "type": "scatter", "symbol": "circle", "size": 6, "fillcolor": "green"},
+                    "bb_percent_b_extreme_high": {"color": "darkred", "type": "scatter", "symbol": "triangle-up", "size": 8, "fillcolor": "darkred"},
+                    "bb_percent_b_extreme_low": {"color": "darkgreen", "type": "scatter", "symbol": "triangle-down", "size": 8, "fillcolor": "darkgreen"}
+                },
+                "Bollinger Bands Width & Squeeze": {
+                    # Rule 18-19: BandWidth and Squeeze detection
+                    "bb_bandwidth": {"color": "purple", "type": "line", "width": 2.0},
+                    "bb_bandwidth_ma": {"color": "gray", "type": "line", "width": 1.0, "dash": "dash"},
+                    "bb_squeeze": {"color": "orange", "type": "scatter", "symbol": "diamond", "size": 10, "fillcolor": "orange"}
                 },
                 "Monte Carlo Optimization": {
                     "MC_Resistance_Score": {"color": "darkred", "type": "line", "width": 3.0},
@@ -959,22 +1004,89 @@ class RiskMetrics(IStrategy):
         pair = metadata['pair']
         
         # Calculate Bollinger Bands
-        bollinger = ta.BBANDS(dataframe, timeperiod=20, nbdevup=2.0, nbdevdn=2.0, matype=0)
+        # Rule 11: Adjust standard deviation based on period length for consistent price containment
+        if self.enable_bb_period_adjustment.value:
+            # Adjust std dev: 2.0 at 20 periods, 2.1 at 50 periods, 1.9 at 10 periods
+            period_ratio = self.bb_timeperiod.value / 20.0
+            adjusted_std_dev = 2.0 + (period_ratio - 1.0) * 0.1
+            # Clamp to reasonable bounds
+            final_std_dev = max(1.5, min(2.5, adjusted_std_dev))
+        else:
+            final_std_dev = self.bb_std_dev.value
+
+        bollinger = ta.BBANDS(dataframe, timeperiod=self.bb_timeperiod.value, 
+                              nbdevup=final_std_dev, nbdevdn=final_std_dev, matype=0)
         dataframe['bb_upperband'] = bollinger['upperband']
         dataframe['bb_middleband'] = bollinger['middleband']
         dataframe['bb_lowerband'] = bollinger['lowerband']
-        
-        # Calculate Bollinger Band tags
+
+        # === BOLLINGER BANDS OFFICIAL RULES IMPLEMENTATION ===
+        # Rule 15 & 16: %b calculation - tells us where we are in relation to the Bollinger Bands
+        # %b = (Close - Lower Band) / (Upper Band - Lower Band)
+        # %b = 1.0 when close equals upper band
+        # %b = 0.0 when close equals lower band  
+        # %b = 0.5 when close equals middle band
+        # %b > 1.0 when close is above upper band (outside upper band)
+        # %b < 0.0 when close is below lower band (outside lower band)
+        band_width_raw = dataframe['bb_upperband'] - dataframe['bb_lowerband']
+        dataframe['bb_percent_b'] = np.where(
+            band_width_raw != 0, 
+            (dataframe['close'] - dataframe['bb_lowerband']) / band_width_raw,
+            0.5  # Default to middle when bands are flat
+        )
+
+        # Rule 18: BandWidth calculation - tells us how wide the Bollinger Bands are
+        # BandWidth = (Upper Band - Lower Band) / Middle Band
+        # Normalized using the middle band (using default parameters, BandWidth is 4x coefficient of variation)
+        dataframe['bb_bandwidth'] = np.where(
+            dataframe['bb_middleband'] != 0,
+            band_width_raw / dataframe['bb_middleband'],
+            0.0  # Default to 0 when middle band is 0
+        )
+
+        # Rule 19: The Squeeze - identify when BandWidth is at local minimums (low volatility periods)
+        # Calculate rolling minimum of BandWidth over configurable periods to identify squeeze periods
+        squeeze_lookback = self.bb_squeeze_lookback.value
+        dataframe['bb_bandwidth_ma'] = dataframe['bb_bandwidth'].rolling(window=squeeze_lookback).mean()
+        dataframe['bb_bandwidth_min'] = dataframe['bb_bandwidth'].rolling(window=squeeze_lookback).min()
+        dataframe['bb_squeeze'] = np.where(
+            (dataframe['bb_bandwidth'] <= dataframe['bb_bandwidth_min'] * 1.1) &  # Within 10% of minimum
+            (dataframe['bb_bandwidth'] <= dataframe['bb_bandwidth_ma'] * self.bb_squeeze_threshold.value),  # Below threshold of average
+            1.0, 0.0  # 1.0 indicates squeeze, 0.0 indicates normal/expansion
+        )
+
+        # Enhanced Bollinger Band tags following official rules
         dataframe['bb_high_tag'] = np.nan
         dataframe['bb_low_tag'] = np.nan
-        
-        # High tag when price touches or crosses upper band
+        dataframe['bb_outside_upper'] = np.nan  # Rule 8: Closes outside bands
+        dataframe['bb_outside_lower'] = np.nan  # Rule 8: Closes outside bands
+
+        # Rule 6: Tags of the bands are just that, tags not signals
+        # High tag when price touches or crosses upper band (any part of candle)
         high_touch_mask = (dataframe['high'] >= dataframe['bb_upperband'])
         dataframe.loc[high_touch_mask, 'bb_high_tag'] = dataframe.loc[high_touch_mask, 'high']
-        
-        # Low tag when price touches or crosses lower band
+
+        # Low tag when price touches or crosses lower band (any part of candle)  
         low_touch_mask = (dataframe['low'] <= dataframe['bb_lowerband'])
         dataframe.loc[low_touch_mask, 'bb_low_tag'] = dataframe.loc[low_touch_mask, 'low']
+
+        # Rule 8: Closes outside the Bollinger Bands are initially continuation signals, not reversal signals
+        close_above_upper = (dataframe['close'] > dataframe['bb_upperband'])
+        close_below_lower = (dataframe['close'] < dataframe['bb_lowerband'])
+        dataframe.loc[close_above_upper, 'bb_outside_upper'] = dataframe.loc[close_above_upper, 'close']
+        dataframe.loc[close_below_lower, 'bb_outside_lower'] = dataframe.loc[close_below_lower, 'close']
+
+        # Additional %b analysis levels for pattern recognition (Rule 16) - using configurable thresholds
+        dataframe['bb_percent_b_overbought'] = np.where(
+            dataframe['bb_percent_b'] > self.bb_percent_b_overbought_level.value, 
+            dataframe['bb_percent_b'], np.nan
+        )
+        dataframe['bb_percent_b_oversold'] = np.where(
+            dataframe['bb_percent_b'] < self.bb_percent_b_oversold_level.value, 
+            dataframe['bb_percent_b'], np.nan
+        )
+        dataframe['bb_percent_b_extreme_high'] = np.where(dataframe['bb_percent_b'] > 1.0, dataframe['bb_percent_b'], np.nan)
+        dataframe['bb_percent_b_extreme_low'] = np.where(dataframe['bb_percent_b'] < 0.0, dataframe['bb_percent_b'], np.nan)
         
         # Define timeframes to analyze independently (no dependency chain - 12-24 month approach)
         timeframes_to_analyze = ['1w', '1d', '4h', '1h']
@@ -1117,6 +1229,47 @@ class RiskMetrics(IStrategy):
             if self.stored_rsi_trendlines:
                 print("=== RSI TRENDLINES INFO ===")
                 output_trendlines_info(self.stored_rsi_trendlines)
+
+        # Print Bollinger Bands analysis summary following official rules
+        if len(dataframe) > 0:
+            latest_close = dataframe['close'].iloc[-1]
+            latest_upper = dataframe['bb_upperband'].iloc[-1]
+            latest_middle = dataframe['bb_middleband'].iloc[-1]  
+            latest_lower = dataframe['bb_lowerband'].iloc[-1]
+            latest_percent_b = dataframe['bb_percent_b'].iloc[-1]
+            latest_bandwidth = dataframe['bb_bandwidth'].iloc[-1]
+            latest_squeeze = dataframe['bb_squeeze'].iloc[-1]
+            
+            print(f"=== BOLLINGER BANDS ANALYSIS (Official Rules Implementation) ===")
+            print(f"Period: {self.bb_timeperiod.value}, Std Dev: {final_std_dev:.2f} (Rule 11 adjustment: {self.enable_bb_period_adjustment.value})")
+            print(f"Close: {latest_close:.6f} | Upper: {latest_upper:.6f} | Middle: {latest_middle:.6f} | Lower: {latest_lower:.6f}")
+            print(f"Rule 15-16: %b = {latest_percent_b:.3f} (0=lower band, 0.5=middle, 1=upper band)")
+            
+            # Rule interpretation
+            if latest_percent_b > 1.0:
+                print(f"  → Rule 8: Close ABOVE upper band - CONTINUATION signal (not reversal)")
+            elif latest_percent_b < 0.0:
+                print(f"  → Rule 8: Close BELOW lower band - CONTINUATION signal (not reversal)")
+            elif latest_percent_b > self.bb_percent_b_overbought_level.value:
+                print(f"  → %b in overbought zone (>{self.bb_percent_b_overbought_level.value:.1f})")
+            elif latest_percent_b < self.bb_percent_b_oversold_level.value:
+                print(f"  → %b in oversold zone (<{self.bb_percent_b_oversold_level.value:.1f})")
+            else:
+                print(f"  → %b in normal range")
+            
+            print(f"Rule 18-19: BandWidth = {latest_bandwidth:.4f} | Squeeze: {'YES' if latest_squeeze == 1.0 else 'NO'}")
+            if latest_squeeze == 1.0:
+                print(f"  → Rule 19: THE SQUEEZE detected - Low volatility period, expect breakout")
+            
+            # Count recent tags (Rule 6: Tags are not signals)
+            recent_candles = min(20, len(dataframe))
+            recent_high_tags = dataframe['bb_high_tag'].tail(recent_candles).count()
+            recent_low_tags = dataframe['bb_low_tag'].tail(recent_candles).count()
+            recent_outside_upper = dataframe['bb_outside_upper'].tail(recent_candles).count()
+            recent_outside_lower = dataframe['bb_outside_lower'].tail(recent_candles).count()
+            
+            print(f"Last {recent_candles} candles: High tags: {recent_high_tags} | Low tags: {recent_low_tags} (Rule 6: Tags ≠ Signals)")
+            print(f"Last {recent_candles} candles: Outside upper: {recent_outside_upper} | Outside lower: {recent_outside_lower} (Rule 8)")
 
         return dataframe
 
