@@ -69,6 +69,7 @@ class SignalGenerator:
         """
         Generate entry signals based on RSI crossing support from below.
         Filters signals using Bollinger Bands for confirmation.
+        Enhanced with MFI + Bollinger Bands combined signals.
         
         Args:
             dataframe: DataFrame with OHLCV data and indicators
@@ -82,12 +83,12 @@ class SignalGenerator:
         
         # Check if required columns exist
         required_columns = ['rsi', 'RSI_Optimal_Support', 'RSI_Optimal_Resistance', 
-                          'bb_lowerband', 'bb_middleband', 'bb_upperband']
+                          'bb_lowerband', 'bb_middleband', 'bb_upperband', 'bb_percent_b']
         if not all(col in dataframe.columns for col in required_columns):
             print("Missing required columns for RSI signal generation")
             return dataframe
         
-        # Create RSI crossover conditions
+        # Create RSI crossover conditions (original logic)
         rsi_support_crossover = (
             (dataframe['rsi'] > dataframe['RSI_Optimal_Support']) &  # Current RSI above support
             (dataframe['rsi'].shift(1) <= dataframe['RSI_Optimal_Support'].shift(1)) &  # Previous RSI was below support
@@ -97,12 +98,35 @@ class SignalGenerator:
             (dataframe['close'] > dataframe['bb_lowerband'])  # Price above BB lower band
         )
         
+        # Enhanced entry signals with MFI + Bollinger Bands confirmation
+        enhanced_entry_signals = rsi_support_crossover
+        
+        # Add MFI + BB confirmation if enabled and MFI column exists
+        if (self.strategy.enable_mfi_bb_confirmation.value and 
+            'mfi' in dataframe.columns and 
+            'mfi_bb_buy_signal' in dataframe.columns):
+            
+            # Additional confirmation: MFI + BB combined buy signal
+            mfi_bb_confirmation = (
+                (dataframe['bb_percent_b'] > self.strategy.bb_percent_b_overbought_level.value) &
+                (dataframe['mfi'] > self.strategy.mfi_overbought_level.value)
+            )
+            
+            # Enhanced signals: original RSI signals OR MFI+BB confirmation
+            enhanced_entry_signals = rsi_support_crossover | mfi_bb_confirmation
+            
+            # Count additional signals from MFI+BB
+            mfi_bb_signals = mfi_bb_confirmation.sum()
+            print(f"MFI + Bollinger Bands confirmation signals: {mfi_bb_signals}")
+        
         # Set entry signals
-        dataframe.loc[rsi_support_crossover, 'enter_long'] = 1
+        dataframe.loc[enhanced_entry_signals, 'enter_long'] = 1
         
         # Log entry signal summary
         long_signals = dataframe['enter_long'].sum()
-        print(f"RSI-based entry signals generated: {long_signals} long")
+        rsi_signals = rsi_support_crossover.sum()
+        print(f"RSI-based entry signals generated: {rsi_signals} long")
+        print(f"Total enhanced entry signals: {long_signals} long")
         
         return dataframe
     
@@ -183,6 +207,7 @@ class SignalGenerator:
         """
         Generate exit signals based on RSI approaching resistance.
         Uses Bollinger Bands for additional confirmation.
+        Enhanced with MFI + Bollinger Bands combined signals.
         
         Args:
             dataframe: DataFrame with OHLCV data and indicators
@@ -195,7 +220,7 @@ class SignalGenerator:
         dataframe.loc[:, 'exit_short'] = 0
         
         # Check if required columns exist
-        required_columns = ['rsi', 'RSI_Optimal_Resistance', 'bb_upperband']
+        required_columns = ['rsi', 'RSI_Optimal_Resistance', 'bb_upperband', 'bb_percent_b']
         if not all(col in dataframe.columns for col in required_columns):
             print("Missing required columns for RSI exit signal generation")
             return dataframe
@@ -203,7 +228,7 @@ class SignalGenerator:
         # Define proximity threshold for RSI resistance (within 5 points)
         rsi_resistance_proximity = 5.0
         
-        # Create RSI resistance proximity condition with BB confirmation
+        # Create RSI resistance proximity condition with BB confirmation (original logic)
         near_rsi_resistance = (
             (dataframe['RSI_Optimal_Resistance'] - dataframe['rsi'] <= rsi_resistance_proximity) &
             (dataframe['rsi'] < dataframe['RSI_Optimal_Resistance']) &  # RSI below resistance
@@ -211,12 +236,35 @@ class SignalGenerator:
             (dataframe['close'] > dataframe['bb_upperband'])  # Price above BB upper band
         )
         
+        # Enhanced exit signals with MFI + Bollinger Bands confirmation
+        enhanced_exit_signals = near_rsi_resistance
+        
+        # Add MFI + BB confirmation if enabled and MFI column exists
+        if (self.strategy.enable_mfi_bb_confirmation.value and 
+            'mfi' in dataframe.columns and 
+            'mfi_bb_sell_signal' in dataframe.columns):
+            
+            # Additional confirmation: MFI + BB combined sell signal
+            mfi_bb_exit_confirmation = (
+                (dataframe['bb_percent_b'] < self.strategy.bb_percent_b_oversold_level.value) &
+                (dataframe['mfi'] < self.strategy.mfi_oversold_level.value)
+            )
+            
+            # Enhanced signals: original RSI signals OR MFI+BB exit confirmation
+            enhanced_exit_signals = near_rsi_resistance | mfi_bb_exit_confirmation
+            
+            # Count additional signals from MFI+BB
+            mfi_bb_exit_signals = mfi_bb_exit_confirmation.sum()
+            print(f"MFI + Bollinger Bands exit signals: {mfi_bb_exit_signals}")
+        
         # Set exit signals
-        dataframe.loc[near_rsi_resistance, 'exit_long'] = 1
+        dataframe.loc[enhanced_exit_signals, 'exit_long'] = 1
         
         # Log exit signal summary
         long_exits = dataframe['exit_long'].sum()
-        print(f"RSI-based exit signals generated: {long_exits} long exits")
+        rsi_exits = near_rsi_resistance.sum()
+        print(f"RSI-based exit signals generated: {rsi_exits} long exits")
+        print(f"Total enhanced exit signals: {long_exits} long exits")
         
         return dataframe
 
@@ -245,6 +293,11 @@ class RiskMetrics(IStrategy):
       * Rules 18-19: BandWidth calculation and Squeeze detection for volatility analysis
       * Enhanced visualization with %b subplots and squeeze indicators
       * Real-time analysis output showing current market state per official rules
+    - Money Flow Index (MFI) integration for volume-weighted momentum analysis:
+      * Combines price and volume to identify overbought/oversold conditions
+      * Enhanced signal confirmation with Bollinger Bands (%b > 0.8 AND MFI > 80)
+      * Complementary analysis to RSI-based trendlines with volume considerations
+      * Real-time MFI + Bollinger Bands combined signal detection
     """
     INTERFACE_VERSION = 3
 
@@ -301,6 +354,15 @@ class RiskMetrics(IStrategy):
     # === RSI Trendline Parameters ===
     enable_rsi_trendlines = BooleanParameter(default=True, space="buy", optimize=False)
     rsi_trendline_proximity_threshold = DecimalParameter(0.5, 5.0, default=2.0, space="buy", optimize=True)
+
+    # === Money Flow Index (MFI) Parameters ===
+    # MFI uses price and volume to identify overbought/oversold conditions
+    mfi_timeperiod = IntParameter(10, 30, default=14, space="buy", optimize=True)
+    mfi_overbought_level = DecimalParameter(70, 90, default=80, space="buy", optimize=True)
+    mfi_oversold_level = DecimalParameter(10, 30, default=20, space="buy", optimize=True)
+    
+    # Enable MFI + Bollinger Bands combined signals
+    enable_mfi_bb_confirmation = BooleanParameter(default=True, space="buy", optimize=False)
 
     # Minimal ROI designed for the strategy.
     minimal_roi = {
@@ -426,6 +488,14 @@ class RiskMetrics(IStrategy):
                     "bb_bandwidth": {"color": "purple", "type": "line", "width": 2.0},
                     "bb_bandwidth_ma": {"color": "gray", "type": "line", "width": 1.0, "dash": "dash"},
                     "bb_squeeze": {"color": "orange", "type": "scatter", "symbol": "diamond", "size": 10, "fillcolor": "orange"}
+                },
+                "Money Flow Index (MFI)": {
+                    # MFI with overbought/oversold levels and confirmation signals
+                    "mfi": {"color": "blue", "type": "line", "width": 2.0},
+                    "mfi_overbought": {"color": "red", "type": "scatter", "symbol": "circle", "size": 6, "fillcolor": "red"},
+                    "mfi_oversold": {"color": "green", "type": "scatter", "symbol": "circle", "size": 6, "fillcolor": "green"},
+                    "mfi_bb_buy_signal": {"color": "darkgreen", "type": "scatter", "symbol": "triangle-up", "size": 12, "fillcolor": "darkgreen"},
+                    "mfi_bb_sell_signal": {"color": "darkred", "type": "scatter", "symbol": "triangle-down", "size": 12, "fillcolor": "darkred"}
                 },
                 "Monte Carlo Optimization": {
                     "MC_Resistance_Score": {"color": "darkred", "type": "line", "width": 3.0},
@@ -1088,6 +1158,39 @@ class RiskMetrics(IStrategy):
         dataframe['bb_percent_b_extreme_high'] = np.where(dataframe['bb_percent_b'] > 1.0, dataframe['bb_percent_b'], np.nan)
         dataframe['bb_percent_b_extreme_low'] = np.where(dataframe['bb_percent_b'] < 0.0, dataframe['bb_percent_b'], np.nan)
         
+        # === MONEY FLOW INDEX (MFI) CALCULATION ===
+        # MFI combines price and volume to identify overbought/oversold conditions
+        # MFI ranges from 0 to 100, similar to RSI but includes volume
+        dataframe['mfi'] = ta.MFI(dataframe, timeperiod=self.mfi_timeperiod.value)
+        
+        # Initialize MFI signal columns
+        dataframe['mfi_overbought'] = np.nan
+        dataframe['mfi_oversold'] = np.nan
+        dataframe['mfi_bb_buy_signal'] = np.nan
+        dataframe['mfi_bb_sell_signal'] = np.nan
+        
+        # Mark MFI overbought/oversold levels
+        mfi_overbought_mask = dataframe['mfi'] > self.mfi_overbought_level.value
+        mfi_oversold_mask = dataframe['mfi'] < self.mfi_oversold_level.value
+        dataframe.loc[mfi_overbought_mask, 'mfi_overbought'] = dataframe.loc[mfi_overbought_mask, 'mfi']
+        dataframe.loc[mfi_oversold_mask, 'mfi_oversold'] = dataframe.loc[mfi_oversold_mask, 'mfi']
+        
+        # === MFI + BOLLINGER BANDS COMBINED SIGNALS ===
+        if self.enable_mfi_bb_confirmation.value:
+            # Buy signal: %b > 0.8 AND MFI > 80 (as mentioned in user query)
+            bb_mfi_buy_condition = (
+                (dataframe['bb_percent_b'] > self.bb_percent_b_overbought_level.value) &
+                (dataframe['mfi'] > self.mfi_overbought_level.value)
+            )
+            dataframe.loc[bb_mfi_buy_condition, 'mfi_bb_buy_signal'] = dataframe.loc[bb_mfi_buy_condition, 'mfi']
+            
+            # Sell signal: %b < 0.2 AND MFI < 20 (inverse condition)
+            bb_mfi_sell_condition = (
+                (dataframe['bb_percent_b'] < self.bb_percent_b_oversold_level.value) &
+                (dataframe['mfi'] < self.mfi_oversold_level.value)
+            )
+            dataframe.loc[bb_mfi_sell_condition, 'mfi_bb_sell_signal'] = dataframe.loc[bb_mfi_sell_condition, 'mfi']
+        
         # Define timeframes to analyze independently (no dependency chain - 12-24 month approach)
         timeframes_to_analyze = ['1w', '1d', '4h', '1h']
         
@@ -1239,11 +1342,13 @@ class RiskMetrics(IStrategy):
             latest_percent_b = dataframe['bb_percent_b'].iloc[-1]
             latest_bandwidth = dataframe['bb_bandwidth'].iloc[-1]
             latest_squeeze = dataframe['bb_squeeze'].iloc[-1]
+            latest_mfi = dataframe['mfi'].iloc[-1]
             
-            print(f"=== BOLLINGER BANDS ANALYSIS (Official Rules Implementation) ===")
+            print(f"=== BOLLINGER BANDS + MFI ANALYSIS (Official Rules Implementation) ===")
             print(f"Period: {self.bb_timeperiod.value}, Std Dev: {final_std_dev:.2f} (Rule 11 adjustment: {self.enable_bb_period_adjustment.value})")
             print(f"Close: {latest_close:.6f} | Upper: {latest_upper:.6f} | Middle: {latest_middle:.6f} | Lower: {latest_lower:.6f}")
             print(f"Rule 15-16: %b = {latest_percent_b:.3f} (0=lower band, 0.5=middle, 1=upper band)")
+            print(f"MFI ({self.mfi_timeperiod.value} periods): {latest_mfi:.2f} (0-100 scale, includes volume)")
             
             # Rule interpretation
             if latest_percent_b > 1.0:
@@ -1257,19 +1362,42 @@ class RiskMetrics(IStrategy):
             else:
                 print(f"  → %b in normal range")
             
+            # MFI interpretation
+            if latest_mfi > self.mfi_overbought_level.value:
+                print(f"  → MFI OVERBOUGHT (>{self.mfi_overbought_level.value:.0f}) - Volume-weighted selling pressure")
+            elif latest_mfi < self.mfi_oversold_level.value:
+                print(f"  → MFI OVERSOLD (<{self.mfi_oversold_level.value:.0f}) - Volume-weighted buying opportunity")
+            else:
+                print(f"  → MFI in normal range ({self.mfi_oversold_level.value:.0f}-{self.mfi_overbought_level.value:.0f})")
+            
+            # Combined signal analysis
+            if self.enable_mfi_bb_confirmation.value:
+                if (latest_percent_b > self.bb_percent_b_overbought_level.value and 
+                    latest_mfi > self.mfi_overbought_level.value):
+                    print(f"  → 🚀 COMBINED BUY SIGNAL: %b > {self.bb_percent_b_overbought_level.value:.1f} AND MFI > {self.mfi_overbought_level.value:.0f}")
+                elif (latest_percent_b < self.bb_percent_b_oversold_level.value and 
+                      latest_mfi < self.mfi_oversold_level.value):
+                    print(f"  → 📉 COMBINED SELL SIGNAL: %b < {self.bb_percent_b_oversold_level.value:.1f} AND MFI < {self.mfi_oversold_level.value:.0f}")
+                else:
+                    print(f"  → No combined MFI+BB signal at current levels")
+            
             print(f"Rule 18-19: BandWidth = {latest_bandwidth:.4f} | Squeeze: {'YES' if latest_squeeze == 1.0 else 'NO'}")
             if latest_squeeze == 1.0:
                 print(f"  → Rule 19: THE SQUEEZE detected - Low volatility period, expect breakout")
             
-            # Count recent tags (Rule 6: Tags are not signals)
+            # Count recent tags (Rule 6: Tags are not signals) and combined signals
             recent_candles = min(20, len(dataframe))
             recent_high_tags = dataframe['bb_high_tag'].tail(recent_candles).count()
             recent_low_tags = dataframe['bb_low_tag'].tail(recent_candles).count()
             recent_outside_upper = dataframe['bb_outside_upper'].tail(recent_candles).count()
             recent_outside_lower = dataframe['bb_outside_lower'].tail(recent_candles).count()
+            recent_mfi_bb_buy = dataframe['mfi_bb_buy_signal'].tail(recent_candles).count()
+            recent_mfi_bb_sell = dataframe['mfi_bb_sell_signal'].tail(recent_candles).count()
             
             print(f"Last {recent_candles} candles: High tags: {recent_high_tags} | Low tags: {recent_low_tags} (Rule 6: Tags ≠ Signals)")
             print(f"Last {recent_candles} candles: Outside upper: {recent_outside_upper} | Outside lower: {recent_outside_lower} (Rule 8)")
+            if self.enable_mfi_bb_confirmation.value:
+                print(f"Last {recent_candles} candles: MFI+BB Buy signals: {recent_mfi_bb_buy} | MFI+BB Sell signals: {recent_mfi_bb_sell}")
 
         return dataframe
 
@@ -1296,7 +1424,14 @@ class RiskMetrics(IStrategy):
         dataframe.loc[:, 'RSI_Optimal_Support'] = np.nan
         dataframe.loc[:, 'RSI_Resistance_Score'] = 0.0
         dataframe.loc[:, 'RSI_Support_Score'] = 0.0
-                
+        
+        # Initialize MFI columns
+        dataframe.loc[:, 'mfi'] = np.nan
+        dataframe.loc[:, 'mfi_overbought'] = np.nan
+        dataframe.loc[:, 'mfi_oversold'] = np.nan
+        dataframe.loc[:, 'mfi_bb_buy_signal'] = np.nan
+        dataframe.loc[:, 'mfi_bb_sell_signal'] = np.nan
+
     def _populate_from_existing_trendlines(self, dataframe: DataFrame, metadata: dict) -> bool:
         """
         Draw every stored trendline during their exact start/end time periods.
