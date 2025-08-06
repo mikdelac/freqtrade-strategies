@@ -10,6 +10,7 @@ from typing import Dict, Optional, Union, Tuple, List
 from functools import reduce
 import random
 import talib.abstract as ta
+from technical.indicators import laguerre
 
 import sys
 import os
@@ -67,7 +68,7 @@ class SignalGenerator:
     
     def generate_entry_signals(self, dataframe: DataFrame) -> DataFrame:
         """
-        Generate entry signals based on RSI crossing support from below.
+        Generate entry signals based on Laguerre crossing support from below.
         Filters signals using Bollinger Bands for confirmation.
         Enhanced with MFI + Bollinger Bands combined signals.
         
@@ -82,24 +83,24 @@ class SignalGenerator:
         dataframe.loc[:, 'enter_short'] = 0
         
         # Check if required columns exist
-        required_columns = ['rsi', 'RSI_Optimal_Support', 'RSI_Optimal_Resistance', 
+        required_columns = ['laguerre', 'Laguerre_Optimal_Support', 'Laguerre_Optimal_Resistance', 
                           'bb_lowerband', 'bb_middleband', 'bb_upperband', 'bb_percent_b']
         if not all(col in dataframe.columns for col in required_columns):
-            print("Missing required columns for RSI signal generation")
+            print("Missing required columns for Laguerre signal generation")
             return dataframe
         
-        # Create RSI crossover conditions (original logic)
-        rsi_support_crossover = (
-            (dataframe['rsi'] > dataframe['RSI_Optimal_Support']) &  # Current RSI above support
-            (dataframe['rsi'].shift(1) <= dataframe['RSI_Optimal_Support'].shift(1)) &  # Previous RSI was below support
-            (~dataframe['RSI_Optimal_Support'].isna()) &  # Support line exists
-            (~dataframe['RSI_Optimal_Support'].shift(1).isna()) &  # Previous support line exists
+        # Create Laguerre crossover conditions (original logic)
+        laguerre_support_crossover = (
+            (dataframe['laguerre'] > dataframe['Laguerre_Optimal_Support']) &  # Current Laguerre above support
+            (dataframe['laguerre'].shift(1) <= dataframe['Laguerre_Optimal_Support'].shift(1)) &  # Previous Laguerre was below support
+            (~dataframe['Laguerre_Optimal_Support'].isna()) &  # Support line exists
+            (~dataframe['Laguerre_Optimal_Support'].shift(1).isna()) &  # Previous support line exists
             (dataframe['close'] < dataframe['bb_middleband']) &  # Price below BB middle band
             (dataframe['close'] > dataframe['bb_lowerband'])  # Price above BB lower band
         )
         
         # Enhanced entry signals with MFI + Bollinger Bands confirmation
-        enhanced_entry_signals = rsi_support_crossover
+        enhanced_entry_signals = laguerre_support_crossover
         
         # Add MFI + BB confirmation if enabled and MFI column exists
         if (self.strategy.enable_mfi_bb_confirmation.value and 
@@ -112,8 +113,8 @@ class SignalGenerator:
                 (dataframe['mfi'] > self.strategy.mfi_overbought_level.value)
             )
             
-            # Enhanced signals: original RSI signals OR MFI+BB confirmation
-            enhanced_entry_signals = rsi_support_crossover | mfi_bb_confirmation
+            # Enhanced signals: original Laguerre signals OR MFI+BB confirmation
+            enhanced_entry_signals = laguerre_support_crossover | mfi_bb_confirmation
             
             # Count additional signals from MFI+BB
             mfi_bb_signals = mfi_bb_confirmation.sum()
@@ -124,8 +125,8 @@ class SignalGenerator:
         
         # Log entry signal summary
         long_signals = dataframe['enter_long'].sum()
-        rsi_signals = rsi_support_crossover.sum()
-        print(f"RSI-based entry signals generated: {rsi_signals} long")
+        laguerre_signals = laguerre_support_crossover.sum()
+        print(f"Laguerre-based entry signals generated: {laguerre_signals} long")
         print(f"Total enhanced entry signals: {long_signals} long")
         
         return dataframe
@@ -205,7 +206,7 @@ class SignalGenerator:
     
     def generate_exit_signals(self, dataframe: DataFrame) -> DataFrame:
         """
-        Generate exit signals based on RSI approaching resistance.
+        Generate exit signals based on Laguerre approaching resistance.
         Uses Bollinger Bands for additional confirmation.
         Enhanced with MFI + Bollinger Bands combined signals.
         
@@ -220,24 +221,24 @@ class SignalGenerator:
         dataframe.loc[:, 'exit_short'] = 0
         
         # Check if required columns exist
-        required_columns = ['rsi', 'RSI_Optimal_Resistance', 'bb_upperband', 'bb_percent_b']
+        required_columns = ['laguerre', 'Laguerre_Optimal_Resistance', 'bb_upperband', 'bb_percent_b']
         if not all(col in dataframe.columns for col in required_columns):
-            print("Missing required columns for RSI exit signal generation")
+            print("Missing required columns for Laguerre exit signal generation")
             return dataframe
         
-        # Define proximity threshold for RSI resistance (within 5 points)
-        rsi_resistance_proximity = 5.0
+        # Define proximity threshold for Laguerre resistance (within 5 points)
+        laguerre_resistance_proximity = 5.0
         
-        # Create RSI resistance proximity condition with BB confirmation (original logic)
-        near_rsi_resistance = (
-            (dataframe['RSI_Optimal_Resistance'] - dataframe['rsi'] <= rsi_resistance_proximity) &
-            (dataframe['rsi'] < dataframe['RSI_Optimal_Resistance']) &  # RSI below resistance
-            (~dataframe['RSI_Optimal_Resistance'].isna()) &  # Resistance line exists
+        # Create Laguerre resistance proximity condition with BB confirmation (original logic)
+        near_laguerre_resistance = (
+            (dataframe['Laguerre_Optimal_Resistance'] - dataframe['laguerre'] <= laguerre_resistance_proximity) &
+            (dataframe['laguerre'] < dataframe['Laguerre_Optimal_Resistance']) &  # Laguerre below resistance
+            (~dataframe['Laguerre_Optimal_Resistance'].isna()) &  # Resistance line exists
             (dataframe['close'] > dataframe['bb_upperband'])  # Price above BB upper band
         )
         
         # Enhanced exit signals with MFI + Bollinger Bands confirmation
-        enhanced_exit_signals = near_rsi_resistance
+        enhanced_exit_signals = near_laguerre_resistance
         
         # Add MFI + BB confirmation if enabled and MFI column exists
         if (self.strategy.enable_mfi_bb_confirmation.value and 
@@ -250,8 +251,8 @@ class SignalGenerator:
                 (dataframe['mfi'] < self.strategy.mfi_oversold_level.value)
             )
             
-            # Enhanced signals: original RSI signals OR MFI+BB exit confirmation
-            enhanced_exit_signals = near_rsi_resistance | mfi_bb_exit_confirmation
+            # Enhanced signals: original Laguerre signals OR MFI+BB exit confirmation
+            enhanced_exit_signals = near_laguerre_resistance | mfi_bb_exit_confirmation
             
             # Count additional signals from MFI+BB
             mfi_bb_exit_signals = mfi_bb_exit_confirmation.sum()
@@ -262,8 +263,8 @@ class SignalGenerator:
         
         # Log exit signal summary
         long_exits = dataframe['exit_long'].sum()
-        rsi_exits = near_rsi_resistance.sum()
-        print(f"RSI-based exit signals generated: {rsi_exits} long exits")
+        laguerre_exits = near_laguerre_resistance.sum()
+        print(f"Laguerre-based exit signals generated: {laguerre_exits} long exits")
         print(f"Total enhanced exit signals: {long_exits} long exits")
         
         return dataframe
@@ -296,7 +297,7 @@ class RiskMetrics(IStrategy):
     - Money Flow Index (MFI) integration for volume-weighted momentum analysis:
       * Combines price and volume to identify overbought/oversold conditions
       * Enhanced signal confirmation with Bollinger Bands (%b > 0.8 AND MFI > 80)
-      * Complementary analysis to RSI-based trendlines with volume considerations
+      * Complementary analysis to Laguerre-based trendlines with volume considerations
       * Real-time MFI + Bollinger Bands combined signal detection
     """
     INTERFACE_VERSION = 3
@@ -331,8 +332,8 @@ class RiskMetrics(IStrategy):
     # Rolling Monte Carlo optimization (eliminates lookahead bias)
     enable_rolling_mc_optimization = BooleanParameter(default=True, space="buy", optimize=False)
 
-    # RSI parameters
-    rsi_timeperiod = IntParameter(10, 30, default=14, space="buy", optimize=True)
+    # Laguerre parameters
+    laguerre_gamma = DecimalParameter(0.1, 0.9, default=0.7, space="buy", optimize=True)
 
     # === Bollinger Bands Parameters (Rules 9 & 11) ===
     # Rule 9: Default parameters are just defaults - actual parameters may be different for each market/task
@@ -350,10 +351,6 @@ class RiskMetrics(IStrategy):
     # Squeeze detection parameters (Rule 19)
     bb_squeeze_lookback = IntParameter(10, 30, default=20, space="buy", optimize=True)
     bb_squeeze_threshold = DecimalParameter(0.7, 0.9, default=0.8, space="buy", optimize=True)
-
-    # === RSI Trendline Parameters ===
-    enable_rsi_trendlines = BooleanParameter(default=True, space="buy", optimize=False)
-    rsi_trendline_proximity_threshold = DecimalParameter(0.5, 5.0, default=2.0, space="buy", optimize=True)
 
     # === Money Flow Index (MFI) Parameters ===
     # MFI uses price and volume to identify overbought/oversold conditions
@@ -447,6 +444,10 @@ class RiskMetrics(IStrategy):
         '1w': 0.20,    # 20.0% proximity threshold for 1w timeframe (loose)
     }
 
+    # === Laguerre Trendline Parameters ===
+    enable_laguerre_trendlines = BooleanParameter(default=True, space="buy", optimize=False)
+    laguerre_trendline_proximity_threshold = DecimalParameter(0.5, 5.0, default=2.0, space="buy", optimize=True)
+
     @property
     def plot_config(self):
         # Enhanced configuration with Bollinger Bands indicators following official rules
@@ -468,6 +469,13 @@ class RiskMetrics(IStrategy):
                 "bb_percent_b": {"color": "rgba(255,165,0,0.3)", "width": 1.0, "dash": "dash"}
             },
             "subplots": {
+                "Laguerre": {
+                    "laguerre": {"color": "purple", "type": "line", "width": 2.0},
+                    "all_highs_laguerre": {"color": "red", "type": "scatter", "symbol": "triangle-down", "size": 8, "fillcolor": "red"},
+                    "all_lows_laguerre": {"color": "green", "type": "scatter", "symbol": "triangle-up", "size": 8, "fillcolor": "green"},
+                    "Laguerre_Optimal_Resistance": {"color": "orange", "width": 3.0, "dash": "dash"},
+                    "Laguerre_Optimal_Support": {"color": "lightblue", "width": 3.0, "dash": "dash"}
+                },
                 "RSI": {
                     "rsi": {"color": "purple", "type": "line", "width": 2.0},
                     "all_highs_rsi": {"color": "red", "type": "scatter", "symbol": "triangle-down", "size": 8, "fillcolor": "red"},
@@ -500,8 +508,8 @@ class RiskMetrics(IStrategy):
                 "Monte Carlo Optimization": {
                     "MC_Resistance_Score": {"color": "darkred", "type": "line", "width": 3.0},
                     "MC_Support_Score": {"color": "darkgreen", "type": "line", "width": 3.0},
-                    "RSI_Resistance_Score": {"color": "orange", "type": "line", "width": 2.0},
-                    "RSI_Support_Score": {"color": "lightblue", "type": "line", "width": 2.0},
+                    "Laguerre_Resistance_Score": {"color": "orange", "type": "line", "width": 2.0},
+                    "Laguerre_Support_Score": {"color": "lightblue", "type": "line", "width": 2.0},
                 }
             }
         }
@@ -531,8 +539,8 @@ class RiskMetrics(IStrategy):
         # Initialize trendline storage for all iterations
         self.stored_trendlines = []  # List to store all Trendline objects from each Monte Carlo iteration
         
-        # Initialize RSI trendline storage
-        self.stored_rsi_trendlines = []  # List to store RSI-specific Trendline objects
+        # Initialize Laguerre trendline storage
+        self.stored_laguerre_trendlines = []  # List to store Laguerre-specific Trendline objects
         
         # Initialize trendline storage for each timeframe
         self.stored_trendlines_5m = []
@@ -545,7 +553,7 @@ class RiskMetrics(IStrategy):
         # Initialize heartbeat tracking for live trading mode
         self.last_recalculation_time = None  # Track when we last recalculated
         self.backtest_executed = False  # Track if Monte Carlo has been executed at least once
-        self.rsi_backtest_executed = False  # Track if RSI Monte Carlo has been executed at least once
+        self.laguerre_backtest_executed = False  # Track if Laguerre Monte Carlo has been executed at least once
         
         print(f"RiskMetrics strategy initialized with Monte Carlo architecture:")
         print(f"  Lookback periods: Fixed periods for Monte Carlo optimization")
@@ -553,7 +561,7 @@ class RiskMetrics(IStrategy):
         print(f"  Signal generator: Initialized for modular signal generation")
         print(f"  Monte Carlo functions: Using standalone functions from trendline.py")
         print(f"  Rolling Monte Carlo optimization: {'ENABLED' if self.enable_rolling_mc_optimization.value else 'DISABLED'}")
-        print(f"  RSI Trendlines: {'ENABLED' if self.enable_rsi_trendlines.value else 'DISABLED'}")
+        print(f"  Laguerre Trendlines: {'ENABLED' if self.enable_laguerre_trendlines.value else 'DISABLED'}")
         print(f"  Swing Point Detector: Initialized for swing point detection")
         if self.enable_rolling_mc_optimization.value:
             print(f"    - Eliminates lookahead bias for realistic backtesting")
@@ -919,10 +927,10 @@ class RiskMetrics(IStrategy):
                     
                     # Store RSI trendline objects from this iteration
                     if rsi_resistance_trendline:
-                        self.stored_rsi_trendlines.append(rsi_resistance_trendline)
+                        self.stored_laguerre_trendlines.append(rsi_resistance_trendline)
                     
                     if rsi_support_trendline:
-                        self.stored_rsi_trendlines.append(rsi_support_trendline)
+                        self.stored_laguerre_trendlines.append(rsi_support_trendline)
 
             # Project RSI trendlines forward using slopes
             self._project_rsi_trendlines_forward(
@@ -989,14 +997,14 @@ class RiskMetrics(IStrategy):
             rsi_resistance_trendline = optimization_results.get('best_resistance_trendline')
             if rsi_resistance_trendline:
                 rsi_resistance_trendline.trendline_type = 'rsi_resistance'
-                self.stored_rsi_trendlines.append(rsi_resistance_trendline)
+                self.stored_laguerre_trendlines.append(rsi_resistance_trendline)
                 self._apply_rsi_trendline_to_dataframe(dataframe, rsi_resistance_trendline, 'resistance')
             
             # Process RSI support results  
             rsi_support_trendline = optimization_results.get('best_support_trendline')
             if rsi_support_trendline:
                 rsi_support_trendline.trendline_type = 'rsi_support'
-                self.stored_rsi_trendlines.append(rsi_support_trendline)
+                self.stored_laguerre_trendlines.append(rsi_support_trendline)
                 self._apply_rsi_trendline_to_dataframe(dataframe, rsi_support_trendline, 'support')
                 
             print(f"RSI Monte Carlo optimization completed for {metadata['pair']}")
@@ -1038,14 +1046,14 @@ class RiskMetrics(IStrategy):
         Returns:
             bool: True if any RSI trendlines were drawn, False otherwise
         """
-        if not self.stored_rsi_trendlines:
+        if not self.stored_laguerre_trendlines:
             return False
         
         pair = metadata.get('pair', 'UNKNOWN')
-        print(f"Drawing {len(self.stored_rsi_trendlines)} stored RSI trendlines for {pair}")
+        print(f"Drawing {len(self.stored_laguerre_trendlines)} stored RSI trendlines for {pair}")
                 
         # Use vectorized operations instead of nested loops
-        for trendline in self.stored_rsi_trendlines:
+        for trendline in self.stored_laguerre_trendlines:
             # Create boolean mask for active timestamps (vectorized)
             active_mask = dataframe['date'].apply(lambda ts: trendline.is_active_at_time(ts))
             
@@ -1211,10 +1219,10 @@ class RiskMetrics(IStrategy):
             not self.backtest_executed  # Monte Carlo has never been executed
         )
         
-        # RSI backtest detection
-        is_rsi_backtest_mode = (
-            len(self.stored_rsi_trendlines) == 0 or  # No RSI trendlines stored yet (first run)
-            not self.rsi_backtest_executed  # RSI Monte Carlo has never been executed
+        # Laguerre backtest detection
+        is_laguerre_backtest_mode = (
+            len(self.stored_laguerre_trendlines) == 0 or  # No Laguerre trendlines stored yet (first run)
+            not self.laguerre_backtest_executed  # Laguerre Monte Carlo has never been executed
         )
         
         latest_candle_time = dataframe['date'].iloc[-1]
@@ -1223,11 +1231,11 @@ class RiskMetrics(IStrategy):
         print(f"Latest candle: {latest_candle_time}")
         print(f"Dataframe length: {len(dataframe)} candles")
         print(f"Stored trendlines: {len(self.stored_trendlines)}")
-        print(f"Stored RSI trendlines: {len(self.stored_rsi_trendlines)}")
+        print(f"Stored Laguerre trendlines: {len(self.stored_laguerre_trendlines)}")
         print(f"Monte Carlo executed: {self.backtest_executed}")
-        print(f"RSI Monte Carlo executed: {self.rsi_backtest_executed}")
+        print(f"Laguerre Monte Carlo executed: {self.laguerre_backtest_executed}")
         print(f"Price trendlines mode: {'BACKTEST' if is_backtest_mode else 'LIVE TRADING'}")
-        print(f"RSI trendlines mode: {'BACKTEST' if is_rsi_backtest_mode else 'LIVE TRADING'}")
+        print(f"Laguerre trendlines mode: {'BACKTEST' if is_laguerre_backtest_mode else 'LIVE TRADING'}")
         
         # Clear stored trendlines from previous runs only in backtest mode
         if is_backtest_mode:
@@ -1236,20 +1244,20 @@ class RiskMetrics(IStrategy):
         else:
             print(f"Keeping existing price trendlines for live trading of {metadata.get('pair', 'UNKNOWN')} ({len(self.stored_trendlines)} stored)")
             
-        if is_rsi_backtest_mode:
-            self.stored_rsi_trendlines.clear()
-            print(f"Cleared previous RSI trendline storage for backtest analysis of {metadata.get('pair', 'UNKNOWN')}")
+        if is_laguerre_backtest_mode:
+            self.stored_laguerre_trendlines.clear()
+            print(f"Cleared previous Laguerre trendline storage for backtest analysis of {metadata.get('pair', 'UNKNOWN')}")
         else:
-            print(f"Keeping existing RSI trendlines for live trading of {metadata.get('pair', 'UNKNOWN')} ({len(self.stored_rsi_trendlines)} stored)")
+            print(f"Keeping existing Laguerre trendlines for live trading of {metadata.get('pair', 'UNKNOWN')} ({len(self.stored_laguerre_trendlines)} stored)")
 
         # Initialize all required dataframe columns
         self._initialize_dataframe_columns(dataframe)
 
-        # Calculate RSI
-        dataframe['rsi'] = ta.RSI(dataframe, timeperiod=self.rsi_timeperiod.value)
+        # Calculate Laguerre
+        dataframe['laguerre'] = laguerre(dataframe, gamma=self.laguerre_gamma.value)
 
-        # Find and map RSI swing points
-        self._find_rsi_swing_points(dataframe)
+        # Find and map Laguerre swing points
+        self._find_laguerre_swing_points(dataframe)
 
         # Find and map swing points using SwingPointDetector for the main timeframe (5m)
         main_detector = self.swing_detectors.get(self.timeframe)
@@ -1284,30 +1292,30 @@ class RiskMetrics(IStrategy):
                 # Update last recalculation time
                 self._update_last_recalculation_time(latest_candle_time)
 
-        # === RSI TRENDLINES PROCESSING ===
-        if self.enable_rsi_trendlines.value:
-            if not self.rsi_backtest_executed:
-                # === RSI BACKTEST MODE: Rolling Monte Carlo ===
-                print("=== EXECUTING RSI TRENDLINES BACKTEST MODE ===")
+        # === LAGUERRE TRENDLINES PROCESSING ===
+        if self.enable_laguerre_trendlines.value:
+            if not self.laguerre_backtest_executed:
+                # === LAGUERRE BACKTEST MODE: Rolling Monte Carlo ===
+                print("=== EXECUTING LAGUERRE TRENDLINES BACKTEST MODE ===")
                 
-                # In backtest mode, always run RSI Monte Carlo optimization since we cleared stored RSI trendlines
+                # In backtest mode, always run Laguerre Monte Carlo optimization since we cleared stored Laguerre trendlines
                 if self.enable_rolling_mc_optimization.value:
-                    self._execute_rolling_rsi_monte_carlo_optimization(dataframe, metadata)
+                    self._execute_rolling_laguerre_monte_carlo_optimization(dataframe, metadata)
                 else:
-                    self._execute_non_rolling_rsi_monte_carlo_optimization(dataframe, metadata)
+                    self._execute_non_rolling_laguerre_monte_carlo_optimization(dataframe, metadata)
 
-                # Mark that RSI Monte Carlo has been executed
-                self.rsi_backtest_executed = True
+                # Mark that Laguerre Monte Carlo has been executed
+                self.laguerre_backtest_executed = True
             else:
-                # === RSI LIVE TRADING MODE: Heartbeat-based Monte Carlo ===
-                print("=== EXECUTING RSI TRENDLINES LIVE TRADING MODE ===")
+                # === LAGUERRE LIVE TRADING MODE: Heartbeat-based Monte Carlo ===
+                print("=== EXECUTING LAGUERRE TRENDLINES LIVE TRADING MODE ===")
                 
-                self._populate_rsi_from_existing_trendlines(dataframe, metadata)
+                self._populate_laguerre_from_existing_trendlines(dataframe, metadata)
 
-                # Check if we need to recalculate RSI trendlines based on time interval            
+                # Check if we need to recalculate Laguerre trendlines based on time interval            
                 if self._should_recalculate_for_heartbeat(latest_candle_time):
-                    print(f"RSI recalculation interval reached - executing non-rolling RSI Monte Carlo")
-                    self._execute_non_rolling_rsi_monte_carlo_optimization(dataframe, metadata)
+                    print(f"Laguerre recalculation interval reached - executing non-rolling Laguerre Monte Carlo")
+                    self._execute_non_rolling_laguerre_monte_carlo_optimization(dataframe, metadata)
 
         # === Output All Stored Trendlines ===
         output_trendlines_info(self.stored_trendlines_1w)
@@ -1325,13 +1333,6 @@ class RiskMetrics(IStrategy):
             
             print(f"Latest bounce timestamp {timeframe} resistance: {resistance_time}")
             print(f"Latest bounce timestamp {timeframe} support: {support_time}")
-
-        # Print RSI trendline information
-        if self.enable_rsi_trendlines.value:
-            print(f"RSI trendlines stored: {len(self.stored_rsi_trendlines)}")
-            if self.stored_rsi_trendlines:
-                print("=== RSI TRENDLINES INFO ===")
-                output_trendlines_info(self.stored_rsi_trendlines)
 
         # Print Bollinger Bands analysis summary following official rules
         if len(dataframe) > 0:
@@ -1399,6 +1400,38 @@ class RiskMetrics(IStrategy):
             if self.enable_mfi_bb_confirmation.value:
                 print(f"Last {recent_candles} candles: MFI+BB Buy signals: {recent_mfi_bb_buy} | MFI+BB Sell signals: {recent_mfi_bb_sell}")
 
+        # === LAGUERRE TRENDLINES PROCESSING ===
+        if self.enable_laguerre_trendlines.value:
+            if not self.laguerre_backtest_executed:
+                # === LAGUERRE BACKTEST MODE: Rolling Monte Carlo ===
+                print("=== EXECUTING LAGUERRE TRENDLINES BACKTEST MODE ===")
+                
+                # In backtest mode, always run Laguerre Monte Carlo optimization since we cleared stored Laguerre trendlines
+                if self.enable_rolling_mc_optimization.value:
+                    self._execute_rolling_laguerre_monte_carlo_optimization(dataframe, metadata)
+                else:
+                    self._execute_non_rolling_laguerre_monte_carlo_optimization(dataframe, metadata)
+
+                # Mark that Laguerre Monte Carlo has been executed
+                self.laguerre_backtest_executed = True
+            else:
+                # === LAGUERRE LIVE TRADING MODE: Heartbeat-based Monte Carlo ===
+                print("=== EXECUTING LAGUERRE TRENDLINES LIVE TRADING MODE ===")
+                
+                self._populate_laguerre_from_existing_trendlines(dataframe, metadata)
+
+                # Check if we need to recalculate Laguerre trendlines based on time interval            
+                if self._should_recalculate_for_heartbeat(latest_candle_time):
+                    print(f"Laguerre recalculation interval reached - executing non-rolling Laguerre Monte Carlo")
+                    self._execute_non_rolling_laguerre_monte_carlo_optimization(dataframe, metadata)
+
+        # Print Laguerre trendline information
+        if self.enable_laguerre_trendlines.value:
+            print(f"Laguerre trendlines stored: {len(self.stored_laguerre_trendlines)}")
+            if self.stored_laguerre_trendlines:
+                print("=== LAGUERRE TRENDLINES INFO ===")
+                output_trendlines_info(self.stored_laguerre_trendlines)
+
         return dataframe
 
     def _initialize_dataframe_columns(self, dataframe: DataFrame) -> None:
@@ -1419,11 +1452,11 @@ class RiskMetrics(IStrategy):
         dataframe.loc[:, 'MC_Support_Score'] = 0.0
         dataframe.loc[:, 'MC_Optimal_Period'] = 0.0
         
-        # Initialize RSI trendline columns
-        dataframe.loc[:, 'RSI_Optimal_Resistance'] = np.nan
-        dataframe.loc[:, 'RSI_Optimal_Support'] = np.nan
-        dataframe.loc[:, 'RSI_Resistance_Score'] = 0.0
-        dataframe.loc[:, 'RSI_Support_Score'] = 0.0
+        # Initialize Laguerre trendline columns
+        dataframe.loc[:, 'Laguerre_Optimal_Resistance'] = np.nan
+        dataframe.loc[:, 'Laguerre_Optimal_Support'] = np.nan
+        dataframe.loc[:, 'Laguerre_Resistance_Score'] = 0.0
+        dataframe.loc[:, 'Laguerre_Support_Score'] = 0.0
         
         # Initialize MFI columns
         dataframe.loc[:, 'mfi'] = np.nan
@@ -1728,3 +1761,295 @@ class RiskMetrics(IStrategy):
             original_idx = rsi_series.index[idx]
             dataframe.loc[original_idx, 'all_lows_rsi'] = rsi_value
 
+    def _find_laguerre_swing_points(self, dataframe: DataFrame) -> None:
+        """
+        Find swing high and low points in Laguerre and map them to dataframe columns.
+        
+        Args:
+            dataframe: DataFrame containing Laguerre data
+        """
+        if 'laguerre' not in dataframe.columns:
+            return
+            
+        # Initialize Laguerre swing point columns
+        dataframe.loc[:, 'all_highs_laguerre'] = np.nan
+        dataframe.loc[:, 'all_lows_laguerre'] = np.nan
+        
+        # Clean Laguerre data by removing NaN values
+        laguerre_series = dataframe['laguerre'].dropna()
+        
+        if len(laguerre_series) < 10:  # Need at least 10 valid Laguerre values
+            print("Not enough valid Laguerre data for swing point detection")
+            return
+        
+        # Use SwingPointDetector for Laguerre with appropriate parameters
+        laguerre_detector = SwingPointDetector(
+            distance=10,      # Minimum distance between Laguerre swing points
+            prominence=0.10,  # 8% prominence for Laguerre swing points
+            wlen=None,
+            width=None
+        )
+        
+        # Find Laguerre swing highs and lows using clean data
+        laguerre_highs = laguerre_detector.find_swing_points(laguerre_series.values, 'high')
+        laguerre_lows = laguerre_detector.find_swing_points(laguerre_series.values, 'low')
+        
+        print(f"Laguerre data range: {laguerre_series.min():.2f} to {laguerre_series.max():.2f}")
+        print(f"Laguerre highs found: {len(laguerre_highs)}")
+        print(f"Laguerre lows found: {len(laguerre_lows)}")
+        
+        # Map Laguerre swing highs back to original dataframe indices
+        for idx, laguerre_value in laguerre_highs:
+            # Convert from clean data index to original dataframe index
+            original_idx = laguerre_series.index[idx]
+            dataframe.loc[original_idx, 'all_highs_laguerre'] = laguerre_value
+        
+        # Map Laguerre swing lows back to original dataframe indices
+        for idx, laguerre_value in laguerre_lows:
+            # Convert from clean data index to original dataframe index
+            original_idx = laguerre_series.index[idx]
+            dataframe.loc[original_idx, 'all_lows_laguerre'] = laguerre_value
+
+    def _create_laguerre_dataframe_for_trendlines(self, dataframe: DataFrame) -> DataFrame:
+        """
+        Create a dataframe suitable for Laguerre trendline analysis.
+        Maps Laguerre swing points to OHLCV format for trendline analysis.
+        
+        Args:
+            dataframe: Original dataframe with Laguerre data and swing points
+            
+        Returns:
+            DataFrame: Laguerre dataframe with swing points mapped to OHLCV format
+        """
+        if 'laguerre' not in dataframe.columns:
+            return None
+            
+        # Create Laguerre dataframe with OHLCV format using Laguerre values
+        laguerre_df = dataframe[['date', 'laguerre']].copy()
+        laguerre_df.rename(columns={'laguerre': 'close'}, inplace=True)
+        
+        # For Laguerre trendlines, we use Laguerre value as all OHLCV components
+        laguerre_df['open'] = laguerre_df['close']
+        laguerre_df['high'] = laguerre_df['close']
+        laguerre_df['low'] = laguerre_df['close']
+        laguerre_df['volume'] = 1.0  # Dummy volume
+        
+        # Map Laguerre swing points to highs/lows columns
+        laguerre_df['all_highs'] = dataframe.get('all_highs_laguerre', np.nan)
+        laguerre_df['all_lows'] = dataframe.get('all_lows_laguerre', np.nan)
+        
+        return laguerre_df
+
+    def _execute_rolling_laguerre_monte_carlo_recalculation(self, dataframe: DataFrame, i: int, metadata: dict) -> Optional[Tuple[Trendline, Trendline]]:
+        """
+        Execute Laguerre Monte Carlo recalculation for a specific candle index.
+        
+        Args:
+            dataframe: The full dataframe
+            i: Current candle index
+            metadata: Strategy metadata
+            
+        Returns:
+            Tuple of (best_resistance_trendline, best_support_trendline) or None if failed
+        """
+        # Create Laguerre dataframe for trendline analysis
+        laguerre_dataframe = self._create_laguerre_dataframe_for_trendlines(dataframe)
+        if laguerre_dataframe is None:
+            return None
+        
+        # Define the lookback window for the current candle (point-in-time data only)
+        lookback_start = max(0, i - self.mc_lookback_window_candles.value)
+        current_laguerre_slice = laguerre_dataframe.iloc[lookback_start:i].copy()
+
+        print(f"  Laguerre analysis using data slice: {lookback_start} to {i} ({len(current_laguerre_slice)} candles)")
+        
+        # Execute Monte Carlo optimization on Laguerre data
+        optimization_results = monte_carlo_period_optimization(
+            current_laguerre_slice, f"{metadata['pair']}_Laguerre", self.mc_recalc_interval_minutes.value,
+            self.MC_ITERATIONS, self.laguerre_trendline_proximity_threshold.value
+        )
+        
+        # Extract trendline objects directly
+        best_resistance_trendline = optimization_results.get('best_resistance_trendline')
+        best_support_trendline = optimization_results.get('best_support_trendline')
+        
+        # Mark trendlines as Laguerre-specific
+        if best_resistance_trendline:
+            best_resistance_trendline.trendline_type = 'laguerre_resistance'
+        if best_support_trendline:
+            best_support_trendline.trendline_type = 'laguerre_support'
+        
+        return (best_resistance_trendline, best_support_trendline) if (best_resistance_trendline or best_support_trendline) else None
+
+    def _execute_rolling_laguerre_monte_carlo_optimization(self, dataframe: DataFrame, metadata: dict) -> None:
+        """
+        Execute rolling Monte Carlo optimization for Laguerre trendlines to eliminate lookahead bias.
+        
+        Args:
+            dataframe: The dataframe to process
+            metadata: Strategy metadata containing pair information
+        """
+        print("=== EXECUTING LAGUERRE Rolling Monte Carlo Optimization ===")
+        
+        # Initialize optimization parameters
+        recalc_interval_candles = self.mc_recalc_interval_minutes.value // timeframe_to_minutes(self.timeframe)
+        min_required_candles = max(self.MIN_LOOKBACK_PERIOD, 100)
+        
+        # Initialize variables used in the loop
+        laguerre_resistance_trendline = None
+        laguerre_support_trendline = None
+
+        # Main rolling optimization loop for Laguerre
+        for i in range(min_required_candles, len(dataframe)):
+            current_time = dataframe['date'].iloc[i]
+            should_recalculate = self._should_recalculate_at_candle(i, min_required_candles, recalc_interval_candles)
+
+            if should_recalculate:
+                print(f"Laguerre Monte Carlo recalculation at index {i} (time: {current_time})")
+                
+                trendline_results = self._execute_rolling_laguerre_monte_carlo_recalculation(dataframe, i, metadata)
+                
+                if trendline_results:
+                    laguerre_resistance_trendline, laguerre_support_trendline = trendline_results
+                    
+                    # Store Laguerre trendline objects from this iteration
+                    if laguerre_resistance_trendline:
+                        self.stored_laguerre_trendlines.append(laguerre_resistance_trendline)
+                    
+                    if laguerre_support_trendline:
+                        self.stored_laguerre_trendlines.append(laguerre_support_trendline)
+
+            # Project Laguerre trendlines forward using slopes
+            self._project_laguerre_trendlines_forward(
+                dataframe, i, laguerre_resistance_trendline, laguerre_support_trendline
+            )
+
+    def _project_laguerre_trendlines_forward(self, dataframe: DataFrame, current_index: int, 
+                                  laguerre_resistance_trendline: Optional[Trendline], 
+                                  laguerre_support_trendline: Optional[Trendline]) -> None:
+        """
+        Project Laguerre trendlines forward and update dataframe columns.
+        
+        Args:
+            dataframe: DataFrame to update
+            current_index: Current candle index
+            laguerre_resistance_trendline: Current Laguerre resistance trendline
+            laguerre_support_trendline: Current Laguerre support trendline
+        """
+        current_time = dataframe['date'].iloc[current_index]
+        
+        # Project Laguerre resistance trendline
+        if laguerre_resistance_trendline:
+            projected_resistance = laguerre_resistance_trendline.get_price_at_time(
+                current_time, timeframe_to_minutes(self.timeframe)
+            )
+            if projected_resistance is not None:
+                dataframe.iloc[current_index, dataframe.columns.get_loc('Laguerre_Optimal_Resistance')] = projected_resistance
+                dataframe.iloc[current_index, dataframe.columns.get_loc('Laguerre_Resistance_Score')] = float(laguerre_resistance_trendline.bounce_count)
+        
+        # Project Laguerre support trendline
+        if laguerre_support_trendline:
+            projected_support = laguerre_support_trendline.get_price_at_time(
+                current_time, timeframe_to_minutes(self.timeframe)
+            )
+            if projected_support is not None:
+                dataframe.iloc[current_index, dataframe.columns.get_loc('Laguerre_Optimal_Support')] = projected_support
+                dataframe.iloc[current_index, dataframe.columns.get_loc('Laguerre_Support_Score')] = float(laguerre_support_trendline.bounce_count)
+
+    def _execute_non_rolling_laguerre_monte_carlo_optimization(self, dataframe: DataFrame, metadata: dict) -> None:
+        """
+        Execute non-rolling Laguerre Monte Carlo optimization (original method with potential lookahead bias).
+        
+        Args:
+            dataframe: The dataframe to process
+            metadata: Strategy metadata containing pair information
+        """
+        print("=== Using Original Laguerre Monte Carlo Optimization (with potential lookahead bias) ===")
+
+        # Create Laguerre dataframe for trendline analysis
+        laguerre_dataframe = self._create_laguerre_dataframe_for_trendlines(dataframe)
+        if laguerre_dataframe is None:
+            print("No Laguerre data available for trendline analysis")
+            return
+
+        # Execute Monte Carlo optimization on Laguerre data
+        optimization_results = monte_carlo_period_optimization(
+            laguerre_dataframe, f"{metadata['pair']}_Laguerre",
+            mc_iterations=self.MC_ITERATIONS,
+            trendline_proximity_threshold=self.laguerre_trendline_proximity_threshold.value
+        )
+        
+        if optimization_results:
+            # Process Laguerre resistance results
+            laguerre_resistance_trendline = optimization_results.get('best_resistance_trendline')
+            if laguerre_resistance_trendline:
+                laguerre_resistance_trendline.trendline_type = 'laguerre_resistance'
+                self.stored_laguerre_trendlines.append(laguerre_resistance_trendline)
+                self._apply_laguerre_trendline_to_dataframe(dataframe, laguerre_resistance_trendline, 'resistance')
+            
+            # Process Laguerre support results  
+            laguerre_support_trendline = optimization_results.get('best_support_trendline')
+            if laguerre_support_trendline:
+                laguerre_support_trendline.trendline_type = 'laguerre_support'
+                self.stored_laguerre_trendlines.append(laguerre_support_trendline)
+                self._apply_laguerre_trendline_to_dataframe(dataframe, laguerre_support_trendline, 'support')
+                
+            print(f"Laguerre Monte Carlo optimization completed for {metadata['pair']}")
+        else:
+            print(f"Laguerre Monte Carlo results not yet available for {metadata['pair']}.")
+
+    def _populate_laguerre_from_existing_trendlines(self, dataframe: DataFrame, metadata: dict) -> bool:
+        """
+        Draw every stored Laguerre trendline during their exact start/end time periods.
+        
+        Args:
+            dataframe: DataFrame to populate with existing Laguerre trendline data
+            metadata: Strategy metadata containing pair information
+            
+        Returns:
+            bool: True if any Laguerre trendlines were drawn, False otherwise
+        """
+        if not self.stored_laguerre_trendlines:
+            return False
+        
+        pair = metadata.get('pair', 'UNKNOWN')
+        print(f"Drawing {len(self.stored_laguerre_trendlines)} stored Laguerre trendlines for {pair}")
+                
+        # Use vectorized operations instead of nested loops
+        for trendline in self.stored_laguerre_trendlines:
+            # Create boolean mask for active timestamps (vectorized)
+            active_mask = dataframe['date'].apply(lambda ts: trendline.is_active_at_time(ts))
+            
+            if not active_mask.any():
+                continue  # Skip if no active timestamps
+
+            if trendline.trendline_type == 'laguerre_resistance':
+                self._apply_laguerre_trendline_to_dataframe(dataframe, trendline, 'resistance')
+            elif trendline.trendline_type == 'laguerre_support':
+                self._apply_laguerre_trendline_to_dataframe(dataframe, trendline, 'support')
+
+        return True
+
+    def _apply_laguerre_trendline_to_dataframe(self, dataframe: DataFrame, trendline: Trendline, trendline_type: str) -> None:
+        """
+        Apply a single Laguerre trendline to the dataframe by calculating its price at each timestamp.
+        
+        Args:
+            dataframe: DataFrame to populate
+            trendline: Trendline object to apply
+            trendline_type: Either 'resistance' or 'support'
+        """
+        # Create boolean mask for active timestamps (vectorized)
+        active_mask = dataframe['date'].apply(lambda ts: trendline.is_active_at_time(ts))
+
+        # Calculate prices for all active timestamps at once (vectorized)
+        active_timestamps = dataframe.loc[active_mask, 'date']
+        prices = active_timestamps.apply(lambda ts: trendline.get_price_at_time(ts, timeframe_to_minutes(self.timeframe)))
+        
+        # Apply to appropriate Laguerre columns using vectorized assignment
+        if trendline_type == 'resistance':
+            dataframe.loc[active_mask, 'Laguerre_Optimal_Resistance'] = prices
+            dataframe.loc[active_mask, 'Laguerre_Resistance_Score'] = float(trendline.bounce_count)
+        elif trendline_type == 'support':
+            dataframe.loc[active_mask, 'Laguerre_Optimal_Support'] = prices
+            dataframe.loc[active_mask, 'Laguerre_Support_Score'] = float(trendline.bounce_count)
