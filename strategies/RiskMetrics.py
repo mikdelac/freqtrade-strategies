@@ -68,66 +68,128 @@ class SignalGenerator:
     
     def generate_entry_signals(self, dataframe: DataFrame) -> DataFrame:
         """
-        Generate entry signals based on Laguerre crossing support from below.
-        Filters signals using Bollinger Bands for confirmation.
-        Enhanced with MFI + Bollinger Bands combined signals.
-        
-        Args:
-            dataframe: DataFrame with OHLCV data and indicators
-            
-        Returns:
-            DataFrame: Updated dataframe with entry signals
+        Entrées longues combinant les tags Bollinger Bands et Laguerre (0-1),
+        avec filtrage optionnel par proximité des trendlines Monte Carlo (chandelles)
+        lorsque enable_rolling_candles_mc_optimization est activé.
         """
         # Initialize entry signals
         dataframe.loc[:, 'enter_long'] = 0
         dataframe.loc[:, 'enter_short'] = 0
         
-        # Check if required columns exist
-        required_columns = ['laguerre', 'Laguerre_Optimal_Support', 'Laguerre_Optimal_Resistance', 
-                          'bb_lowerband', 'bb_middleband', 'bb_upperband', 'bb_percent_b']
+        # Required columns
+        required_columns = ['laguerre', 'bb_low_tag', 'bb_high_tag', 'close']
         if not all(col in dataframe.columns for col in required_columns):
-            print("Missing required columns for Laguerre signal generation")
+            print("Missing required columns for combined BB+Laguerre entry generation")
             return dataframe
         
-        # Create Laguerre crossover conditions (original logic)
-        laguerre_support_crossover = (
-            (dataframe['laguerre'] > dataframe['Laguerre_Optimal_Support']) &  # Current Laguerre above support
-            (dataframe['laguerre'].shift(1) <= dataframe['Laguerre_Optimal_Support'].shift(1)) &  # Previous Laguerre was below support
-            (~dataframe['Laguerre_Optimal_Support'].isna()) &  # Support line exists
-            (~dataframe['Laguerre_Optimal_Support'].shift(1).isna()) &  # Previous support line exists
-            (dataframe['close'] < dataframe['bb_middleband']) &  # Price below BB middle band
-            (dataframe['close'] > dataframe['bb_lowerband'])  # Price above BB lower band
-        )
+        # Named thresholds (avoid magic numbers)
+        lag_low_threshold = 0.20
+        lag_high_threshold = 0.80
+        proximity_threshold = self.strategy._get_trendline_proximity_threshold()
         
-        # Enhanced entry signals with MFI + Bollinger Bands confirmation
-        enhanced_entry_signals = laguerre_support_crossover
+        # Tags from Bollinger Bands
+        bb_low_tag_present = dataframe['bb_low_tag'].notna()
         
-        # Add MFI + BB confirmation if enabled and MFI column exists
-        if (self.strategy.enable_mfi_bb_confirmation.value and 
-            'mfi' in dataframe.columns and 
-            'mfi_bb_buy_signal' in dataframe.columns):
-            
-            # Additional confirmation: MFI + BB combined buy signal
-            mfi_bb_confirmation = (
-                (dataframe['bb_percent_b'] > self.strategy.bb_percent_b_overbought_level.value) &
-                (dataframe['mfi'] > self.strategy.mfi_overbought_level.value)
-            )
-            
-            # Enhanced signals: original Laguerre signals OR MFI+BB confirmation
-            enhanced_entry_signals = laguerre_support_crossover | mfi_bb_confirmation
-            
-            # Count additional signals from MFI+BB
-            mfi_bb_signals = mfi_bb_confirmation.sum()
-            print(f"MFI + Bollinger Bands confirmation signals: {mfi_bb_signals}")
+        # Laguerre conditions (0..1 scale)
+        lag_value = dataframe['laguerre']
+        lag_in_low_zone = lag_value <= lag_low_threshold
+        lag_crossing_up_from_low = (lag_value > lag_low_threshold) & (lag_value.shift(1) <= lag_low_threshold)
+        lag_slope_up = lag_value > lag_value.shift(1)
+        lag_entry_ok = lag_in_low_zone | lag_crossing_up_from_low | lag_slope_up
         
-        # Set entry signals
-        dataframe.loc[enhanced_entry_signals, 'enter_long'] = 1
+        # Optional Monte Carlo proximity to support (price trendlines from candles)
+        enable_mc = getattr(self.strategy.enable_rolling_candles_mc_optimization, 'value', False)
+        near_mc_support = None
+        if enable_mc and 'MC_Optimal_Support' in dataframe.columns:
+            mc_support = dataframe['MC_Optimal_Support']
+            mc_support_valid = mc_support.notna()
+            close_price = dataframe['close']
+            # Distance normalized by price
+            mc_support_distance = (close_price - mc_support).abs() / close_price.replace(0, np.nan)
+            near_mc_support = mc_support_valid & (mc_support_distance <= proximity_threshold)
         
-        # Log entry signal summary
-        long_signals = dataframe['enter_long'].sum()
-        laguerre_signals = laguerre_support_crossover.sum()
-        print(f"Laguerre-based entry signals generated: {laguerre_signals} long")
-        print(f"Total enhanced entry signals: {long_signals} long")
+        # Final entry condition
+        entry_conditions = bb_low_tag_present & lag_entry_ok
+        if enable_mc and near_mc_support is not None:
+            entry_conditions = entry_conditions & near_mc_support
+        
+        # Apply
+        dataframe.loc[entry_conditions, 'enter_long'] = 1
+        
+        # Basic logging
+        print(f"Entry signals (BB low tag & Laguerre) generated: {int(entry_conditions.sum())}")
+        if enable_mc and near_mc_support is not None:
+            print(f"  With MC support proximity filter (@<= {proximity_threshold:.4f}): {int((entry_conditions).sum())}")
+        
+        return dataframe
+    
+    def generate_exit_signals(self, dataframe: DataFrame) -> DataFrame:
+        """
+        Sorties longues combinant les tags Bollinger Bands et Laguerre (0-1),
+        avec sorties supplémentaires sur proximité/rupture de la résistance Monte Carlo
+        lorsque enable_rolling_candles_mc_optimization est activé.
+        """
+        # Initialize exit signals
+        dataframe.loc[:, 'exit_long'] = 0
+        dataframe.loc[:, 'exit_short'] = 0
+        
+        # Required columns
+        required_columns = ['laguerre', 'bb_high_tag', 'bb_low_tag', 'close']
+        if not all(col in dataframe.columns for col in required_columns):
+            print("Missing required columns for combined BB+Laguerre exit generation")
+            return dataframe
+        
+        # Named thresholds (avoid magic numbers)
+        lag_high_threshold = 0.80
+        proximity_threshold = self.strategy._get_trendline_proximity_threshold()
+        resistance_breach_buffer = 0.001  # 0.1% over resistance counts as breach
+        
+        # Tags from Bollinger Bands
+        bb_high_tag_present = dataframe['bb_high_tag'].notna()
+        
+        # Laguerre conditions (0..1 scale)
+        lag_value = dataframe['laguerre']
+        lag_in_high_zone = lag_value >= lag_high_threshold
+        lag_crossing_down_from_high = (lag_value < lag_high_threshold) & (lag_value.shift(1) >= lag_high_threshold)
+        lag_slope_down = lag_value < lag_value.shift(1)
+        lag_exit_ok = lag_in_high_zone | lag_crossing_down_from_high | lag_slope_down
+        
+        # Optional Monte Carlo proximity/breach of resistance (price trendlines from candles)
+        enable_mc = getattr(self.strategy.enable_rolling_candles_mc_optimization, 'value', False)
+        near_mc_resistance = None
+        breach_mc_resistance = None
+        if enable_mc and 'MC_Optimal_Resistance' in dataframe.columns:
+            mc_resistance = dataframe['MC_Optimal_Resistance']
+            mc_resistance_valid = mc_resistance.notna()
+            close_price = dataframe['close']
+            mc_resistance_distance = (close_price - mc_resistance).abs() / close_price.replace(0, np.nan)
+            near_mc_resistance = mc_resistance_valid & (mc_resistance_distance <= proximity_threshold)
+            # Breach: close above resistance by small buffer
+            breach_mc_resistance = mc_resistance_valid & (close_price > mc_resistance * (1.0 + resistance_breach_buffer))
+        
+        # Final exit condition
+        exit_bb_laguerre = bb_high_tag_present & lag_exit_ok
+        exit_mc = False
+        if enable_mc and (near_mc_resistance is not None or breach_mc_resistance is not None):
+            exit_mc_series = None
+            if near_mc_resistance is not None and breach_mc_resistance is not None:
+                exit_mc_series = near_mc_resistance | breach_mc_resistance
+            elif near_mc_resistance is not None:
+                exit_mc_series = near_mc_resistance
+            else:
+                exit_mc_series = breach_mc_resistance
+            exit_mc = exit_mc_series
+        
+        final_exit = exit_bb_laguerre | (exit_mc if isinstance(exit_mc, pd.Series) else False)
+        
+        # Apply
+        dataframe.loc[final_exit, 'exit_long'] = 1
+        
+        # Basic logging
+        print(f"Exit signals (BB high tag & Laguerre) generated: {int(exit_bb_laguerre.sum())}")
+        if enable_mc and isinstance(exit_mc, pd.Series):
+            print(f"  Additional MC exits (near/breach resistance): {int(exit_mc.sum())}")
+            print(f"  Total final exits: {int(final_exit.sum())}")
         
         return dataframe
     
@@ -203,71 +265,6 @@ class SignalGenerator:
         long_entry_filtered = long_entry_conditions
         
         return short_entry_filtered, long_entry_filtered
-    
-    def generate_exit_signals(self, dataframe: DataFrame) -> DataFrame:
-        """
-        Generate exit signals based on Laguerre approaching resistance.
-        Uses Bollinger Bands for additional confirmation.
-        Enhanced with MFI + Bollinger Bands combined signals.
-        
-        Args:
-            dataframe: DataFrame with OHLCV data and indicators
-            
-        Returns:
-            DataFrame: Updated dataframe with exit signals
-        """
-        # Initialize exit signals
-        dataframe.loc[:, 'exit_long'] = 0
-        dataframe.loc[:, 'exit_short'] = 0
-        
-        # Check if required columns exist
-        required_columns = ['laguerre', 'Laguerre_Optimal_Resistance', 'bb_upperband', 'bb_percent_b']
-        if not all(col in dataframe.columns for col in required_columns):
-            print("Missing required columns for Laguerre exit signal generation")
-            return dataframe
-        
-        # Define proximity threshold for Laguerre resistance (within 5 points)
-        laguerre_resistance_proximity = 5.0
-        
-        # Create Laguerre resistance proximity condition with BB confirmation (original logic)
-        near_laguerre_resistance = (
-            (dataframe['Laguerre_Optimal_Resistance'] - dataframe['laguerre'] <= laguerre_resistance_proximity) &
-            (dataframe['laguerre'] < dataframe['Laguerre_Optimal_Resistance']) &  # Laguerre below resistance
-            (~dataframe['Laguerre_Optimal_Resistance'].isna()) &  # Resistance line exists
-            (dataframe['close'] > dataframe['bb_upperband'])  # Price above BB upper band
-        )
-        
-        # Enhanced exit signals with MFI + Bollinger Bands confirmation
-        enhanced_exit_signals = near_laguerre_resistance
-        
-        # Add MFI + BB confirmation if enabled and MFI column exists
-        if (self.strategy.enable_mfi_bb_confirmation.value and 
-            'mfi' in dataframe.columns and 
-            'mfi_bb_sell_signal' in dataframe.columns):
-            
-            # Additional confirmation: MFI + BB combined sell signal
-            mfi_bb_exit_confirmation = (
-                (dataframe['bb_percent_b'] < self.strategy.bb_percent_b_oversold_level.value) &
-                (dataframe['mfi'] < self.strategy.mfi_oversold_level.value)
-            )
-            
-            # Enhanced signals: original Laguerre signals OR MFI+BB exit confirmation
-            enhanced_exit_signals = near_laguerre_resistance | mfi_bb_exit_confirmation
-            
-            # Count additional signals from MFI+BB
-            mfi_bb_exit_signals = mfi_bb_exit_confirmation.sum()
-            print(f"MFI + Bollinger Bands exit signals: {mfi_bb_exit_signals}")
-        
-        # Set exit signals
-        dataframe.loc[enhanced_exit_signals, 'exit_long'] = 1
-        
-        # Log exit signal summary
-        long_exits = dataframe['exit_long'].sum()
-        laguerre_exits = near_laguerre_resistance.sum()
-        print(f"Laguerre-based exit signals generated: {laguerre_exits} long exits")
-        print(f"Total enhanced exit signals: {long_exits} long exits")
-        
-        return dataframe
 
 class RiskMetrics(IStrategy):
     """
@@ -303,7 +300,7 @@ class RiskMetrics(IStrategy):
     INTERFACE_VERSION = 3
 
     # Timeframe settings
-    timeframe = "5m"
+    timeframe = "30m"
     MINUTES_IN_DAY = 24 * 60
     # CANDLES_PER_DAY will be calculated dynamically in __init__ based on actual timeframe
     
@@ -330,7 +327,8 @@ class RiskMetrics(IStrategy):
     mc_lookback_window_candles = IntParameter(1000, 3000, default=2000, space="buy", optimize=False)
     
     # Rolling Monte Carlo optimization (eliminates lookahead bias)
-    enable_rolling_mc_optimization = BooleanParameter(default=True, space="buy", optimize=False)
+    enable_rolling_candles_mc_optimization = BooleanParameter(default=False, space="buy", optimize=False)
+    enable_rolling_laguerre_mc_optimization = BooleanParameter(default=False, space="buy", optimize=False)
 
     # Laguerre parameters
     laguerre_gamma = DecimalParameter(0.1, 0.9, default=0.7, space="buy", optimize=True)
@@ -560,10 +558,10 @@ class RiskMetrics(IStrategy):
         print(f"  Monte Carlo iterations: {self.MC_ITERATIONS}")
         print(f"  Signal generator: Initialized for modular signal generation")
         print(f"  Monte Carlo functions: Using standalone functions from trendline.py")
-        print(f"  Rolling Monte Carlo optimization: {'ENABLED' if self.enable_rolling_mc_optimization.value else 'DISABLED'}")
+        print(f"  Rolling Monte Carlo optimization: {'ENABLED' if self.enable_rolling_candles_mc_optimization.value else 'DISABLED'}")
         print(f"  Laguerre Trendlines: {'ENABLED' if self.enable_laguerre_trendlines.value else 'DISABLED'}")
         print(f"  Swing Point Detector: Initialized for swing point detection")
-        if self.enable_rolling_mc_optimization.value:
+        if self.enable_rolling_candles_mc_optimization.value:
             print(f"    - Eliminates lookahead bias for realistic backtesting")
             print(f"    - Uses {self.mc_lookback_window_candles.value} candle lookback window")
             print(f"    - Recalculates every {self.mc_recalc_interval_minutes.value} minutes")
@@ -1270,7 +1268,7 @@ class RiskMetrics(IStrategy):
             
             # In backtest mode, always run Monte Carlo optimization since we cleared stored trendlines
             # Execute rolling Monte Carlo optimization for backtest
-            if self.enable_rolling_mc_optimization.value:
+            if self.enable_rolling_candles_mc_optimization.value:
                 self._execute_rolling_monte_carlo_optimization(dataframe, metadata)
             else:
                 self._execute_non_rolling_monte_carlo_optimization(dataframe, metadata)
@@ -1299,7 +1297,7 @@ class RiskMetrics(IStrategy):
                 print("=== EXECUTING LAGUERRE TRENDLINES BACKTEST MODE ===")
                 
                 # In backtest mode, always run Laguerre Monte Carlo optimization since we cleared stored Laguerre trendlines
-                if self.enable_rolling_mc_optimization.value:
+                if self.enable_rolling_laguerre_mc_optimization.value:
                     self._execute_rolling_laguerre_monte_carlo_optimization(dataframe, metadata)
                 else:
                     self._execute_non_rolling_laguerre_monte_carlo_optimization(dataframe, metadata)
@@ -1399,31 +1397,6 @@ class RiskMetrics(IStrategy):
             print(f"Last {recent_candles} candles: Outside upper: {recent_outside_upper} | Outside lower: {recent_outside_lower} (Rule 8)")
             if self.enable_mfi_bb_confirmation.value:
                 print(f"Last {recent_candles} candles: MFI+BB Buy signals: {recent_mfi_bb_buy} | MFI+BB Sell signals: {recent_mfi_bb_sell}")
-
-        # === LAGUERRE TRENDLINES PROCESSING ===
-        if self.enable_laguerre_trendlines.value:
-            if not self.laguerre_backtest_executed:
-                # === LAGUERRE BACKTEST MODE: Rolling Monte Carlo ===
-                print("=== EXECUTING LAGUERRE TRENDLINES BACKTEST MODE ===")
-                
-                # In backtest mode, always run Laguerre Monte Carlo optimization since we cleared stored Laguerre trendlines
-                if self.enable_rolling_mc_optimization.value:
-                    self._execute_rolling_laguerre_monte_carlo_optimization(dataframe, metadata)
-                else:
-                    self._execute_non_rolling_laguerre_monte_carlo_optimization(dataframe, metadata)
-
-                # Mark that Laguerre Monte Carlo has been executed
-                self.laguerre_backtest_executed = True
-            else:
-                # === LAGUERRE LIVE TRADING MODE: Heartbeat-based Monte Carlo ===
-                print("=== EXECUTING LAGUERRE TRENDLINES LIVE TRADING MODE ===")
-                
-                self._populate_laguerre_from_existing_trendlines(dataframe, metadata)
-
-                # Check if we need to recalculate Laguerre trendlines based on time interval            
-                if self._should_recalculate_for_heartbeat(latest_candle_time):
-                    print(f"Laguerre recalculation interval reached - executing non-rolling Laguerre Monte Carlo")
-                    self._execute_non_rolling_laguerre_monte_carlo_optimization(dataframe, metadata)
 
         # Print Laguerre trendline information
         if self.enable_laguerre_trendlines.value:
