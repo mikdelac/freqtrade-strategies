@@ -110,6 +110,15 @@ class SignalGenerator:
         
         # Final entry condition
         entry_conditions = bb_low_tag_present & lag_entry_ok
+        # Optional squeeze gate
+        if getattr(self.strategy.require_squeeze_for_entry, 'value', False):
+            if 'bb_squeeze' in dataframe.columns:
+                min_squeeze_len = 3
+                squeeze_active = dataframe['bb_squeeze'].fillna(0) > 0
+                squeeze_last_n = squeeze_active.rolling(window=min_squeeze_len).sum() == min_squeeze_len
+                entry_conditions = entry_conditions & squeeze_last_n.fillna(False)
+            else:
+                print("bb_squeeze column missing while require_squeeze_for_entry is enabled")
         if enable_mc and near_mc_support is not None:
             entry_conditions = entry_conditions & near_mc_support
         
@@ -180,7 +189,16 @@ class SignalGenerator:
                 exit_mc_series = breach_mc_resistance
             exit_mc = exit_mc_series
         
-        final_exit = exit_bb_laguerre | (exit_mc if isinstance(exit_mc, pd.Series) else False)
+        # Movement gate: require sufficient price move from a recent entry anchor (bb_low_tag) to avoid premature exits
+        anchor_window = getattr(self.strategy.exit_anchor_lookback_candles, 'value', 12)
+        anchor_mask = dataframe['bb_low_tag'].notna()
+        recent_anchor = anchor_mask.rolling(window=anchor_window).max().fillna(0).astype(bool)
+        last_anchor_price = dataframe['close'].where(anchor_mask).ffill()
+        pct_move_from_anchor = (dataframe['close'] - last_anchor_price).abs() / last_anchor_price.replace(0, np.nan)
+        min_move_required = getattr(self.strategy.min_exit_move_percent, 'value', 0.005)
+        movement_ok = (~recent_anchor) | (last_anchor_price.isna()) | (pct_move_from_anchor >= min_move_required)
+
+        final_exit = (exit_bb_laguerre | (exit_mc if isinstance(exit_mc, pd.Series) else False)) & movement_ok
         
         # Apply
         dataframe.loc[final_exit, 'exit_long'] = 1
@@ -189,7 +207,7 @@ class SignalGenerator:
         print(f"Exit signals (BB high tag & Laguerre) generated: {int(exit_bb_laguerre.sum())}")
         if enable_mc and isinstance(exit_mc, pd.Series):
             print(f"  Additional MC exits (near/breach resistance): {int(exit_mc.sum())}")
-            print(f"  Total final exits: {int(final_exit.sum())}")
+            print(f"  Total final exits after movement gate (>= {min_move_required:.3%} within {anchor_window} candles): {int(final_exit.sum())}")
         
         return dataframe
     
@@ -349,6 +367,7 @@ class RiskMetrics(IStrategy):
     # Squeeze detection parameters (Rule 19)
     bb_squeeze_lookback = IntParameter(10, 30, default=20, space="buy", optimize=True)
     bb_squeeze_threshold = DecimalParameter(0.7, 0.9, default=0.8, space="buy", optimize=True)
+    require_squeeze_for_entry = BooleanParameter(default=True, space="buy", optimize=False)
 
     # === Money Flow Index (MFI) Parameters ===
     # MFI uses price and volume to identify overbought/oversold conditions
@@ -358,6 +377,10 @@ class RiskMetrics(IStrategy):
     
     # Enable MFI + Bollinger Bands combined signals
     enable_mfi_bb_confirmation = BooleanParameter(default=True, space="buy", optimize=False)
+
+    # Exit gating to avoid exits too close to entry
+    min_exit_move_percent = DecimalParameter(0.001, 0.03, default=0.005, space="sell", optimize=True)
+    exit_anchor_lookback_candles = IntParameter(5, 48, default=12, space="sell", optimize=False)
 
     # Minimal ROI designed for the strategy.
     minimal_roi = {
