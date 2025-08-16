@@ -222,6 +222,89 @@ class GARCHModel():
         # Return the square root of the final variance (volatility/standard deviation)
         return np.sqrt(self.variance)
 
+def garch_bbands(
+    close: pd.Series,
+    window: int = 20,
+    k: float = 2.0,
+    model: Optional[GARCHModel] = None,
+    multiplicative: bool = True,
+    use_ngarch: bool = False,
+) -> pd.DataFrame:
+    """
+    Compute forward-looking Bollinger Bands using one-step-ahead GARCH volatility forecasts.
+
+    This replaces the rolling standard deviation in traditional Bollinger Bands with the
+    conditional standard deviation forecast from a GARCH model.
+
+    Two formulations are supported:
+      - multiplicative=True (preferred, lognormal):
+          upper = SMA * exp(k * sigma_{t+1})
+          lower = SMA * exp(-k * sigma_{t+1})
+      - multiplicative=False (additive approximation):
+          upper = SMA + k * sigma_{t+1} * SMA
+          lower = SMA - k * sigma_{t+1} * SMA
+
+    Args:
+        close: Price close series indexed by time.
+        window: Moving average window for the Bollinger midline.
+        k: Band width multiplier (analogous to standard deviations).
+        model: Optional pre-configured GARCHModel. If None, a default GARCHModel is created.
+        multiplicative: Use the lognormal (multiplicative) bands if True, else additive approximation.
+        use_ngarch: If True, uses the NGARCH update with leverage (theta) from the provided model.
+
+    Returns:
+        pd.DataFrame with columns: 'bb_mid_garch', 'bb_upper_garch', 'bb_lower_garch', 'garch_sigma_forecast'.
+    """
+    assert isinstance(close, pd.Series), "close must be a pandas Series"
+    assert window > 0, "window must be positive"
+    assert k >= 0, "k must be non-negative"
+
+    if model is None:
+        model = GARCHModel()
+
+    # Prepare log prices and returns (length N-1)
+    log_prices = np.log(close.astype(float))
+    log_returns = np.diff(log_prices.to_numpy())
+
+    # Initialize forecasts aligned to price index; first value has no forecast
+    n = len(close)
+    sigma_forecast = np.full(n, np.nan)
+
+    # Reset to unconditional variance before forecasting
+    model.reset_variance()
+
+    # Iterate returns: r[i] produces variance forecast for time index i+1
+    for i in range(len(log_returns)):
+        r_t = log_returns[i]
+        if not np.isfinite(r_t):
+            continue
+        if use_ngarch:
+            sigma_sq_t1 = model.update_conditional_variance_ngarch(r_t)
+        else:
+            sigma_sq_t1 = model.update_conditional_variance(r_t)
+        sigma_forecast[i + 1] = np.sqrt(sigma_sq_t1)
+
+    # Midline via simple moving average over price (classic BB mid)
+    middle_band = close.rolling(window=window, min_periods=window).mean()
+
+    if multiplicative:
+        upper_band = middle_band * np.exp(k * sigma_forecast)
+        lower_band = middle_band * np.exp(-k * sigma_forecast)
+    else:
+        # Small-sigma additive approximation
+        upper_band = middle_band + (k * sigma_forecast * middle_band)
+        lower_band = middle_band - (k * sigma_forecast * middle_band)
+
+    return pd.DataFrame(
+        {
+            'bb_mid_garch': middle_band,
+            'bb_upper_garch': upper_band,
+            'bb_lower_garch': lower_band,
+            'garch_sigma_forecast': sigma_forecast,
+        },
+        index=close.index,
+    )
+
 def run_garch_examples() -> None:
     """
     Run GARCH examples and risk calculations for demonstration purposes.

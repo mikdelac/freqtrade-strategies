@@ -264,51 +264,85 @@ def gentrends(dataframe, field="close", window=1 / 3.0, charts=False):
     import pandas as pd
 
     # Use high values for resistance (Max Line)
-    x_high = np.array(dataframe["high"])
+    x_high = np.array(dataframe["high"]) if "high" in dataframe.columns else np.array(dataframe[field])
     # Use low values for support (Min Line)
-    x_low = np.array(dataframe["low"])
+    x_low = np.array(dataframe["low"]) if "low" in dataframe.columns else np.array(dataframe[field])
     # Use the specified field for Data
     x_data = np.array(dataframe[field])
 
+    n = len(x_data)
+    if n < 3:
+        # Not enough data; return flat lines with zero slopes
+        trends = pd.DataFrame(
+            np.transpose(np.array((x_data, x_data.copy(), x_data.copy()))),
+            index=np.arange(0, n),
+            columns=["Data", "Max Line", "Min Line"],
+        )
+        trends['Max Slope'] = 0.0
+        trends['Min Slope'] = 0.0
+        return trends
+
+    # Resolve window length
     if window < 1:
-        window = int(window * len(x_data))
-
-    # Find max and min points using high and low data respectively
-    max1 = np.where(x_high == max(x_high))[0][0]  # find the index of the abs max in high
-    min1 = np.where(x_low == min(x_low))[0][0]  # find the index of the abs min in low
-
-    # First the max
-    if max1 + window >= len(x_high):
-        max2 = max(x_high[0 : (max1 - window)])
+        window = int(max(1, round(window * n)))
     else:
-        max2 = max(x_high[(max1 + window) :])
+        window = int(window)
+    window = max(1, min(window, n - 1))
 
-    # Now the min
-    if min1 - window <= 0:
-        min2 = min(x_low[(min1 + window) :])
-    else:
-        min2 = min(x_low[0 : (min1 - window)])
+    # Find primary extrema indices
+    max1 = int(np.argmax(x_high))
+    min1 = int(np.argmin(x_low))
 
-    # Now find the indices of the secondary extrema
-    max2 = np.where(x_high == max2)[0][0]  # find the index of the 2nd max
-    min2 = np.where(x_low == min2)[0][0]  # find the index of the 2nd min
+    # Build exclusion masks around primary extrema
+    def second_extreme_index(arr, primary_idx, is_max=True):
+        left_end = max(0, primary_idx - window)
+        right_start = min(n, primary_idx + window + 1)
+        mask = np.ones(n, dtype=bool)
+        mask[left_end:right_start] = False
+        if not mask.any():
+            # Fallback to nearest neighbor to avoid zero denominator
+            if primary_idx > 0:
+                return primary_idx - 1
+            elif primary_idx < n - 1:
+                return primary_idx + 1
+            else:
+                return primary_idx
+        candidates = arr[mask]
+        idxs = np.nonzero(mask)[0]
+        if len(candidates) == 0:
+            # Final fallback - choose far end
+            return 0 if primary_idx != 0 else n - 1
+        if is_max:
+            sel_local = np.argmax(candidates)
+        else:
+            sel_local = np.argmin(candidates)
+        return int(idxs[sel_local])
+
+    max2_idx = second_extreme_index(x_high, max1, is_max=True)
+    min2_idx = second_extreme_index(x_low, min1, is_max=False)
 
     # Create & extend the lines
-    maxslope = (x_high[max1] - x_high[max2]) / (max1 - max2)  # slope between max points
-    minslope = (x_low[min1] - x_low[min2]) / (min1 - min2)  # slope between min points
+    def safe_slope(v1, v2, i1, i2):
+        denom = (i1 - i2)
+        if denom == 0:
+            return 0.0
+        return (v1 - v2) / denom
+
+    maxslope = safe_slope(x_high[max1], x_high[max2_idx], max1, max2_idx)
+    minslope = safe_slope(x_low[min1], x_low[min2_idx], min1, min2_idx)
     a_max = x_high[max1] - (maxslope * max1)  # y-intercept for max trendline
     a_min = x_low[min1] - (minslope * min1)  # y-intercept for min trendline
-    b_max = x_high[max1] + (maxslope * (len(x_high) - max1))  # extend to last data pt
-    b_min = x_low[min1] + (minslope * (len(x_low) - min1))  # extend to last data point
-    maxline = np.linspace(a_max, b_max, len(x_data))  # Y values between max's
-    minline = np.linspace(a_min, b_min, len(x_data))  # Y values between min's
+    b_max = x_high[max1] + (maxslope * (n - max1))  # extend to last data pt
+    b_min = x_low[min1] + (minslope * (n - min1))  # extend to last data point
+    maxline = np.linspace(a_max, b_max, n)  # Y values between max's
+    minline = np.linspace(a_min, b_min, n)  # Y values between min's
 
     # OUTPUT
     trends = np.transpose(np.array((x_data, maxline, minline)))
     trends = pd.DataFrame(
-        trends, index=np.arange(0, len(x_data)), columns=["Data", "Max Line", "Min Line"]
+        trends, index=np.arange(0, n), columns=["Data", "Max Line", "Min Line"]
     )
-    
+
     # Add slope information to the DataFrame
     trends['Max Slope'] = maxslope
     trends['Min Slope'] = minslope
@@ -920,55 +954,54 @@ def evaluate_lookback_period_for_trendlines(dataframe: pd.DataFrame, random_peri
                               recalc_interval_minutes: int, trendline_proximity_threshold: float) -> Tuple[List[Trendline], float, float]:
     """
     Evaluate a single lookback period and return trendline objects and scores.
-    
-    Args:
-        dataframe: Full price dataframe
-        random_period: Lookback period to test
-        recalc_interval_minutes: Recalculation interval in minutes
-        trendline_proximity_threshold: Threshold for trendline proximity scoring
-        
-    Returns:
-        Tuple of (trendline_objects, resistance_score, support_score)
     """
+    if dataframe is None or len(dataframe) < max(10, random_period):
+        return [], 0.0, 0.0
+    if random_period is None or random_period < 5:
+        return [], 0.0, 0.0
     # Test this period
     recent_data = dataframe.tail(random_period).copy()
-    
+    if len(recent_data) < 5:
+        return [], 0.0, 0.0
     # Generate trends for this period directly
     trends = gentrends(recent_data, field='close', window=1/3.0)
-    
     # Extract slopes from the trends dataframe
     resistance_slope = trends['Max Slope'].iloc[-1] if 'Max Slope' in trends.columns else 0.0
     support_slope = trends['Min Slope'].iloc[-1] if 'Min Slope' in trends.columns else 0.0
-    
     # Set start_time as the last candle in the lookback period (when the trendline becomes active)
-    start_time = recent_data['date'].iloc[-1]  # Last candle in the lookback period
-    # Set end_time as start_time plus the Monte Carlo recalculation interval
+    start_time = recent_data['date'].iloc[-1]
     min_duration_minutes = recalc_interval_minutes
-    end_time = start_time + pd.Timedelta(minutes=min_duration_minutes)
-    
-    # Create trendline objects individually
+    end_time = start_time + pd.Timedelta(minutes=max(1, min_duration_minutes))
     trendline_objects = []
-    
-    # Create resistance trendline
-    resistance_trendline = create_trendline_object(
-        recent_data, trends, 'resistance', resistance_slope, start_time, end_time, trendline_proximity_threshold
-    )
-    if resistance_trendline:
+    if 'Max Line' in trends.columns and not trends['Max Line'].isna().all():
+        resistance_r_squared = calculate_r_squared(price_series=recent_data['high'], trendline_series=trends['Max Line'])
+        resistance_trendline = Trendline(
+            trendline_type='resistance',
+            start_time=start_time,
+            end_time=end_time,
+            slope=float(resistance_slope),
+            start_price=float(trends['Max Line'].iloc[-1]),
+            r_squared=float(resistance_r_squared),
+            bounce_count=0,
+            category=TrendlineCategory.MINOR_INTERNAL
+        )
         trendline_objects.append(resistance_trendline)
-    
-    # Create support trendline
-    support_trendline = create_trendline_object(
-        recent_data, trends, 'support', support_slope, start_time, end_time, trendline_proximity_threshold
-    )
-    if support_trendline:
+    if 'Min Line' in trends.columns and not trends['Min Line'].isna().all():
+        support_r_squared = calculate_r_squared(price_series=recent_data['low'], trendline_series=trends['Min Line'])
+        support_trendline = Trendline(
+            trendline_type='support',
+            start_time=start_time,
+            end_time=end_time,
+            slope=float(support_slope),
+            start_price=float(trends['Min Line'].iloc[-1]),
+            r_squared=float(support_r_squared),
+            bounce_count=0,
+            category=TrendlineCategory.MINOR_INTERNAL
+        )
         trendline_objects.append(support_trendline)
-    
-    # Calculate scores using rank_trendlines
     main_lines_score = rank_trendlines(trends, trendline_objects, original_data=recent_data)
-    
     current_resistance_score = main_lines_score["ranked_maxlines"].get("Max Line", 0)
     current_support_score = main_lines_score["ranked_minlines"].get("Min Line", 0)
-    
     return trendline_objects, current_resistance_score, current_support_score
 
 
@@ -977,68 +1010,46 @@ def monte_carlo_period_optimization(dataframe: pd.DataFrame, pair: str = "UNKNOW
                                    trendline_proximity_threshold: float = 0.00005):
     """
     Perform Monte Carlo period optimization for trendline analysis.
-    
-    Args:
-        dataframe: Full price dataframe
-        pair: Trading pair name for logging
-        recalc_interval_minutes: Recalculation interval in minutes
-        mc_iterations: Number of Monte Carlo iterations to run
-        trendline_proximity_threshold: Threshold for trendline proximity scoring
-        
-    Returns:
-        Dictionary containing optimization results
     """
-    # Set MAX_LOOKBACK_PERIOD dynamically based on available data
     total_candles = len(dataframe)
-            
-    # Seed random number generator for reproducible results with some variability
-    random.seed(int(time.time() * 1000) % 10000)  # Use current time for seed
-    
-    print(f"=== Monte Carlo Period Optimization with Core Periods for {pair} ===")
-    
-    # Generate lookback periods
+    if total_candles < 20:
+        return {
+            'resistance_score': 0.0,
+            'support_score': 0.0,
+            'best_resistance_trendline': None,
+            'best_support_trendline': None
+        }
+    random.seed(int(time.time() * 1000) % 10000)
     lookback_periods = generate_lookback_periods(total_candles, mc_iterations)
-
-    # Initialize best scores and trendlines
-    best_resistance_score = 0.0
-    best_support_score = 0.0
-    best_resistance_period = 0
-    best_support_period = 0
+    # Filter invalid/small periods
+    lookback_periods = [p for p in lookback_periods if isinstance(p, int) and 5 <= p < total_candles]
+    if not lookback_periods:
+        return {
+            'resistance_score': 0.0,
+            'support_score': 0.0,
+            'best_resistance_trendline': None,
+            'best_support_trendline': None
+        }
+    best_resistance_score = float('-inf')
+    best_support_score = float('-inf')
     best_resistance_trendline = None
     best_support_trendline = None
-    
     for iteration, random_period in enumerate(lookback_periods):
         try:
-            # Evaluate this period
             trendline_objects, current_resistance_score, current_support_score = evaluate_lookback_period_for_trendlines(
                 dataframe, random_period, recalc_interval_minutes, trendline_proximity_threshold
             )
-            
-            # Update best trendlines if current scores are better
-            if current_resistance_score > best_resistance_score:
+            if current_resistance_score >= best_resistance_score:
                 best_resistance_score = current_resistance_score
-                best_resistance_period = random_period
                 best_resistance_trendline = next((obj for obj in trendline_objects if obj.trendline_type == 'resistance'), None)
-                print(f"New best resistance found for {pair} at iteration {iteration + 1}: period {random_period}, score {current_resistance_score:.4f}, bounces {best_resistance_trendline.bounce_count if best_resistance_trendline else 'N/A'}")
-            
-            if current_support_score > best_support_score:
+            if current_support_score >= best_support_score:
                 best_support_score = current_support_score
-                best_support_period = random_period
                 best_support_trendline = next((obj for obj in trendline_objects if obj.trendline_type == 'support'), None)
-                print(f"New best support found for {pair} at iteration {iteration + 1}: period {random_period}, score {current_support_score:.4f}, bounces {best_support_trendline.bounce_count if best_support_trendline else 'N/A'}")
-            
-            # Progress reporting with more details
-            if (iteration + 1) % 100 == 0:
-                print(f"Monte Carlo progress for {pair}: {iteration + 1}/{len(lookback_periods)} completed")
-                print(f"Current best - Resistance: {best_resistance_score:.4f} (period {best_resistance_period}), Support: {best_support_score:.4f} (period {best_support_period})")
-            
-        except Exception as e:
-            print(f"Error in Monte Carlo iteration {iteration} for {pair}: {e}")
+        except Exception:
             continue
-            
     return {
-        'resistance_score': best_resistance_score,
-        'support_score': best_support_score,
+        'resistance_score': best_resistance_score if best_resistance_score != float('-inf') else 0.0,
+        'support_score': best_support_score if best_support_score != float('-inf') else 0.0,
         'best_resistance_trendline': best_resistance_trendline,
         'best_support_trendline': best_support_trendline
     }
